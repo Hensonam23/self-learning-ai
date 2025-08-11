@@ -2,10 +2,13 @@ import random
 import numpy as np
 import http.server
 import socketserver
+import pygame
+from pygame.locals import *
+import os
 
 # Machine Spirit parameters
 TARGET_PHRASE = "for the emperor"
-GENOME_LENGTH = 13  # Matches length of "for the emperor"
+GENOME_LENGTH = 15  # Matches length of "for the emperor"
 POPULATION_SIZE = 20
 GENERATIONS = 50
 MUTATION_RATE = 0.2
@@ -32,6 +35,30 @@ def crossover(parent1, parent2):
     point = random.randint(1, GENOME_LENGTH - 1)
     return parent1[:point] + parent2[point:]
 
+# Display evolving "face" on touchscreen
+def display_face(best_genome):
+    os.putenv('SDL_VIDEODRIVER', 'fbcon')  # Use framebuffer for touchscreen
+    os.putenv('SDL_FBDEV', '/dev/fb0')    # Default framebuffer device
+    pygame.init()
+    screen = pygame.display.set_mode((800, 480))  # Adjust to your touchscreen resolution (e.g., 800x480 for 7" display)
+    pygame.display.set_caption("Machine Spirit Face")
+    clock = pygame.time.Clock()
+    
+    font = pygame.font.SysFont('Arial', 40)
+    running = True
+    while running:
+        for event in pygame.event.get():
+            if event.type == QUIT:
+                running = False
+        
+        screen.fill((0, 0, 0))  # Black background
+        text = font.render(best_genome, True, (255, 255, 255))  # White text for current best phrase
+        screen.blit(text, (100, 200))  # Center it
+        pygame.display.flip()
+        clock.tick(30)  # 30 FPS
+    
+    pygame.quit()
+
 # Initialize population
 population = [create_genome() for _ in range(POPULATION_SIZE)]
 best_genome = ""
@@ -54,6 +81,9 @@ for gen in range(GENERATIONS):
         print(f"Generation {gen}: Best invocation {best}, fitness: {fitness(best):.3f}")
 
 print(f"Machine Spirit's final invocation: {best_genome}, fitness: {fitness(best_genome):.3f}")
+
+# Display on touchscreen
+display_face(best_genome)
 
 # Simple HTTP server for Machine Spirit (port 8089, host 0.0.0.0)
 PORT = 8089
