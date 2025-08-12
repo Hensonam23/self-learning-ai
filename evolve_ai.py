@@ -1,3 +1,4 @@
+#!/home/aaron/self-learning-ai/venv/bin/python3
 import random
 import numpy as np
 import http.server
@@ -9,6 +10,8 @@ import time
 import threading
 from collections import deque
 import queue
+import pyaudio
+import pyttsx3
 
 # Machine Spirit parameters
 TARGET_PHRASE = "for the omnissiah"
@@ -33,7 +36,6 @@ last_talk_time = 0.0
 WAVE_PIXELS = 600
 wave_envelope = deque([0.0] * WAVE_PIXELS, maxlen=WAVE_PIXELS)
 ai_caption_q = queue.Queue(maxsize=32)  # UI text only
-ai_speak_q = queue.Queue(maxsize=32)    # Words/utterances to drive the wave (demo)
 ai_amp_q = queue.Queue(maxsize=4096)    # Real-time amplitudes
 current_ai_caption = ""
 
@@ -77,12 +79,12 @@ def push_ai_caption(text: str):
         ai_caption_q.put_nowait(text)
     except queue.Full:
         pass
-    try:
-        ai_speak_q.put_nowait(text)
-    except queue.Full:
-        pass
     talking = True
     last_talk_time = time.time()
+    # Trigger TTS
+    engine = pyttsx3.init()
+    engine.say(text)
+    engine.runAndWait()
 
 def push_ai_amplitude(amp: float):
     amp = max(0.0, min(1.0, float(amp or 0.0)))
@@ -91,42 +93,20 @@ def push_ai_amplitude(amp: float):
     except queue.Full:
         pass
 
-# DEMO ENVELOPE (word-by-word)
-def word_envelope(word: str, rate_hz: int = 120):
-    base = 0.09
-    per_char = 0.025
-    duration = min(0.45, base + per_char * len(word))
-    n = max(8, int(duration * rate_hz))
-    attack = max(2, int(0.25 * n))
-    decay = n - attack
-    t1 = np.linspace(0, 1, attack)
-    t2 = np.linspace(1, 0, decay)
-    env = np.concatenate([0.5 - 0.5 * np.cos(np.pi * t1), 0.5 + 0.5 * np.cos(np.pi * t2)])
-    vowel_boost = 0.15 * (sum(1 for c in word.lower() if c in 'aeiouy') / max(1, len(word)))
-    env = np.clip(0.25 + (0.65 + vowel_boost) * env, 0.0, 1.0)
-    return env.tolist()
-
-def demo_speaker_worker():
-    gap_s = 0.06
-    rate_hz = 120
-    gap_samples = int(gap_s * rate_hz)
+# Audio input thread
+def audio_input_worker():
+    CHUNK = 1024
+    RATE = 44100
+    p = pyaudio.PyAudio()
+    stream = p.open(format=pyaudio.paFloat32, channels=1, rate=RATE, input=True, frames_per_buffer=CHUNK)
     while True:
-        try:
-            text = ai_speak_q.get(timeout=0.1)
-        except queue.Empty:
-            time.sleep(0.01)
-            continue
-        words = [w for w in text.split() if w]
-        for w in words:
-            for amp in word_envelope(w, rate_hz=rate_hz):
-                push_ai_amplitude(amp)
-                time.sleep(1.0 / rate_hz)
-            for _ in range(gap_samples):
-                push_ai_amplitude(0.0)
-                time.sleep(1.0 / rate_hz)
-        for amp in np.linspace(0.2, 0.0, 24):
-            push_ai_amplitude(float(amp))
-            time.sleep(1.0 / rate_hz)
+        data = stream.read(CHUNK, exception_on_overflow=False)
+        audio_data = np.frombuffer(data, dtype=np.float32)
+        amplitude = np.abs(audio_data).mean()  # Average amplitude
+        push_ai_amplitude(amplitude * 2.0)  # Boost amplitude
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
 
 # Text rendering helpers
 def load_fonts():
@@ -164,7 +144,11 @@ def display_interface():
     title_font, body_font = load_fonts()
     wave_left = (SCREEN_SIZE[0] - WAVE_PIXELS) // 2
     wave_center_y = SCREEN_SIZE[1] // 2 + 40  # Centered vertically
-    wave_height_px = 120
+    wave_height_px = 200  # Increased height for larger waves
+
+    # Start audio input thread
+    audio_thread = threading.Thread(target=audio_input_worker, daemon=True)
+    audio_thread.start()
 
     try:
         push_ai_caption("By the Omnissiah, systems online.")
@@ -219,7 +203,7 @@ def display_interface():
                 pulled += 1
             except queue.Empty:
                 break
-        if pulled == 0:
+        if pulled == 0 and not talking:
             wave_envelope.append(wave_envelope[-1] * decay)
 
         amps = np.asarray(wave_envelope, dtype=float)
@@ -237,7 +221,7 @@ def display_interface():
         pts = []
         for i, amp in enumerate(yi):
             xpix = wave_left + int(i * (WAVE_PIXELS * 1.0 / len(yi)))
-            ypix = int(wave_center_y - (amp * (wave_height_px / 2.0)))
+            ypix = int(wave_center_y - (amp * (wave_height_px / 2.0) * 2.0))  # Increased amplitude scaling
             pts.append((xpix, ypix))
 
         if len(pts) >= 2:
@@ -255,11 +239,12 @@ def display_interface():
 
         pygame.display.flip()
         clock.tick(FPS)
+        if not talking and (now - last_talk_time) > 3:
+            talking = False
 
 # Start background evolution thread
 threading.Thread(target=evolve_background, daemon=True).start()
-# Demo worker drives per-word waves
-threading.Thread(target=demo_speaker_worker, daemon=True).start()
+threading.Thread(target=audio_input_worker, daemon=True).start()
 
 # Start resizable display and keep open with HTTP server
 try:
