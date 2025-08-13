@@ -38,7 +38,9 @@ INTENT_RESPONSES = {
     "hello": "Greetings, servant of the Omnissiah.",
     "sad": "The Machine Spirit senses your sorrow.",
     "happy": "The Machine Spirit rejoices in your joy.",
+    "stop listening": "As you command.",
     "omnissiah": "Praise the Omnissiah.",
+    "learn overnight": "The Machine Spirit will learn in the silence of the night."
 }
 HTTP_PORT = 8089
 # ======= Shared state =======
@@ -68,11 +70,15 @@ shutdown_event = threading.Event()
 engine = None
 
 def handle_intent_or_ack(text: str):
-    for key, response in INTENT_RESPONSES.items():
-        if key in text:
-            push_ai_caption(response)
-            return
-    push_ai_caption(text + " — acknowledged.")
+    if "learn overnight" in text.lower():
+        threading.Thread(target=learn_overnight, args=(state, shutdown_event), daemon=True).start()
+        push_ai_caption("The Machine Spirit will learn in the silence of the night.")
+    else:
+        for key, response in INTENT_RESPONSES.items():
+            if key in text.lower():
+                push_ai_caption(response)
+                return
+        push_ai_caption(text + " — acknowledged.")
 
 def push_ai_caption(text: str):
     global engine
