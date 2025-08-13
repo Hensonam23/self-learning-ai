@@ -1,0 +1,141 @@
+#!/home/aaron/self-learning-ai/venv/bin/python3
+# -*- coding: utf-8 -*-
+import os
+import time
+import threading
+import queue
+import signal
+import pyttsx3
+from audio.audio_processing import audio_input_worker
+from display.display_manager import init_vu, plan_text_envelope, tts_vu_worker, display_interface
+from self_evolving_ai.evolution import evolve_background
+from network.network_server import start_server
+
+# ======= Config =======
+SCREEN_SIZE = (800, 480)
+BACKGROUND_PATH = "/home/aaron/self-learning-ai/background.png"
+FPS = 60
+FONT_PATH = None
+TITLE_SIZE = 28
+BODY_SIZE = 22
+COLOR_WHITE = (255, 255, 255)
+COLOR_SHADOW = (0, 0, 0)
+COLOR_GREEN = (0, 255, 0)
+# Wave visuals
+WAVE_PIXELS = 320
+WAVE_VISUAL_SCALE = 0.32
+MAX_WAVE_DRAW_PX = 18
+SCROLL_SPEED_BASE = 110
+CYCLES1_RANGE = (2.0, 4.5)
+CYCLES2_RANGE = (5.5, 10.5)
+# Audio/STT
+MIC_PREFERRED_NAME = "Anker PowerConf S330"
+LANGUAGE = "en-US"
+VOSK_MODEL_PATH = "/home/aaron/self-learning-ai/vosk-model-small-en-us-0.15"
+DEBUG_AUDIO = False
+# Intents
+INTENT_RESPONSES = {
+    "hello": "Greetings, servant of the Omnissiah.",
+    "sad": "The Machine Spirit senses your sorrow.",
+    "happy": "The Machine Spirit rejoices in your joy.",
+    "omnissiah": "Praise the Omnissiah.",
+}
+HTTP_PORT = 8089
+# ======= Shared state =======
+class AIState:
+    def __init__(self, target_phrase="for the omnissiah"):
+        self.lock = threading.Lock()
+        self.max_len = len(target_phrase)
+        self.target_phrase = target_phrase
+        self.best_genome = ""
+    def get_status(self):
+        with self.lock:
+            return self.best_genome, self.target_phrase
+    def get_target(self):
+        with self.lock:
+            return self.target_phrase
+    def set_best(self, g):
+        with self.lock:
+            self.best_genome = g
+    def append_to_target(self, text):
+        with self.lock:
+            s = (self.target_phrase + " " + text.lower())
+            self.target_phrase = s[-self.max_len:]
+state = AIState()
+ai_caption_q = queue.Queue(maxsize=32)
+talking_event = threading.Event()
+shutdown_event = threading.Event()
+engine = None
+
+def handle_intent_or_ack(text: str):
+    for key, response in INTENT_RESPONSES.items():
+        if key in text:
+            push_ai_caption(response)
+            return
+    push_ai_caption(text + " — acknowledged.")
+
+def push_ai_caption(text: str):
+    global engine
+    try:
+        ai_caption_q.put_nowait(text)
+    except queue.Full:
+        pass
+    state.append_to_target(text)
+    plan_text_envelope(text)
+    try:
+        if engine is None:
+            engine = pyttsx3.init()
+            def on_end(name, completed):
+                talking_event.clear()
+            engine.connect('finished-utterance', on_end)
+        talking_event.set()
+        engine.say(text)
+        engine.runAndWait()
+    except Exception as e:
+        print(f"TTS error: {e}")
+        talking_event.clear()
+
+def _handle_signal(sig, frame):
+    print("\nShutting down… (signal received)")
+    shutdown_event.set()
+    try:
+        if engine:
+            engine.stop()
+    except Exception:
+        pass
+
+def main():
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+    init_vu(dict(
+        SCREEN_SIZE=SCREEN_SIZE, BACKGROUND_PATH=BACKGROUND_PATH, FPS=FPS,
+        FONT_PATH=FONT_PATH, TITLE_SIZE=TITLE_SIZE, BODY_SIZE=BODY_SIZE,
+        COLOR_WHITE=COLOR_WHITE, COLOR_SHADOW=COLOR_SHADOW, COLOR_GREEN=COLOR_GREEN,
+        WAVE_PIXELS=WAVE_PIXELS, WAVE_VISUAL_SCALE=WAVE_VISUAL_SCALE,
+        MAX_WAVE_DRAW_PX=MAX_WAVE_DRAW_PX, SCROLL_SPEED_BASE=SCROLL_SPEED_BASE,
+        CYCLES1_RANGE=CYCLES1_RANGE, CYCLES2_RANGE=CYCLES2_RANGE
+    ))
+    threads = [
+        threading.Thread(target=display_interface, args=(state, ai_caption_q, talking_event, shutdown_event, push_ai_caption), daemon=True),
+        threading.Thread(target=tts_vu_worker, args=(talking_event, shutdown_event), daemon=True),
+        threading.Thread(target=evolve_background, args=(state, shutdown_event), daemon=True),
+        threading.Thread(target=audio_input_worker, args=(handle_intent_or_ack, talking_event, shutdown_event, MIC_PREFERRED_NAME, LANGUAGE, VOSK_MODEL_PATH, DEBUG_AUDIO), daemon=True),
+        threading.Thread(target=start_server, args=(push_ai_caption, HTTP_PORT, shutdown_event), daemon=True)
+    ]
+    for t in threads:
+        t.start()
+    try:
+        while not shutdown_event.is_set():
+            time.sleep(1)  # Keep main thread alive
+    except KeyboardInterrupt:
+        shutdown_event.set()
+    finally:
+        try:
+            if engine:
+                engine.stop()
+        except Exception:
+            pass
+        print("Goodbye.")
+
+if __name__ == "__main__":
+    main()
