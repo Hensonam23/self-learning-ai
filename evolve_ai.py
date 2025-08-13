@@ -17,19 +17,19 @@ import shutil  # which('flac')
 import re
 
 # =================== Config ===================
-TARGET_PHRASE = "for the omnissiah"
+TARGET_PHRASE = "for the omnissiah"  # Initial target; will update dynamically
 GENOME_LENGTH = len(TARGET_PHRASE)
 POPULATION_SIZE = 100
-MUTATION_RATE = 0.05
+MUTATION_RATE = 0.1  # Increased for faster adaptation
 SCREEN_SIZE = (800, 480)
 BACKGROUND_PATH = "/home/aaron/self-learning-ai/background.png"
 FPS = 60
 FONT_PATH = None
-TITLE_SIZE = 36
-BODY_SIZE = 28
+TITLE_SIZE = 20  # Reduced for better fit
+BODY_SIZE = 18   # Reduced for better fit
 COLOR_WHITE = (255, 255, 255)
 COLOR_SHADOW = (0, 0, 0)
-COLOR_GREEN = (0, 255, 0)
+COLOR_GREEN = (0, 255, 0)  # AI voice waveform
 # Debug logging
 DEBUG = False  # flip True to see mic-level logs again
 # ===== Waveform visuals (shorter line, smaller waves, full-width animation) =====
@@ -54,6 +54,7 @@ INTENT_RESPONSES = {
 }
 LOG_FILE = "/home/aaron/self-learning-ai/interactions.log"
 MAX_LOG_ENTRIES = 10  # Limit log to last 10 interactions
+MAX_DISPLAY_LINES = 3  # Limit to last 3 lines of text
 
 # =================== Globals ===================
 best_genome = ""
@@ -65,19 +66,17 @@ ai_caption_q = queue.Queue(maxsize=32)
 current_ai_caption = ""
 engine = None  # pyttsx3 engine
 # ===== AI VU State (drives the wave) =====
-# These are updated by tts_vu_worker and read by the display thread.
 vu_amp = 0.0  # 0..1 overall amplitude
 vu_cycles1 = 3.0  # large undulation count across the line
 vu_cycles2 = 7.0  # fine ripple
 vu_scroll_px_s = SCROLL_SPEED_BASE  # scroll speed
 vu_noise = 0.0  # small jitter
 # A queue of “segments” planned from the spoken text; tts_vu_worker consumes this.
-# Each item: dict(duration_s, target_amp, texture (0..1), pause(bool))
 vu_plan = queue.Queue(maxsize=256)
 
 # =================== Evolution ===================
 def create_genome():
-    return ''.join(random.choices('abcdefghijklmnopqrstuvwxyz ', k=GENOME_LENGTH))
+    return ''.join(random.choices('abcdefghijklmnopqrstuvwxyz .,!', k=GENOME_LENGTH))  # Added punctuation
 
 def fitness(genome):
     return sum(a == b for a, b in zip(genome, TARGET_PHRASE)) / GENOME_LENGTH
@@ -86,7 +85,7 @@ def mutate(genome):
     genome_list = list(genome)
     for i in range(len(genome_list)):
         if random.random() < MUTATION_RATE:
-            genome_list[i] = random.choice('abcdefghijklmnopqrstuvwxyz ')
+            genome_list[i] = random.choice('abcdefghijklmnopqrstuvwxyz .,!')  # Added punctuation
     return ''.join(genome_list)
 
 def crossover(parent1, parent2):
@@ -96,7 +95,7 @@ def crossover(parent1, parent2):
     return parent1[:point] + parent2[point:]
 
 def evolve_background():
-    global best_genome
+    global best_genome, TARGET_PHRASE, GENOME_LENGTH
     population = [create_genome() for _ in range(POPULATION_SIZE)]
     best_genome = population[0]
     while True:
@@ -108,22 +107,28 @@ def evolve_background():
         while len(offspring) < POPULATION_SIZE - len(survivors):
             offspring.append(mutate(crossover(*random.sample(survivors, 2))))
         population = survivors + offspring
-        time.sleep(5)
+        time.sleep(0.5)  # Faster evolution
+        if DEBUG:
+            print(f"Target Phrase: {TARGET_PHRASE}, Best Genome: {best_genome}, Fitness: {fitness(best_genome):.2f}")
 
 # =================== AI ↔ Display ===================
 def push_ai_caption(text: str):
     """Queue caption, speak with pyttsx3, plan a realistic VU envelope, and toggle 'talking'."""
-    global talking, last_talk_time, engine
+    global talking, last_talk_time, engine, TARGET_PHRASE, GENOME_LENGTH
     try:
         ai_caption_q.put_nowait(text)
         if DEBUG:
             print(f"Caption queued: {text}")
-        # Log the interaction
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        with open(LOG_FILE, "a") as f:
-            f.write(f"{timestamp} - Recognized: {text}\n")
     except queue.Full:
         print("Caption queue full")
+    # Update target phrase with recognized text for self-learning
+    TARGET_PHRASE += " " + text.lower()  # Append to target for evolution
+    TARGET_PHRASE = TARGET_PHRASE[-GENOME_LENGTH:]  # Keep length constant
+    GENOME_LENGTH = len(TARGET_PHRASE)  # Update length
+    # Log the interaction
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with open(LOG_FILE, "a") as f:
+        f.write(f"{timestamp} - Recognized: {text}\n")
     # Build a rough per-word amplitude/texture plan (consumed by tts_vu_worker)
     plan_text_envelope(text)
     last_talk_time = time.time()
@@ -264,10 +269,10 @@ def find_input_device(p: pyaudio.PyAudio):
     if pulse_index is not None:
         dev = p.get_device_info_by_index(pulse_index)
         return pulse_index, int(dev.get('defaultSampleRate') or 44100), max(1, int(dev.get('maxInputChannels') or 1))
-    if default_input_index is not None:
-        dev = p.get_device_info_by_index(default_input_index)
-        return default_input_index, int(dev.get('defaultSampleRate') or 44100), max(1, int(dev.get('maxInputChannels') or 1))
-    return None, 44100, 1
+    if default_input_index is None:
+        raise RuntimeError("No input device found")
+    dev = p.get_device_info_by_index(default_input_index)
+    return default_input_index, int(dev.get('defaultSampleRate') or 44100), max(1, int(dev.get('maxInputChannels') or 1))
 
 def downmix_to_mono_int16(raw_bytes: bytes, channels: int) -> bytes:
     if channels == 1:
@@ -466,7 +471,7 @@ def tts_vu_worker():
             vu_scroll_px_s = SCROLL_SPEED_BASE
             vu_cycles1 = CYCLES1_RANGE[0]
             vu_cycles2 = CYCLES2_RANGE[0]
-            # drain plan
+            # Drain plan
             try:
                 while True:
                     vu_plan.get_nowait()
@@ -534,7 +539,7 @@ class MachineSpiritHandler(http.server.SimpleHTTPRequestHandler):
 
 # =================== Display (Pygame) ===================
 def display_interface():
-    global input_text, talking, last_talk_time, current_ai_caption
+    global input_text, talking, last_talk_time, current_ai_caption, TARGET_PHRASE
     try:
         pygame.init()
         print("Pygame initialized")
@@ -587,28 +592,39 @@ def display_interface():
                 screen.blit(background, (0, 0))
             else:
                 screen.fill((10, 15, 20))
-            # Top: mantra (evolving)
-            genome_surf = render_shadow_text(best_genome, title_font, COLOR_WHITE, COLOR_SHADOW)
-            screen.blit(genome_surf, genome_surf.get_rect(center=(SCREEN_SIZE[0] // 2, 50)))
+            # Top: mantra (evolving) and target phrase with wrapping and limited lines
+            genome_text = f"Best: {best_genome}"
+            target_text = f"Target: {TARGET_PHRASE}"
+            genome_lines = [genome_text[i:i + 30] for i in range(0, len(genome_text), 30)]  # Wrap at 30 chars
+            target_lines = [target_text[i:i + 30] for i in range(0, len(target_text), 30)]  # Wrap at 30 chars
+            # Limit to last MAX_DISPLAY_LINES
+            genome_lines = genome_lines[-MAX_DISPLAY_LINES:]
+            target_lines = target_lines[-MAX_DISPLAY_LINES:]
+            y_offset = 50
+            for line in genome_lines:
+                genome_surf = render_shadow_text(line, title_font, COLOR_WHITE, COLOR_SHADOW)
+                screen.blit(genome_surf, genome_surf.get_rect(center=(SCREEN_SIZE[0] // 2, y_offset)))
+                y_offset += 25  # Increased spacing
+            y_offset = 80
+            for line in target_lines:
+                target_surf = render_shadow_text(line, body_font, COLOR_WHITE, COLOR_SHADOW)
+                screen.blit(target_surf, target_surf.get_rect(center=(SCREEN_SIZE[0] // 2, y_offset)))
+                y_offset += 25  # Increased spacing
             # Axis line for waveform
             pygame.draw.line(screen, (40, 80, 120),
                              (wave_left, wave_center_y),
                              (wave_left + WAVE_PIXELS, wave_center_y), 1)
             # -------- Full-width scrolling wave (AI talking only) --------
             pts = []
-            # Horizontal scroll measured in pixels; wraps automatically
             shift = ((now * vu_scroll_px_s) % WAVE_PIXELS)
-            # Spatial frequencies drift subtly for realism
             phase_drift += 0.015
             k1 = 2.0 * np.pi * float(vu_cycles1) / float(WAVE_PIXELS)
             k2 = 2.0 * np.pi * float(vu_cycles2) / float(WAVE_PIXELS)
-            # Current envelope height in pixels
             base_px = vu_amp * (wave_height_px / 2.0) * WAVE_VISUAL_SCALE
             if base_px > MAX_WAVE_DRAW_PX:
                 base_px = MAX_WAVE_DRAW_PX
             for xpix_rel in range(WAVE_PIXELS):
                 pos = (xpix_rel + shift)
-                # Asymmetric absolute sines + tiny drift -> speechlike undulation
                 w = 0.62 * abs(np.sin(k1 * pos + 0.4 * np.sin(phase_drift))) \
                     + 0.38 * abs(np.sin(k2 * pos * (1.0 + 0.02 * np.sin(0.6 * phase_drift)) + 0.7))
                 amp_px = base_px * float(w)
