@@ -7,3 +7,11 @@ __pycache__/
 venv/
 machine_spirit_config.py
 
+machine_spirit_config.py
+.env
+memory.json
+__pycache__/
+.mypy_cache/
+*.log
+.venv/
+venv/
