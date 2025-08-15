@@ -1,0 +1,8 @@
+.env
+memory.json
+__pycache__/
+.mypy_cache/
+*.log
+.venv/
+venv/
+machine_spirit_config.py
