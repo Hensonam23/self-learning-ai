@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$HOME/self-learning-ai"
+source venv/bin/activate
+# make sure git knows who you are (only needed once per machine)
+git config user.name  "Aaron Henson"
+git config user.email "aaron@users.noreply.github.com"
+
+python3 tools/autoimprove.py >> logs/autoimprove.log 2>&1

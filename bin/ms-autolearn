@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$HOME/self-learning-ai"
+
+# Ensure PATH finds the ms helper
+export PATH="$HOME/.local/bin:$PATH"
+
+TOPICS_FILE="topics.txt"
+LOG="logs/autolearn.log"
+HEALTH_URL="http://localhost:8089/health"
+
+# Sanity: API up?
+if ! curl -fsS "$HEALTH_URL" >/dev/null; then
+  echo "$(date '+%F %T')  [ERROR] health check failed" | tee -a "$LOG"
+  exit 1
+fi
+
+# Pick a random topic (avoid empty file)
+if [ ! -s "$TOPICS_FILE" ]; then
+  echo "$(date '+%F %T')  [ERROR] topics.txt missing or empty" | tee -a "$LOG"
+  exit 1
+fi
+
+topic="$(shuf -n 1 "$TOPICS_FILE")"
+
+echo "$(date '+%F %T')  [AUTOLEARN] learning: $topic" | tee -a "$LOG"
+ms learn "$topic" | sed 's/^/    /' | tee -a "$LOG"
+
+# Optionally do a follow-up search loosely related to topic
+query="$(echo "$topic" | sed 's/^python //I; s/:.*$//') best practices"
+echo "$(date '+%F %T')  [AUTOLEARN] search: $query" | tee -a "$LOG"
+ms search "$query" | sed 's/^/    /' | tee -a "$LOG"

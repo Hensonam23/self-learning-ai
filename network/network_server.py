@@ -1,68 +1,133 @@
-import http.server, socketserver, urllib.parse
+import http.server
+import json
+import os
+import socketserver
+import sys
+import time
+import urllib.parse
 
-def start_server(push_ai_caption, learn_func, port=8089, shutdown_event=None, token=None):
-    class Handler(http.server.SimpleHTTPRequestHandler):
-        def _get_token(self):
-            # Header takes precedence, then query ?token=
-            hdr = self.headers.get('X-MS-Token', '')
-            if hdr:
-                return hdr.strip()
-            _, _, query = self.path.partition('?')
-            params = urllib.parse.parse_qs(query)
-            return ' '.join(params.get('token', [''])).strip()
 
-        def _auth(self):
-            if not token:
-                return True
-            return self._get_token() == str(token)
+def start_server(
+    push_ai_caption, port=8089, shutdown_event=None, learn_func=None, search_func=None
+):
+    """
+    HTTP control server with simple token auth.
+    Endpoints:
+      GET /hello
+      GET /say?text=...
+      GET /learn?topic=...
+      GET /search?q=...
+      GET /health
+    Auth:
+      - Header:  X-MS-Token: <token>
+      - OR query param: ?token=<token>
+    """
+    TOKEN = os.environ.get("MS_HTTP_TOKEN", "")  # loaded by systemd from .env
+    learn_func = learn_func or (lambda topic: None)
+    search_func = search_func or (lambda query: None)
 
-        def do_GET(self):
-            if not self._auth():
-                self.send_response(401); self.end_headers(); self.wfile.write(b"Unauthorized"); return
+    class Handler(http.server.BaseHTTPRequestHandler):
+        server_version = "MachineSpiritHTTP/1.0"
 
-            path, _, query = self.path.partition('?')
-            params = urllib.parse.parse_qs(query)
+        def _get_params(self):
+            path, _, query = self.path.partition("?")
+            return path, urllib.parse.parse_qs(query)
 
-            if path == '/hello':
-                push_ai_caption("Hello, servant of the Omnissiah.")
-            elif path == '/sad':
-                push_ai_caption("The Machine Spirit mourns your sorrow.")
-            elif path == '/say':
-                text = ' '.join(params.get('text', [''])).strip()
-                if text:
-                    push_ai_caption(text)
-                else:
-                    self.send_response(400); self.end_headers(); self.wfile.write(b"Missing ?text="); return
-            elif path == '/learn':
-                topic = ' '.join(params.get('topic', [''])).strip()
-                if topic:
-                    learn_func(topic)
-                else:
-                    self.send_response(400); self.end_headers(); self.wfile.write(b"Missing ?topic="); return
-            elif path == '/search':
-                q = ' '.join(params.get('q', [''])).strip()
-                if q:
-                    learn_func(q)
-                else:
-                    self.send_response(400); self.end_headers(); self.wfile.write(b"Missing ?q="); return
-            else:
-                self.send_response(404); self.end_headers(); self.wfile.write(b"404 - Not Found"); return
+        def _auth_ok(self, params):
+            hdr = self.headers.get("X-MS-Token", "")
+            qp = (params.get("token") or [""])[0]
+            provided = hdr or qp
+            return bool(TOKEN) and (provided == TOKEN)
 
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain")
+        def _send(self, code=200, body=b"OK", content_type="text/plain"):
+            self.send_response(code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            self.wfile.write(b"OK")
+            if isinstance(body, (dict, list)):
+                raw = json.dumps(body).encode("utf-8")
+                self.wfile.write(raw)
+            elif isinstance(body, str):
+                self.wfile.write(body.encode("utf-8"))
+            else:
+                self.wfile.write(body)
 
         def log_message(self, fmt, *args):
-            # Quieter logs
-            return
+            # Cleaner journal output
+            sys.stdout.write(
+                "%s - - [%s] %s\n"
+                % (
+                    self.address_string(),
+                    time.strftime("%d/%b/%Y %H:%M:%S"),
+                    fmt % args,
+                )
+            )
+            sys.stdout.flush()
 
-    class ReuseTCPServer(socketserver.TCPServer):
+        def do_GET(self):
+            path, params = self._get_params()
+
+            # Public health check (no token needed)
+            if path == "/health":
+                return self._send(
+                    200, {"status": "ok", "time": time.time()}, "application/json"
+                )
+
+            # Auth for everything else
+            if not self._auth_ok(params):
+                return self._send(401, b"Unauthorized")
+
+            if path == "/hello":
+                push_ai_caption("Hello, servant of the Omnissiah.")
+                return self._send(200, b"OK")
+
+            if path == "/say":
+                text = " ".join(params.get("text", [""])).strip()
+                if not text:
+                    return self._send(400, b"Missing ?text=")
+                push_ai_caption(text)
+                return self._send(200, {"ok": True, "echo": text}, "application/json")
+
+            if path == "/learn":
+                topic = " ".join(params.get("topic", [""])).strip()
+                if not topic:
+                    return self._send(400, b"Missing ?topic=")
+                try:
+                    learn_func(topic)
+                    return self._send(
+                        200,
+                        {"queued": True, "type": "learn", "topic": topic},
+                        "application/json",
+                    )
+                except Exception as e:
+                    return self._send(
+                        500, {"queued": False, "error": str(e)}, "application/json"
+                    )
+
+            if path == "/search":
+                q = " ".join(params.get("q", [""])).strip()
+                if not q:
+                    return self._send(400, b"Missing ?q=")
+                try:
+                    search_func(q)
+                    return self._send(
+                        200,
+                        {"queued": True, "type": "search", "query": q},
+                        "application/json",
+                    )
+                except Exception as e:
+                    return self._send(
+                        500, {"queued": False, "error": str(e)}, "application/json"
+                    )
+
+            return self._send(404, b"404 - Not Found")
+
+    class ReusableTCPServer(socketserver.TCPServer):
         allow_reuse_address = True
 
     try:
-        httpd = ReuseTCPServer(("", port), Handler)
-        httpd.timeout = 0.5  # so handle_request() returns regularly
+        httpd = ReusableTCPServer(("", int(port)), Handler)
+        httpd.timeout = 0.5
         print(f"Machine Spirit serving at port {port}")
         while shutdown_event is None or not shutdown_event.is_set():
             httpd.handle_request()

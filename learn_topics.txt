@@ -10,3 +10,9 @@ multiprocessing vs multithreading
 design patterns in python
 numpy broadcasting
 sqlalchemy orm patterns
+python context managers
+python context managers
+typing and type hints
+typing and type hints
+design patterns in python
+design patterns in python
