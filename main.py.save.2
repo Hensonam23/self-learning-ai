@@ -9,7 +9,6 @@ if HEADLESS:
 
 import json
 import queue
-import re
 import signal
 import threading
 import time
@@ -18,8 +17,12 @@ import pyttsx3
 
 # Optional deps are imported lazily inside functions
 from audio.audio_processing import audio_input_worker
-from display.display_manager import (display_interface, init_vu,
-                                     plan_text_envelope, tts_vu_worker)
+from display.display_manager import (
+    display_interface,
+    init_vu,
+    plan_text_envelope,
+    tts_vu_worker,
+)
 from network.network_server import start_server
 from self_evolving_ai.evolution import evolve_background
 

@@ -1,3 +1,4 @@
 python-dotenv
 duckduckgo-search
 pyttsx3
+flask>=2.3,<3.1

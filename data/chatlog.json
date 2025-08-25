@@ -1,0 +1,42 @@
+[
+  {
+    "user": "hello",
+    "assistant": "Hello. How can I help right now?"
+  },
+  {
+    "user": "how are you",
+    "assistant": "Ask me anything. I can explain, plan, and write code."
+  },
+  {
+    "user": "who am i",
+    "assistant": "I only know what you share. Tell me anything you want me to remember."
+  },
+  {
+    "user": "I am Aaron",
+    "assistant": "Ask me anything. I can explain, plan, and write code."
+  },
+  {
+    "user": "who am I",
+    "assistant": "I only know what you share. Tell me anything you want me to remember."
+  },
+  {
+    "user": "mm",
+    "assistant": "Ask me anything. I can explain, plan, and write code."
+  },
+  {
+    "user": "hello",
+    "assistant": "Hello. How can I help right now?"
+  },
+  {
+    "user": "i am aaron",
+    "assistant": "Ask me anything. I can explain, plan, and write code."
+  },
+  {
+    "user": "hello",
+    "assistant": "Hello. How can I help right now?"
+  },
+  {
+    "user": "that",
+    "assistant": "Ask me anything. I can explain, plan, and write code."
+  }
+]

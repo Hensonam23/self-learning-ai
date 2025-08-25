@@ -1,0 +1,4 @@
+[bandit]
+targets: .
+skips: B311
+exclude: venv,.venv,tests,**/site-packages

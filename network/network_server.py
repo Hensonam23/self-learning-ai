@@ -1,141 +1,174 @@
-import http.server
-import json
-import os
-import socketserver
-import sys
-import time
-import urllib.parse
+# network/network_server.py
+from __future__ import annotations
+import unicodedata, threading
+from collections import deque
+from flask import Flask, request, jsonify, Response
 
+# Two independent logs so web and voice aren't mixed
+LOG_WEB = deque(maxlen=2000)
+LOG_VOICE = deque(maxlen=2000)
 
-def start_server(
-    push_ai_caption, port=8089, shutdown_event=None, learn_func=None, search_func=None
-):
-    """
-    HTTP control server with simple token auth.
-    Endpoints:
-      GET /hello
-      GET /say?text=...
-      GET /learn?topic=...
-      GET /search?q=...
-      GET /health
-    Auth:
-      - Header:  X-MS-Token: <token>
-      - OR query param: ?token=<token>
-    """
-    TOKEN = os.environ.get("MS_HTTP_TOKEN", "")  # loaded by systemd from .env
-    learn_func = learn_func or (lambda topic: None)
-    search_func = search_func or (lambda query: None)
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        server_version = "MachineSpiritHTTP/1.0"
-
-        def _get_params(self):
-            path, _, query = self.path.partition("?")
-            return path, urllib.parse.parse_qs(query)
-
-        def _auth_ok(self, params):
-            hdr = self.headers.get("X-MS-Token", "")
-            qp = (params.get("token") or [""])[0]
-            provided = hdr or qp
-            return bool(TOKEN) and (provided == TOKEN)
-
-        def _send(self, code=200, body=b"OK", content_type="text/plain"):
-            self.send_response(code)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            if isinstance(body, (dict, list)):
-                raw = json.dumps(body).encode("utf-8")
-                self.wfile.write(raw)
-            elif isinstance(body, str):
-                self.wfile.write(body.encode("utf-8"))
-            else:
-                self.wfile.write(body)
-
-        def log_message(self, fmt, *args):
-            # Cleaner journal output
-            sys.stdout.write(
-                "%s - - [%s] %s\n"
-                % (
-                    self.address_string(),
-                    time.strftime("%d/%b/%Y %H:%M:%S"),
-                    fmt % args,
-                )
-            )
-            sys.stdout.flush()
-
-        def do_GET(self):
-            path, params = self._get_params()
-
-            # Public health check (no token needed)
-            if path == "/health":
-                return self._send(
-                    200, {"status": "ok", "time": time.time()}, "application/json"
-                )
-
-            # Auth for everything else
-            if not self._auth_ok(params):
-                return self._send(401, b"Unauthorized")
-
-            if path == "/hello":
-                push_ai_caption("Hello, servant of the Omnissiah.")
-                return self._send(200, b"OK")
-
-            if path == "/say":
-                text = " ".join(params.get("text", [""])).strip()
-                if not text:
-                    return self._send(400, b"Missing ?text=")
-                push_ai_caption(text)
-                return self._send(200, {"ok": True, "echo": text}, "application/json")
-
-            if path == "/learn":
-                topic = " ".join(params.get("topic", [""])).strip()
-                if not topic:
-                    return self._send(400, b"Missing ?topic=")
-                try:
-                    learn_func(topic)
-                    return self._send(
-                        200,
-                        {"queued": True, "type": "learn", "topic": topic},
-                        "application/json",
-                    )
-                except Exception as e:
-                    return self._send(
-                        500, {"queued": False, "error": str(e)}, "application/json"
-                    )
-
-            if path == "/search":
-                q = " ".join(params.get("q", [""])).strip()
-                if not q:
-                    return self._send(400, b"Missing ?q=")
-                try:
-                    search_func(q)
-                    return self._send(
-                        200,
-                        {"queued": True, "type": "search", "query": q},
-                        "application/json",
-                    )
-                except Exception as e:
-                    return self._send(
-                        500, {"queued": False, "error": str(e)}, "application/json"
-                    )
-
-            return self._send(404, b"404 - Not Found")
-
-    class ReusableTCPServer(socketserver.TCPServer):
-        allow_reuse_address = True
-
+def _safe_ascii(s):
     try:
-        httpd = ReusableTCPServer(("", int(port)), Handler)
-        httpd.timeout = 0.5
-        print(f"Machine Spirit serving at port {port}")
-        while shutdown_event is None or not shutdown_event.is_set():
-            httpd.handle_request()
-    except Exception as e:
-        print(f"HTTP server error: {e}")
-    finally:
-        try:
-            httpd.server_close()
-            print("HTTP server closed.")
-        except Exception:
-            pass
+        s = str(s)
+    except Exception:
+        s = repr(s)
+    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+
+def push_web(line: str) -> None:
+    s = str(line)
+    LOG_WEB.append(s)
+    try:
+        print(_safe_ascii(s), flush=True)
+    except Exception:
+        pass
+
+def push_voice(line: str) -> None:
+    s = str(line)
+    LOG_VOICE.append(s)
+    try:
+        print(_safe_ascii(s), flush=True)
+    except Exception:
+        pass
+
+app = Flask(__name__)
+
+# The web chat uses this callback (set by evolve_ai.py)
+def _default_on_ask(_text: str) -> str:
+    return "OK"
+app.config["ON_ASK"] = _default_on_ask
+
+@app.get("/")
+def ui_chat():
+    # NOTE: plain triple-quoted string (NOT an f-string) so JS braces {} don't break Python parsing.
+    html = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Machine Spirit — Web Chat</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#0b0f10;color:#d9ffe8;font:15px/1.4 ui-monospace,Consolas,Menlo,monospace}
+header{padding:12px 16px;background:#0f1518;border-bottom:1px solid #123}
+main{display:flex;flex-direction:column;height:calc(100vh - 52px)}
+#log{flex:1;overflow:auto;padding:14px 16px;white-space:pre-wrap;word-wrap:break-word}
+#log .user{color:#9cd2ff}
+#log .assistant{color:#e7ffb6}
+form{display:flex;gap:8px;padding:12px 16px;border-top:1px solid #123;background:#0f1518}
+input[type=text]{flex:1;padding:10px 12px;border:1px solid #234;background:#081014;color:#eafff5;border-radius:8px}
+button{padding:10px 14px;border:1px solid #2a5;background:#0d221c;color:#d9ffe8;border-radius:8px;cursor:pointer}
+a,a:visited{color:#aef}
+nav{position:absolute;top:10px;right:16px}
+nav a{margin-left:12px}
+.mono{font-family:ui-monospace,Consolas,Menlo,monospace}
+</style>
+</head>
+<body>
+<header>
+  <strong>Machine Spirit — Web Chat</strong>
+  <nav class="mono">
+    <a href="/voice" target="_blank">Voice Log</a>
+  </nav>
+</header>
+<main>
+  <div id="log"></div>
+  <form id="f">
+    <input id="q" type="text" autocomplete="off" placeholder="Type and hit Enter…" />
+    <button type="submit">Send</button>
+  </form>
+</main>
+<script>
+const log = document.getElementById('log');
+const q   = document.getElementById('q');
+const f   = document.getElementById('f');
+
+function esc(s){return s.replace(/[&<>]/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+
+async function refresh(){
+  const r = await fetch('/log/web');
+  const lines = await r.json();
+  log.innerHTML = lines.map(x=>{
+    let cls = 'assistant';
+    if(x.startsWith('> ')) cls = 'user';
+    return `<div class="${cls}">${esc(x)}</div>`;
+  }).join('');
+  log.scrollTop = log.scrollHeight;
+}
+setInterval(refresh, 600);
+refresh();
+
+f.addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  const text = q.value.trim();
+  if(!text) return;
+  await fetch('/ask', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text})});
+  q.value='';
+  setTimeout(refresh, 100);
+});
+</script>
+</body>
+</html>"""
+    return Response(html, mimetype="text/html")
+
+@app.get("/voice")
+def ui_voice():
+    html = """<!doctype html><meta charset="utf-8"/>
+<title>Machine Spirit — Voice Log</title>
+<style>body{margin:0;background:#0b0f10;color:#d9ffe8;font:15px ui-monospace,Consolas,Menlo,monospace}
+header{padding:12px 16px;background:#0f1518;border-bottom:1px solid #123}
+#log{white-space:pre-wrap;word-wrap:break-word;padding:14px 16px}
+.user{color:#9cd2ff}.assistant{color:#e7ffb6}</style>
+<header><strong>Voice Log</strong> — live transcript & replies</header>
+<pre id="log">loading…</pre>
+<script>
+async function refresh(){
+  const r = await fetch('/log/voice');
+  const lines = await r.json();
+  const esc = s => s.replace(/[&<>]/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  document.getElementById('log').innerHTML = lines.map(esc).join("\\n");
+  window.scrollTo(0,document.body.scrollHeight);
+}
+setInterval(refresh, 600);
+refresh();
+</script>"""
+    return Response(html, mimetype="text/html")
+
+@app.get("/log/web")
+def get_log_web():
+    return jsonify(list(LOG_WEB))
+
+@app.get("/log/voice")
+def get_log_voice():
+    return jsonify(list(LOG_VOICE))
+
+# Back-compat single log endpoint (returns web log)
+@app.get("/log")
+def get_log_compat():
+    return Response("\n".join(LOG_WEB), mimetype="text/plain")
+
+@app.get("/healthz")
+def health():
+    return Response("OK", mimetype="text/plain")
+
+@app.post("/ask")
+def ask():
+    data = request.get_json(silent=True) or request.form or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return jsonify({"ok": False, "error": "empty"}), 400
+
+    # Echo user's input into WEB log (chat keeps both sides)
+    push_web("> " + text)
+    reply = app.config["ON_ASK"](text)  # call the web brain
+    for ln in str(reply).splitlines():
+        push_web(ln)
+    return jsonify({"ok": True, "reply": reply})
+
+def serve_async(port: int):
+    t = threading.Thread(
+        target=lambda: app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False),
+        daemon=True,
+    )
+    t.start()
+    push_web(f"[HTTP] listening on http://0.0.0.0:{port}")
