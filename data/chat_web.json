@@ -98,5 +98,265 @@
     "ts": "2025-08-25T03:09:42Z",
     "role": "assistant",
     "text": "I don’t have a perfect answer yet. Give me one line of context or a follow-up detail, and I’ll refine it."
+  },
+  {
+    "ts": "2025-08-25T03:50:37Z",
+    "role": "user",
+    "text": "hi"
+  },
+  {
+    "ts": "2025-08-25T03:50:37Z",
+    "role": "assistant",
+    "text": "Hey—I’m here and listening."
+  },
+  {
+    "ts": "2025-08-25T03:50:40Z",
+    "role": "user",
+    "text": "hello"
+  },
+  {
+    "ts": "2025-08-25T03:50:40Z",
+    "role": "assistant",
+    "text": "Hey—I’m here and listening."
+  },
+  {
+    "ts": "2025-08-25T03:50:41Z",
+    "role": "user",
+    "text": "who am i"
+  },
+  {
+    "ts": "2025-08-25T03:50:42Z",
+    "role": "assistant",
+    "text": "I don’t have a perfect answer yet. Give me one line of context or a follow-up detail, and I’ll refine it."
+  },
+  {
+    "ts": "2025-08-25T03:50:46Z",
+    "role": "user",
+    "text": "I am Aaron"
+  },
+  {
+    "ts": "2025-08-25T03:50:47Z",
+    "role": "assistant",
+    "text": "I don’t have a perfect answer yet. Give me one line of context or a follow-up detail, and I’ll refine it."
+  },
+  {
+    "ts": "2025-08-25T03:50:49Z",
+    "role": "user",
+    "text": "who are you"
+  },
+  {
+    "ts": "2025-08-25T03:50:49Z",
+    "role": "assistant",
+    "text": "I’m the Machine Spirit—your on-device assistant. I listen, think, and keep improving from what we do here."
+  },
+  {
+    "ts": "2025-08-25T03:57:03Z",
+    "role": "user",
+    "text": "Hello"
+  },
+  {
+    "ts": "2025-08-25T03:57:03Z",
+    "role": "assistant",
+    "text": "Hey—I’m here and listening."
+  },
+  {
+    "ts": "2025-08-25T03:57:06Z",
+    "role": "user",
+    "text": "Who am i"
+  },
+  {
+    "ts": "2025-08-25T03:57:07Z",
+    "role": "assistant",
+    "text": "I don’t have a perfect answer yet. Give me one line of context or a follow-up detail, and I’ll refine it."
+  },
+  {
+    "ts": "2025-08-25T03:57:11Z",
+    "role": "user",
+    "text": "My name is Aaron"
+  },
+  {
+    "ts": "2025-08-25T03:57:11Z",
+    "role": "assistant",
+    "text": "Got it. I’ll call you Aaron."
+  },
+  {
+    "ts": "2025-08-25T03:57:14Z",
+    "role": "user",
+    "text": "Who am i"
+  },
+  {
+    "ts": "2025-08-25T03:57:14Z",
+    "role": "assistant",
+    "text": "I don’t have a perfect answer yet. Give me one line of context or a follow-up detail, and I’ll refine it."
+  },
+  {
+    "ts": "2025-08-25T03:57:18Z",
+    "role": "user",
+    "text": "who are you"
+  },
+  {
+    "ts": "2025-08-25T03:57:18Z",
+    "role": "assistant",
+    "text": "I’m the Machine Spirit—your on-device assistant. I listen, think, and keep improving from what we do here."
+  },
+  {
+    "ts": "2025-08-25T04:20:46Z",
+    "role": "user",
+    "text": "hello"
+  },
+  {
+    "ts": "2025-08-25T04:20:46Z",
+    "role": "assistant",
+    "text": "Hey—I’m here and listening."
+  },
+  {
+    "ts": "2025-08-25T04:20:49Z",
+    "role": "user",
+    "text": "who am i"
+  },
+  {
+    "ts": "2025-08-25T04:20:50Z",
+    "role": "assistant",
+    "text": "I don’t have a perfect answer yet. Give me one line of context or a follow-up detail, and I’ll refine it."
+  },
+  {
+    "ts": "2025-08-25T04:20:52Z",
+    "role": "user",
+    "text": "My name is Aaron"
+  },
+  {
+    "ts": "2025-08-25T04:20:52Z",
+    "role": "assistant",
+    "text": "Got it. I’ll call you Aaron."
+  },
+  {
+    "ts": "2025-08-25T04:20:54Z",
+    "role": "user",
+    "text": "what is my name"
+  },
+  {
+    "ts": "2025-08-25T04:20:55Z",
+    "role": "assistant",
+    "text": "Your name is Aaron."
+  },
+  {
+    "ts": "2025-08-25T04:20:57Z",
+    "role": "user",
+    "text": "Who are you"
+  },
+  {
+    "ts": "2025-08-25T04:20:57Z",
+    "role": "assistant",
+    "text": "I’m the Machine Spirit—your on-device assistant. I listen, think, and keep improving from what we do here."
+  },
+  {
+    "ts": "2025-08-25T04:21:05Z",
+    "role": "user",
+    "text": "what day is it"
+  },
+  {
+    "ts": "2025-08-25T04:21:05Z",
+    "role": "assistant",
+    "text": "Sunday"
+  },
+  {
+    "ts": "2025-08-25T04:21:08Z",
+    "role": "user",
+    "text": "what is the date"
+  },
+  {
+    "ts": "2025-08-25T04:21:08Z",
+    "role": "assistant",
+    "text": "Sunday, August 24, 2025"
+  },
+  {
+    "ts": "2025-08-25T04:28:14Z",
+    "role": "user",
+    "text": "hi"
+  },
+  {
+    "ts": "2025-08-25T04:28:14Z",
+    "role": "assistant",
+    "text": "Hey—I’m here and listening."
+  },
+  {
+    "ts": "2025-08-25T04:28:20Z",
+    "role": "user",
+    "text": "how are you"
+  },
+  {
+    "ts": "2025-08-25T04:28:20Z",
+    "role": "assistant",
+    "text": "Nominal systems online and paying attention."
+  },
+  {
+    "ts": "2025-08-25T04:28:34Z",
+    "role": "user",
+    "text": "what is your purpose"
+  },
+  {
+    "ts": "2025-08-25T04:28:34Z",
+    "role": "assistant",
+    "text": "Help you think and execute: turn intent into plans, answers, and actions—and improve from each session."
+  },
+  {
+    "ts": "2025-08-25T04:28:49Z",
+    "role": "user",
+    "text": "can you analyze yourself for errors?"
+  },
+  {
+    "ts": "2025-08-25T04:28:50Z",
+    "role": "assistant",
+    "text": "I don’t have a perfect answer yet. Give me one line of context or a follow-up detail, and I’ll refine it."
+  },
+  {
+    "ts": "2025-08-25T04:28:59Z",
+    "role": "user",
+    "text": "what is my name"
+  },
+  {
+    "ts": "2025-08-25T04:28:59Z",
+    "role": "assistant",
+    "text": "Your name is Aaron."
+  },
+  {
+    "ts": "2025-08-25T04:29:11Z",
+    "role": "user",
+    "text": "What software do you have"
+  },
+  {
+    "ts": "2025-08-25T04:29:12Z",
+    "role": "assistant",
+    "text": "I don’t have a perfect answer yet. Give me one line of context or a follow-up detail, and I’ll refine it."
+  },
+  {
+    "ts": "2025-08-25T21:37:11Z",
+    "role": "user",
+    "text": "hello"
+  },
+  {
+    "ts": "2025-08-25T21:37:11Z",
+    "role": "assistant",
+    "text": "Hey—I’m here and listening."
+  },
+  {
+    "ts": "2025-08-25T21:37:14Z",
+    "role": "user",
+    "text": "who am i"
+  },
+  {
+    "ts": "2025-08-25T21:37:15Z",
+    "role": "assistant",
+    "text": "I don’t have a perfect answer yet. Give me one line of context or a follow-up detail, and I’ll refine it."
+  },
+  {
+    "ts": "2025-08-25T21:52:07Z",
+    "role": "user",
+    "text": "hello"
+  },
+  {
+    "ts": "2025-08-25T21:52:07Z",
+    "role": "assistant",
+    "text": "Hey—I’m here and listening."
   }
 ]
