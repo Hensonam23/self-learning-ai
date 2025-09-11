@@ -2,8 +2,6 @@
 from __future__ import annotations
 import json, os, re, socket, time, math, ast, datetime as dt
 from typing import Optional, List
-import requests
-from bs4 import BeautifulSoup
 
 MEM_PATH = os.path.expanduser("~/self-learning-ai/memory.json")
 
@@ -122,47 +120,14 @@ def _facts(qn: str) -> Optional[str]:
             return v
     return None
 
-# ---------- lightweight research ----------
-def _wiki_summary(topic: str) -> Optional[str]:
-    try:
-        url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(topic)}"
-        r = requests.get(url, timeout=5)
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        txt = data.get("extract")
-        if txt:
-            return txt.strip()
-    except Exception:
-        return None
-    return None
-
-def _ddg_snippets(query: str, n: int = 3) -> List[str]:
-    try:
-        url = "https://duckduckgo.com/html/?q=" + requests.utils.quote(query)
-        html = requests.get(url, timeout=5, headers={"User-Agent":"Mozilla/5.0"}).text
-        soup = BeautifulSoup(html, "html.parser")
-        results = []
-        for a in soup.select(".result__snippet"):
-            t = a.get_text(" ", strip=True)
-            if t:
-                results.append(t)
-            if len(results) >= n:
-                break
-        return results
-    except Exception:
-        return []
-
-def _researched_answer(q: str) -> Optional[str]:
-    topic = re.sub(r"^(what is|what's|who is|who are|tell me about)\s+", "", q, flags=re.I).strip().rstrip("?")
-    if not topic or len(topic) < 2:
-        topic = q.strip().rstrip("?")
-    wiki = _wiki_summary(topic)
-    if wiki:
-        return wiki
-    snippets = _ddg_snippets(topic, n=3)
-    if snippets:
-        return " ".join(snippets)
+# ---------- memory search ----------
+def _search_knowledge(q: str) -> Optional[str]:
+    term = _normalize(q)
+    mem = _load_mem()
+    for item in mem.get("knowledge", []):
+        topic = _normalize(item.get("topic", ""))
+        if term in topic:
+            return item.get("summary")
     return None
 
 # ---------- responders ----------
@@ -214,10 +179,10 @@ def _small_talk(qn: str) -> Optional[str]:
     return None
 
 def _default_answer(q: str) -> str:
-    researched = _researched_answer(q)
-    if researched:
-        return researched
-    return "I don’t have a perfect answer yet. Give me one line of context or a follow-up detail, and I’ll refine it."
+    remembered = _search_knowledge(q)
+    if remembered:
+        return remembered
+    return "I haven't learned about that yet. Share a detail and I'll remember it for next time."
 
 def respond(user_text: str) -> str:
     text = (user_text or "").strip()
