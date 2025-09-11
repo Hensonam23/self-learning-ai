@@ -63,7 +63,12 @@ def voice_loop():
 
     idx = pick_index()
     if idx is None:
-        push_voice("[VOICE] No microphone found.")
+        names = list_mics()
+        if names:
+            joined = ", ".join(f"{i}:{n}" for i, n in enumerate(names))
+            push_voice(f"[VOICE] No microphone found. Devices: {joined}")
+        else:
+            push_voice("[VOICE] No microphone found. Devices: <none>")
         return
 
     vs_model = None

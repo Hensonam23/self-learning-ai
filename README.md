@@ -16,6 +16,7 @@ No OpenAI/Ollama required.
 - **Two separate conversations**: web and voice use different memory files and do not mix.
 - **Real chat log**: your typed prompts are shown (prefixed with `>`), and answers stream into the log.
 - **Self-learning hooks**: queue topics and let the night learners summarize & save knowledge locally.
+- **Auto-queue new topics**: unanswered questions are added to the learning queue for later study.
 - **Local knowledge only**: responses draw from on-device memory; no web lookups or external APIs.
 
 ---
@@ -58,3 +59,15 @@ python3 tools/self_improve.py
 ```
 
 This simply runs `error_task_generator.py` followed by `code_updater.py`.
+
+### Audio Selection
+
+If the wrong microphone is chosen, set an environment variable before launching:
+
+```bash
+export MS_MIC_NAME="Anker"
+# or
+export MS_MIC_INDEX=2
+```
+
+The voice loop will list all detected devices when none are selected.

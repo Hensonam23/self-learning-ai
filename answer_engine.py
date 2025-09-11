@@ -3,6 +3,12 @@ from __future__ import annotations
 import json, os, re, socket, time, math, ast, datetime as dt
 from typing import Optional, List
 
+try:
+    from storage.memory import queue_learning  # type: ignore
+except Exception:
+    def queue_learning(_topic: str) -> None:
+        pass
+
 MEM_PATH = os.path.expanduser("~/self-learning-ai/memory.json")
 
 # ---------- memory ----------
@@ -182,6 +188,7 @@ def _default_answer(q: str) -> str:
     remembered = _search_knowledge(q)
     if remembered:
         return remembered
+    queue_learning(q)
     return "I haven't learned about that yet. Share a detail and I'll remember it for next time."
 
 def respond(user_text: str) -> str:
