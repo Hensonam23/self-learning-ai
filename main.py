@@ -1,164 +1,284 @@
-import os, threading, time, ctypes
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import os
+import threading
+import time
+
 import speech_recognition as sr
 
 from brain import Brain
-from network.network_server import app as http_app, serve_async, push
+import network.network_server as nsrv
+from stt import recognize as stt_recognize
+from audio.tts import say as tts_say
+from audio.alsa_utils import silence_alsa
 
-HTTP_PORT = int(os.environ.get("MS_HTTP_PORT", "8089"))
-STT_ENGINE = os.environ.get("MS_STT", "vosk").lower()
-VOSK_MODEL = os.environ.get("VOSK_MODEL", "").strip()
-MIC_NAME   = os.environ.get("MS_MIC_NAME", "").strip()
-MIC_INDEX  = os.environ.get("MS_MIC_INDEX", "").strip()
-
-MSG_LISTENING = "Listening..."
-MSG_MIC_ERR   = "Mic error - check cable or set MS_MIC_INDEX."
-
-def silence_alsa():
-    """Hide harmless ALSA/JACK spam in stderr."""
-    try:
-        ERROR_HANDLER_FUNC = ctypes.CFUNCTYPE(
-            None, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p
-        )
-        def py_error_handler(filename, line, function, err, fmt):  # noqa: ARG001
-            return
-        c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
-        asound = ctypes.cdll.LoadLibrary("libasound.so")
-        asound.snd_lib_error_set_handler(c_error_handler)
-    except Exception:
-        pass
-
+# Reduce ALSA/JACK noise
 silence_alsa()
 
-def list_mics():
+# ---------- HTTP + logging wiring ----------
+
+http_app = getattr(nsrv, "app", None)
+
+
+def _to_ascii(s: str) -> str:
+    # Avoid latin-1 / filesystem encoding explosions in downstream loggers
+    return s.encode("ascii", "replace").decode("ascii")
+
+
+def serve_async(port: int) -> None:
+    """Use network_server.serve_async if available, else run Flask in a thread."""
+    if hasattr(nsrv, "serve_async"):
+        return nsrv.serve_async(port)  # type: ignore[misc]
+    if http_app is None:
+        return
+
+    def _run():
+        http_app.run(host="0.0.0.0", port=port, threaded=True)
+
+    t = threading.Thread(target=_run, name="http", daemon=True)
+    t.start()
+
+
+def push(msg: str, channel: str = "web") -> None:
+    """
+    Unified logging:
+      1. Sanitize to ASCII (prevents latin-1 codec errors).
+      2. Prefer nsrv.push(msg, channel) if present.
+      3. Else nsrv.add_log(channel, msg).
+      4. Else print.
+    """
     try:
-        return sr.Microphone.list_microphone_names()
-    except Exception as e:
-        push(f"[VOICE] Could not list microphones: {e}")
-        return []
+        raw = str(msg)
+    except Exception:
+        raw = repr(msg)
+    safe = _to_ascii(raw)
+    ch = channel or "web"
 
-def prefer_hardware_index():
-    """Pick the *USB/hardware* mic first; avoid 'pulse' unless forced."""
-    names = list_mics()
-    if MIC_INDEX.isdigit():
-        i = int(MIC_INDEX)
-        if 0 <= i < len(names):
-            push(f"[VOICE] Using forced index {i}: {names[i]}")
-            return i
+    # Try network_server.push
+    if hasattr(nsrv, "push"):
+        try:
+            return nsrv.push(safe, ch)  # type: ignore[func-returns-value]
+        except Exception:
+            pass
 
-    # Explicit name match
-    if MIC_NAME:
-        for i, n in enumerate(names):
-            if MIC_NAME.lower() in n.lower():
-                push(f"[VOICE] Using name -> index {i}: {n}")
-                return i
+    # Try network_server.add_log
+    if hasattr(nsrv, "add_log"):
+        try:
+            return nsrv.add_log(ch, safe)  # type: ignore[func-returns-value]
+        except Exception:
+            pass
 
-    # Strong hints of a real USB / hw device
-    for i, n in enumerate(names):
-        lower = n.lower()
-        if any(k in lower for k in ("anker", "usb", "hw:", "mic", "microphone")) and "monitor" not in lower:
-            push(f"[VOICE] Auto-picked hardware index {i}: {n}")
-            return i
+    # Fallback: stdout
+    print(f"[{ch.upper()}] {safe}", flush=True)
 
-    # Fall back to 'pulse' if nothing else
-    for i, n in enumerate(names):
-        if "pulse" in n.lower():
-            push(f"[VOICE] Falling back to pulse index {i}: {n}")
-            return i
 
-    # Final fallback
-    if names:
-        push(f"[VOICE] Using first mic: {names[0]}")
-        return 0
-    return None
+# ---------- Config ----------
 
-def stt_with_vosk(audio, r: sr.Recognizer):
-    if not VOSK_MODEL:
-        return ""
-    try:
-        import vosk, json
-        pcm = audio.get_raw_data(convert_rate=16000, convert_width=2)
-        model = vosk.Model(VOSK_MODEL)
-        rec = vosk.KaldiRecognizer(model, 16000)
-        rec.AcceptWaveform(pcm)
-        # IMPORTANT: FinalResult() returns the completed transcript for a single chunk
-        j = json.loads(rec.FinalResult() or "{}")
-        return (j.get("text") or "").strip()
-    except Exception as e:
-        push(f"[VOICE] Vosk failed: {e}")
-        return ""
+HTTP_PORT = int(os.environ.get("MS_HTTP_PORT", "8089"))
 
-def stt_with_google(audio, r: sr.Recognizer):
-    try:
-        return r.recognize_google(audio)
-    except Exception as e:
-        push(f"[VOICE] Google STT failed: {e}")
-        return ""
+WAKE_WORDS = tuple(
+    w.strip().lower()
+    for w in os.environ.get(
+        "MS_WAKE_WORDS",
+        "machine spirit,hey machine spirit",
+    ).split(",")
+    if w.strip()
+)
 
-def transcribe(audio, r: sr.Recognizer):
-    if STT_ENGINE in ("vosk", "auto"):
-        t = stt_with_vosk(audio, r)
-        if t:
-            return t
-    if STT_ENGINE in ("google", "auto"):
-        t = stt_with_google(audio, r)
-        if t:
-            return t
-    return ""
+READY_MSG = "Machine Spirit online. Awaiting your command."
+NO_MIC_MSG = "No working microphone stream available. HTTP/UI is still online."
+
+# Stay awake this many seconds after last recognized speech
+IDLE_SECONDS = float(os.environ.get("MS_IDLE_SECONDS", "10"))
 
 brain = Brain()
 
+
+# ---------- Q/A core ----------
+
 def handle_ask(text: str) -> str:
-    reply = brain.answer(text)      # only answer; no acknowledgement fluff
-    push(reply)                     # show the assistant's reply in UI
+    """Turn text into an answer, log it, speak it."""
+    user = (text or "").strip()
+    if not user:
+        reply = "I'm listening."
+    else:
+        reply = brain.answer(user)
+
+    push(reply, "web")
+    try:
+        tts_say(reply)
+    except Exception:
+        # TTS failure is non-fatal
+        pass
     return reply
 
-http_app.config["ON_ASK"] = handle_ask
+
+if http_app is not None:
+    http_app.config["ON_ASK"] = handle_ask  # type: ignore[assignment]
+
+
+# ---------- Helpers ----------
+
+def _list_mics():
+    try:
+        return sr.Microphone.list_microphone_names()
+    except Exception as e:
+        push(f"Could not list microphones: {e}", "voice")
+        return []
+
+
+def _choose_mic_index() -> int | None:
+    names = _list_mics()
+    if not names:
+        return None
+
+    forced = os.environ.get("MS_MIC_INDEX", "").strip()
+    if forced.isdigit():
+        idx = int(forced)
+        if 0 <= idx < len(names):
+            push(f"Using forced mic index {idx}: {names[idx]}", "voice")
+            return idx
+
+    pref = os.environ.get("MS_MIC_NAME", "").strip().lower()
+    if pref:
+        for i, n in enumerate(names):
+            if pref in n.lower():
+                push(f"Using preferred mic {i}: {n}", "voice")
+                return i
+
+    for i, n in enumerate(names):
+        low = n.lower()
+        if any(k in low for k in ("usb", "mic", "microphone", "anker")) and "monitor" not in low:
+            push(f"Auto-selected mic {i}: {n}", "voice")
+            return i
+
+    push(f"Falling back to first mic: {names[0]}", "voice")
+    return 0
+
+
+def _is_wake(text: str) -> bool:
+    lt = text.lower()
+    return any(w in lt for w in WAKE_WORDS)
+
+
+def _strip_wake(text: str) -> str:
+    s = text
+    sl = s.lower()
+    for w in WAKE_WORDS:
+        if w in sl:
+            idx = sl.find(w)
+            if idx != -1:
+                before = s[:idx]
+                after = s[idx + len(w):]
+                s = (before + " " + after)
+                sl = s.lower()
+    return s.strip(" ,.!?").strip()
+
+
+# ---------- Voice loop: wake once, chain questions, 10s idle ----------
 
 def voice_loop():
-    r = sr.Recognizer()
+    try:
+        r = sr.Recognizer()
+    except Exception as e:
+        push(f"SpeechRecognition init failed: {e}", "voice")
+        return
+
     r.dynamic_energy_threshold = True
     r.pause_threshold = 0.6
     r.phrase_threshold = 0.25
 
-    idx = prefer_hardware_index()
+    idx = _choose_mic_index()
     if idx is None:
-        push(MSG_MIC_ERR)
+        push(NO_MIC_MSG, "voice")
         return
 
     try:
-        with sr.Microphone(device_index=idx, sample_rate=16000, chunk_size=1024) as source:
-            push(MSG_LISTENING)
+        with sr.Microphone(device_index=idx) as source:
+            if not getattr(source, "stream", None):
+                raise RuntimeError("Microphone stream not available from PyAudio/ALSA")
+
             try:
-                r.adjust_for_ambient_noise(source, duration=0.8)
-            except Exception:
-                pass
+                r.adjust_for_ambient_noise(source, duration=1.0)
+            except Exception as e:
+                push(f"Ambient noise calibration failed (continuing): {e}", "voice")
+
+            push("Say 'Machine Spirit' to wake me.", "voice")
+
+            awake = False
+            last_activity = 0.0  # timestamp of last recognized (non-empty) text
+
             while True:
+                # Short timeout so we can enforce idle behavior
                 try:
-                    audio = r.listen(source, phrase_time_limit=6)
-                except Exception as e:
-                    push(f"[VOICE] Listen error: {e}")
-                    time.sleep(0.5)
+                    audio = r.listen(source, timeout=1, phrase_time_limit=6)
+                except sr.WaitTimeoutError:
+                    # No speech this second
+                    if awake and (time.time() - last_activity) >= IDLE_SECONDS:
+                        awake = False
+                        push("Standing by.", "voice")
                     continue
-                text = transcribe(audio, r)
+                except Exception as e:
+                    push(f"Listen error: {e}", "voice")
+                    time.sleep(0.3)
+                    continue
+
+                # Run STT
+                text = (stt_recognize(audio) or "").strip()
                 if not text:
                     continue
-                reply = brain.answer(text)
-                push(reply)
+
+                push(f"[HEARD] {text}", "voice")
+
+                # If idle: look for wake word
+                if not awake:
+                    if _is_wake(text):
+                        cleaned = _strip_wake(text)
+                        awake = True
+                        last_activity = time.time()
+                        if cleaned:
+                            # Wake word + command in one go
+                            handle_ask(cleaned)
+                        else:
+                            push("Listening...", "voice")
+                    # Ignore everything else while idle
+                    continue
+
+                # Already awake: no wake word required
+                cleaned = _strip_wake(text).strip()
+                if not cleaned:
+                    # If it's basically just repeating the wake word, just refresh timer
+                    last_activity = time.time()
+                    continue
+
+                # Treat every utterance as a full question/command
+                last_activity = time.time()
+                handle_ask(cleaned)
+
+                # Stay awake; if nothing else comes in IDLE_SECONDS,
+                # the timeout branch above drops us back to idle.
+
     except Exception as e:
-        push(MSG_MIC_ERR)
-        push(f"[VOICE] Could not open microphone: {e}")
+        push(f"Fatal microphone error: {e}", "voice")
+        push(NO_MIC_MSG, "voice")
+
+
+# ---------- Entrypoint ----------
 
 def main():
-    push("Ready.")
-    serve_async(HTTP_PORT)          # HTTP server is alive regardless of mic status
-    push("[BOOT] voice_loop()")
-    t = threading.Thread(target=voice_loop, daemon=True)
+    push(READY_MSG, "web")
+    serve_async(HTTP_PORT)
+
+    t = threading.Thread(target=voice_loop, name="voice-loop", daemon=True)
     t.start()
+
     try:
         while True:
             time.sleep(3600)
     except KeyboardInterrupt:
-        pass
+        push("[SHUTDOWN] Machine Spirit standing down.", "web")
+
 
 if __name__ == "__main__":
     main()
