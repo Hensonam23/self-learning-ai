@@ -1,0 +1,5 @@
+[flake8]
+exclude = venv,.venv,build,dist,__pycache__,*.egg-info,**/site-packages
+max-line-length = 100
+per-file-ignores =
+    display/display_manager.py:F403,F405

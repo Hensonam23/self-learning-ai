@@ -1,128 +1,71 @@
 #!/usr/bin/env python3
-# tools/autoimprove.py
-import os
-import subprocess
-import sys
-import time
-from pathlib import Path
+from __future__ import annotations
+import os, subprocess, sys, time, pathlib, shlex
 
-REPO = Path.home() / "self-learning-ai"
-VENV = REPO / "venv" / "bin"
-PY = str((REPO / "venv" / "bin" / "python3"))
-PIP = str((REPO / "venv" / "bin" / "pip"))
-LOG = REPO / "logs" / "autoimprove.log"
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+LOGS = ROOT / "logs"
+LOGS.mkdir(parents=True, exist_ok=True)
 
-DEV_PKGS = [
-    "black==24.4.2",
-    "isort==5.13.2",
-    "flake8==7.1.0",
-    "bandit==1.7.9",
-]
-
-
-def sh(cmd, cwd=REPO, check=True):
-    return subprocess.run(cmd, cwd=cwd, check=check, text=True, capture_output=True)
-
-
-def log(msg):
+def log(msg: str):
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    line = f"{ts}  {msg}\n"
-    LOG.parent.mkdir(parents=True, exist_ok=True)
-    with LOG.open("a", encoding="utf-8") as f:
-        f.write(line)
-    print(line, end="")
+    line = f"{ts}  [AUTOIMPROVE] {msg}"
+    print(line, flush=True)
+    with open(LOGS / "autoimprove.log", "a", encoding="utf-8") as f:
+        f.write(line + "\n")
 
-
-def ensure_dev_tools():
+def run(cmd: list[str], timeout: int | None = None, capture_file: pathlib.Path | None = None, check_ok: bool = False) -> int:
+    log(f"$ {' '.join(shlex.quote(c) for c in cmd)}")
     try:
-        sh([PY, "-m", "pip", "install", "--upgrade", "pip", "wheel"])
-        sh([PIP, "install", *DEV_PKGS])
-    except subprocess.CalledProcessError as e:
-        log(f"[AUTOIMPROVE] pip install failed: {e.stderr or e.stdout}")
+        p = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        log(f"TIMEOUT: {' '.join(cmd)}")
+        return 124
+    if capture_file:
+        capture_file.write_text((p.stdout or "") + ("\n--- STDERR ---\n" + (p.stderr or "")), encoding="utf-8")
+    if check_ok and p.returncode != 0:
+        log(f"fatal: Command '{cmd[0]}' returned {p.returncode}.")
+        sys.exit(1)
+    return p.returncode
 
-
-def git_dirty():
-    r = sh(["git", "status", "--porcelain"], check=False)
-    return bool(r.stdout.strip())
-
+def git_changed() -> bool:
+    return subprocess.run(["git", "diff", "--quiet"], cwd=str(ROOT)).returncode != 0
 
 def main():
-    os.chdir(REPO)
-    log("[AUTOIMPROVE] start")
-    ensure_dev_tools()
+    log("start")
+    # ensure git repo & branch
+    run(["git", "rev-parse", "--is-inside-work-tree"], check_ok=True)
+    branch = time.strftime("autoimprove/%Y%m%d-%H%M")
+    run(["git", "checkout", "-B", branch], check_ok=True)
 
-    # Format/imports (safe/mechanical)
-    for cmd in (
-        [PY, "-m", "black", "."],
-        [PY, "-m", "isort", "."],
-    ):
-        r = sh(cmd, check=False)
-        if r.returncode != 0:
-            log(f"[AUTOIMPROVE] cmd failed: {' '.join(cmd)}\n{r.stdout}\n{r.stderr}")
+    # formatters
+    run(["autoflake", "-r", "--in-place", "--remove-all-unused-imports", "--remove-unused-variables",
+         "--exclude", "venv,.venv,*.pyc,__pycache__", "."], timeout=120)
+    run(["isort", "--profile", "black", "."], timeout=120)
+    rc_black = run(["black", "."], timeout=180)
+    if rc_black not in (0, 123):  # 123 → nothing changed/some paths invalid; allow pass
+        log("fatal: black failed")
+        sys.exit(1)
 
-    # Lint & security checks (don’t fail run; just report)
-    for name, cmd in (
-        ("flake8", [PY, "-m", "flake8", "."]),
-        ("bandit", [PY, "-m", "bandit", "-q", "-r", "."]),
-    ):
-        r = sh(cmd, check=False)
-        summary = (r.stdout or r.stderr or "").strip()[:4000]
-        log(f"[AUTOIMPROVE] {name} report:\n{summary or '(clean)'}")
+    # linters (always continue; just write reports)
+    run(["flake8"], timeout=180, capture_file=LOGS / "flake8.txt")
+    run(["bandit", "-q", "-r", ".", "-x", "venv,.venv,tests,**/site-packages,**/.venv,**/venv"], timeout=240, capture_file=LOGS / "bandit.txt")
 
-    # Commit/push only if mechanical changes present
-    if not git_dirty():
-        log("[AUTOIMPROVE] no code changes")
-        return
+    # smoke test (compile sources)
+    rc_smoke = run([sys.executable, str(ROOT / "tools" / "smoke.py")], timeout=120)
+    if rc_smoke != 0:
+        log("smoke failed; aborting commit")
+        sys.exit(0)  # don't fail the service; just skip commit
 
-    # Create branch
-    ts = time.strftime("%Y%m%d-%H%M")
-    branch = f"autoimprove/{ts}"
-    sh(["git", "checkout", "-B", branch], check=False)
-    sh(["git", "add", "-A"], check=False)
-    msg = "chore(autoimprove): format/imports + lint/security snapshot"
-    sh(["git", "commit", "-m", msg], check=False)
-
-    # Push (SSH origin must be set)
-    pr_hint = "(install GitHub CLI `gh auth login` to auto-open PR)"
-    try:
-        sh(["git", "push", "-u", "origin", branch], check=False)
-        log(f"[AUTOIMPROVE] pushed branch {branch}")
-        # Try PR via gh if present
-        try:
-            gh = subprocess.run(["gh", "--version"], capture_output=True, text=True)
-            if gh.returncode == 0:
-                pr = sh(
-                    [
-                        "gh",
-                        "pr",
-                        "create",
-                        "--title",
-                        msg,
-                        "--body",
-                        "Automated maintenance PR (format/imports/lints).",
-                        "--label",
-                        "autoimprove,bot",
-                        "--draft",
-                    ],
-                    check=False,
-                )
-                if pr.returncode == 0:
-                    log("[AUTOIMPROVE] PR opened (draft).")
-                else:
-                    log(f"[AUTOIMPROVE] PR attempt failed:\n{pr.stdout}\n{pr.stderr}")
-            else:
-                log(f"[AUTOIMPROVE] {pr_hint}")
-        except FileNotFoundError:
-            log(f"[AUTOIMPROVE] {pr_hint}")
-    except subprocess.CalledProcessError as e:
-        log(f"[AUTOIMPROVE] push failed: {e.stderr or e.stdout}")
-
-    log("[AUTOIMPROVE] done")
-
+    # commit & optional push
+    if git_changed():
+        msg = "autoimprove: format/lint + smoke"
+        run(["git", "add", "-A"])
+        run(["git", "commit", "-m", msg])
+        if os.environ.get("AUTO_PUSH", "1") == "1":
+            run(["git", "push", "-u", "origin", branch])
+        log("committed (and pushed if configured)")
+    else:
+        log("no code changes")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        log(f"[AUTOIMPROVE] crash: {e}")
-        sys.exit(1)
+    main()
