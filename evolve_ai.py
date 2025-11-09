@@ -55,8 +55,8 @@ for gen in range(GENERATIONS):
 
 print(f"Machine Spirit's final invocation: {best_genome}, fitness: {fitness(best_genome):.3f}")
 
-# Simple HTTP server for Machine Spirit (port 8088, host 0.0.0.0)
-PORT = 8088
+# Simple HTTP server for Machine Spirit (port 8089, host 0.0.0.0)
+PORT = 8089
 Handler = http.server.SimpleHTTPRequestHandler
 
 with socketserver.TCPServer(("", PORT), Handler) as httpd:
