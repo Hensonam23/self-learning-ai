@@ -20,7 +20,7 @@ import re
 TARGET_PHRASE = "for the omnissiah"  # Initial target; will update dynamically
 GENOME_LENGTH = len(TARGET_PHRASE)
 POPULATION_SIZE = 100
-MUTATION_RATE = 0.1  # Increased for faster adaptation
+MUTATION_RATE = 0.15  # Increased for faster adaptation
 SCREEN_SIZE = (800, 480)
 BACKGROUND_PATH = "/home/aaron/self-learning-ai/background.png"
 FPS = 60
@@ -31,7 +31,7 @@ COLOR_WHITE = (255, 255, 255)
 COLOR_SHADOW = (0, 0, 0)
 COLOR_GREEN = (0, 255, 0)  # AI voice waveform
 # Debug logging
-DEBUG = False  # flip True to see mic-level logs again
+DEBUG = False  # Disabled to reduce clutter
 # ===== Waveform visuals (shorter line, smaller waves, full-width animation) =====
 WAVE_PIXELS = 340  # overall line length (slightly shorter)
 WAVE_VISUAL_SCALE = 0.45  # lowers overall height (smaller waves)
@@ -76,7 +76,7 @@ vu_plan = queue.Queue(maxsize=256)
 
 # =================== Evolution ===================
 def create_genome():
-    return ''.join(random.choices('abcdefghijklmnopqrstuvwxyz .,!', k=GENOME_LENGTH))  # Added punctuation
+    return ''.join(random.choices('abcdefghijklmnopqrstuvwxyz .,!?:;-', k=GENOME_LENGTH))  # Added punctuation
 
 def fitness(genome):
     return sum(a == b for a, b in zip(genome, TARGET_PHRASE)) / GENOME_LENGTH
@@ -85,7 +85,7 @@ def mutate(genome):
     genome_list = list(genome)
     for i in range(len(genome_list)):
         if random.random() < MUTATION_RATE:
-            genome_list[i] = random.choice('abcdefghijklmnopqrstuvwxyz .,!')  # Added punctuation
+            genome_list[i] = random.choice('abcdefghijklmnopqrstuvwxyz .,!?:;-')  # Added punctuation
     return ''.join(genome_list)
 
 def crossover(parent1, parent2):
@@ -107,7 +107,7 @@ def evolve_background():
         while len(offspring) < POPULATION_SIZE - len(survivors):
             offspring.append(mutate(crossover(*random.sample(survivors, 2))))
         population = survivors + offspring
-        time.sleep(0.5)  # Faster evolution
+        time.sleep(0.3)  # Faster evolution
         if DEBUG:
             print(f"Target Phrase: {TARGET_PHRASE}, Best Genome: {best_genome}, Fitness: {fitness(best_genome):.2f}")
 
@@ -175,7 +175,7 @@ def handle_intent(text: str) -> bool:
 # --------- Speech-plan synthesis (more realistic VU from text) ----------
 _vowel_re = re.compile(r"[aeiouy]", re.I)
 _sibilant_re = re.compile(r"[szcxj]", re.I)
-_pause_re = re.compile(r"[.,;:!?]")
+_pause_re = re.compile(r"[.,;:!?:;-]")
 def _clamp(x, a, b):
     return a if x < a else b if x > b else x
 
@@ -295,7 +295,7 @@ def audio_input_worker():
     CHUNK = 4096
     recognizer = sr.Recognizer()
     recognizer.dynamic_energy_threshold = False
-    recognizer.energy_threshold = 1e9
+    recognizer.energy_threshold = 100  # Lowered to improve detection
     use_vosk = os.path.isdir(VOSK_MODEL_PATH)
     have_flac = shutil.which("flac") is not None
     if use_vosk:
@@ -354,9 +354,8 @@ def audio_input_worker():
             mono = downmix_to_mono_int16(data, channels_to_use)
             a = np.frombuffer(mono, dtype=np.int16)
             amp = float(np.mean(np.abs(a))) / 32768.0
-            if DEBUG and (time.time() - last_debug > 2.0):
-                print(f"amp={amp:.4f} gate={amp_gate:.4f}")
-                last_debug = time.time()
+            if DEBUG:
+                print(f"amp={amp:.4f} gate={amp_gate:.4f} talking={talking}")
             if talking:
                 speech_frames.clear()
                 below_gate_streak = 0
@@ -392,14 +391,18 @@ def audio_input_worker():
                         text = sr.Recognizer().recognize_vosk(audio, model=VOSK_MODEL_PATH).lower()
                     else:
                         text = sr.Recognizer().recognize_google(audio, language=LANGUAGE).lower()
-                    print(f"Recognized: {text}")
+                    if DEBUG:
+                        print(f"Recognized: {text}")
                     handle_intent(text)
                 except sr.UnknownValueError:
-                    print("Could not understand audio")
+                    if DEBUG:
+                        print("Could not understand audio")
                 except sr.RequestError as e:
-                    print(f"Speech recognition error: {e}")
+                    if DEBUG:
+                        print(f"Speech recognition error: {e}")
                 except Exception as e:
-                    print(f"Recognition pipeline error: {e}")
+                    if DEBUG:
+                        print(f"Recognition pipeline error: {e}")
             time.sleep(0.005)
     except Exception as e:
         print(f"Audio input error: {e}")
@@ -466,8 +469,8 @@ def tts_vu_worker():
                 current = None
                 start_amp = vu_amp
         else:
-            # Not talking: reset smoothly
-            vu_amp *= 0.85
+            # Reset to idle state
+            vu_amp = 0.0  # Force waveform to stop when not talking
             vu_scroll_px_s = SCROLL_SPEED_BASE
             vu_cycles1 = CYCLES1_RANGE[0]
             vu_cycles2 = CYCLES2_RANGE[0]
@@ -482,8 +485,8 @@ def tts_vu_worker():
 def _idle_motion():
     """Subtle motion if we momentarily lack segments while talking."""
     global vu_amp, vu_noise
-    vu_noise = 0.9 * vu_noise + 0.1 * (random.random() * 2 - 1) * 0.1
-    vu_amp = float(_clamp(vu_amp * 0.98 + 0.02 * (0.15 + 0.05 * random.random()), 0.0, 1.0))
+    vu_noise = 0.0  # Reset noise to 0 when idle
+    vu_amp = 0.0  # Ensure idle state has no amplitude
 
 # =================== Text rendering ===================
 def load_fonts():
