@@ -21,3 +21,6 @@ code_dump*.md
 bfg.jar
 *.tgz
 test.wav
+logs/
+*.bak
+*.save.*
