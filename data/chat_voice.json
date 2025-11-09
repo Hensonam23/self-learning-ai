@@ -320,5 +320,125 @@
     "ts": "2025-08-25T21:37:27Z",
     "role": "assistant",
     "text": "Hey—I’m here and listening."
+  },
+  {
+    "ts": "2025-11-09T07:03:47Z",
+    "role": "user",
+    "text": "hello"
+  },
+  {
+    "ts": "2025-11-09T07:03:47Z",
+    "role": "assistant",
+    "text": "I’m here and listening."
+  },
+  {
+    "ts": "2025-11-09T07:07:29Z",
+    "role": "user",
+    "text": "hello"
+  },
+  {
+    "ts": "2025-11-09T07:07:29Z",
+    "role": "assistant",
+    "text": "I’m here and listening."
+  },
+  {
+    "ts": "2025-11-09T07:07:33Z",
+    "role": "user",
+    "text": "how are you"
+  },
+  {
+    "ts": "2025-11-09T07:07:33Z",
+    "role": "assistant",
+    "text": "Core systems online."
+  },
+  {
+    "ts": "2025-11-09T07:07:38Z",
+    "role": "user",
+    "text": "what day is it"
+  },
+  {
+    "ts": "2025-11-09T07:07:38Z",
+    "role": "assistant",
+    "text": "Saturday"
+  },
+  {
+    "ts": "2025-11-09T07:07:41Z",
+    "role": "user",
+    "text": "what time is it"
+  },
+  {
+    "ts": "2025-11-09T07:07:41Z",
+    "role": "assistant",
+    "text": "11:07 PM"
+  },
+  {
+    "ts": "2025-11-09T07:07:46Z",
+    "role": "user",
+    "text": "what time is it again"
+  },
+  {
+    "ts": "2025-11-09T07:07:46Z",
+    "role": "assistant",
+    "text": "11:07 PM"
+  },
+  {
+    "ts": "2025-11-09T07:07:52Z",
+    "role": "user",
+    "text": "what is a computer"
+  },
+  {
+    "ts": "2025-11-09T07:07:52Z",
+    "role": "assistant",
+    "text": "A computer is an electronic machine that receives input, processes data using instructions (software), and produces output. It stores information and can run many kinds of programs."
+  },
+  {
+    "ts": "2025-11-09T07:08:04Z",
+    "role": "user",
+    "text": "what are you"
+  },
+  {
+    "ts": "2025-11-09T07:08:04Z",
+    "role": "assistant",
+    "text": "I’m the Machine Spirit—your local assistant running on this machine."
+  },
+  {
+    "ts": "2025-11-09T07:08:12Z",
+    "role": "user",
+    "text": "what is a mouse"
+  },
+  {
+    "ts": "2025-11-09T07:08:12Z",
+    "role": "assistant",
+    "text": "I don’t know that yet. Give me a short explanation and I’ll keep it."
+  },
+  {
+    "ts": "2025-11-09T07:08:18Z",
+    "role": "user",
+    "text": "what is a keyboard"
+  },
+  {
+    "ts": "2025-11-09T07:08:18Z",
+    "role": "assistant",
+    "text": "I don’t know that yet. Give me a short explanation and I’ll keep it."
+  },
+  {
+    "ts": "2025-11-09T07:08:24Z",
+    "role": "user",
+    "text": "what is the internet"
+  },
+  {
+    "ts": "2025-11-09T07:08:24Z",
+    "role": "assistant",
+    "text": "I don’t know that yet. Give me a short explanation and I’ll keep it."
+  },
+  {
+    "ts": "2025-11-09T07:17:10Z",
+    "role": "user",
+    "text": "what is milk"
+  },
+  {
+    "ts": "2025-11-09T07:17:10Z",
+    "role": "assistant",
+    "text": "Milk is a nutrient-rich liquid produced by mammals. Cow milk is mostly water plus fats, proteins, lactose sugar, vitamins, and minerals."
   }
 ]

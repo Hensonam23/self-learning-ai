@@ -1,93 +1,190 @@
-# voice_loop.py
+#!/usr/bin/env python3
 from __future__ import annotations
-import time, threading
-
-from audio.alsa_utils import silence_alsa
+import threading
+import time
 
 WAKE_WORDS = ("machine spirit", "hey machine spirit")
-TAIL_SECONDS = 3.0
-IDLE_SECONDS = 20.0
+IDLE_TIMEOUT = 10.0       # seconds to stay awake after last interaction
+PHRASE_LIMIT = 6.0        # max seconds per utterance
+
+# Safe imports
+try:
+    import speech_recognition as sr
+except Exception:
+    sr = None  # type: ignore
+
+try:
+    from audio.alsa_utils import silence_alsa
+except Exception:
+    def silence_alsa():
+        return
+
+try:
+    from audio.tts import say as _tts_say
+except Exception:
+    def _tts_say(_text: str) -> None:
+        return
+
+
+def _safe_text(s: str) -> str:
+    """Strip/normalize to ASCII so logging never crashes on unicode."""
+    if not isinstance(s, str):
+        s = str(s)
+    try:
+        return s.encode("ascii", "ignore").decode("ascii")
+    except Exception:
+        return "".join(ch if ord(ch) < 128 else "?" for ch in s)
+
 
 def start_voice_thread(push_cb, shutdown_event: threading.Event, answer_fn):
-    silence_alsa()
-    try:
-        import speech_recognition as sr
-        print("[VOICE] SpeechRecognition available.")
-    except Exception:
-        print("[VOICE] SpeechRecognition NOT available; voice disabled. (pip install SpeechRecognition pyaudio)")
-        def _noop():
-            while not shutdown_event.is_set():
-                time.sleep(0.5)
-        t = threading.Thread(target=_noop, name="voice(noop)", daemon=True)
+    """
+    Voice channel only:
+      - push_cb(text): logs voice status/messages (voice log only).
+      - answer_fn(text) -> reply string for voice chat.
+    """
+
+    def log(msg: str):
+        safe = _safe_text(msg)
+        try:
+            push_cb(safe)
+        except Exception:
+            # Always fall back to stdout, also ascii-safe
+            print(safe, flush=True)
+
+    def tts(text: str):
+        safe = _safe_text(text)
+        try:
+            _tts_say(safe)
+        except Exception:
+            # Don't let TTS issues kill the loop
+            pass
+
+    if sr is None:
+        log("[VOICE] speech_recognition not installed; voice disabled.")
+        t = threading.Thread(target=lambda: None, name="voice(disabled)", daemon=True)
         t.start()
         return t
 
-    r = sr.Recognizer()
-    r.pause_threshold = 0.8
-    r.dynamic_energy_threshold = True
+    silence_alsa()
+
+    # ---- pick microphone + show all devices ----
+    try:
+        names = sr.Microphone.list_microphone_names()
+        if not names:
+            log("[VOICE] No microphones detected; voice disabled.")
+            t = threading.Thread(target=lambda: None, name="voice(nomics)", daemon=True)
+            t.start()
+            return t
+
+        log("[VOICE] Available input devices:")
+        for i, n in enumerate(names):
+            log(f"[VOICE]   {i}: {n}")
+
+        idx = None
+        for i, n in enumerate(names):
+            lower = n.lower()
+            if any(k in lower for k in ("anker", "usb", "mic", "microphone")) and "monitor" not in lower:
+                idx = i
+                break
+        if idx is None:
+            idx = 0
+        log(f"[VOICE] Using device_index={idx}: {names[idx]}")
+    except Exception as e:
+        log(f"[VOICE] Could not list microphones cleanly: {e}")
+        idx = None
 
     def _loop():
-        awake_until = 0.0
-        last_phrase = 0.0
-        buf = ""
-
         try:
-            mic = sr.Microphone()
-        except Exception as e:
-            print(f"[VOICE] No microphone: {e}. Voice disabled.")
-            return
+            r = sr.Recognizer()
+            r.dynamic_energy_threshold = True
+            r.pause_threshold = 0.6
+            r.phrase_threshold = 0.25
 
-        with mic as source:
+            mic_kwargs = {}
+            if idx is not None:
+                mic_kwargs["device_index"] = idx
+
             try:
-                r.adjust_for_ambient_noise(source, duration=0.5)
-            except Exception:
-                pass
-            print("[VOICE] Ready. Say 'Machine Spirit' to wake me.")
+                mic = sr.Microphone(**mic_kwargs)
+            except Exception as e:
+                log(f"[VOICE] Failed to open microphone: {e}. Voice disabled.")
+                return
 
-            while not shutdown_event.is_set():
+            awake = False
+            awake_until = 0.0
+
+            with mic as source:
+                # Ambient noise calibration
                 try:
-                    audio = r.listen(source, timeout=1, phrase_time_limit=6)
-                except sr.WaitTimeoutError:
-                    if buf and (time.time() - last_phrase) >= TAIL_SECONDS:
-                        try:
-                            reply = answer_fn(buf)
-                        except Exception as e:
-                            reply = f"Error while answering: {e}"
-                        push_cb(reply, "voice")
-                        buf = ""
-                    if time.time() > awake_until:
-                        awake_until = 0.0
-                    continue
-                except Exception:
-                    continue
+                    r.adjust_for_ambient_noise(source, duration=1.0)
+                    log("[VOICE] Ambient calibration OK.")
+                except Exception as e:
+                    log(f"[VOICE] Ambient calibration failed (continuing): {e}")
 
-                text = ""
-                for recog in ("google", "sphinx"):
+                log("[VOICE] Say 'Machine Spirit' to wake me.")
+
+                while not shutdown_event.is_set():
+                    # idle timeout
+                    now = time.time()
+                    if awake and now > awake_until:
+                        awake = False
+                        log("[VOICE] Standing by.")
+
+                    # listen
                     try:
-                        if recog == "google":
-                            text = r.recognize_google(audio)
-                        else:
-                            text = r.recognize_sphinx(audio)
-                        break
-                    except Exception:
-                        text = ""
-                if not text:
-                    continue
+                        audio = r.listen(
+                            source,
+                            timeout=1.0,
+                            phrase_time_limit=PHRASE_LIMIT,
+                        )
+                    except sr.WaitTimeoutError:
+                        continue
+                    except Exception as e:
+                        log(f"[VOICE] Listen error: {e}")
+                        time.sleep(0.5)
+                        continue
 
-                low = text.lower().strip()
+                    # STT
+                    text = ""
+                    try:
+                        text = r.recognize_google(audio, language="en-US")
+                    except sr.UnknownValueError:
+                        log("[VOICE] Heard audio but could not understand.")
+                    except Exception as e:
+                        log(f"[VOICE] STT error: {e}")
 
-                if not awake_until and any(w in low for w in WAKE_WORDS):
-                    awake_until = time.time() + IDLE_SECONDS
-                    push_cb("Listening.", "voice")
-                    print("[VOICE] Wake word detected.")
-                    continue
+                    if not text:
+                        continue
 
-                if awake_until:
-                    buf = (buf + " " + text).strip() if buf else text
-                    last_phrase = time.time()
-                    awake_until = time.time() + IDLE_SECONDS
-                    print(f"[VOICE] Heard: {text}")
-                    # tail check happens on timeout path
+                    text = text.strip()
+                    low = text.lower()
+                    log(f"[VOICE] Recognized: {text}")
+
+                    # Wake logic
+                    if not awake:
+                        if any(w in low for w in WAKE_WORDS):
+                            awake = True
+                            awake_until = time.time() + IDLE_TIMEOUT
+                            log("[VOICE] Wake word detected. Listening for commands.")
+                        # ignore non-wake while idle
+                        continue
+
+                    # Already awake: treat as command
+                    awake_until = time.time() + IDLE_TIMEOUT
+                    try:
+                        reply = (answer_fn(text) or "").strip()
+                    except Exception as e:
+                        reply = f"Error while answering: {e}"
+
+                    if reply:
+                        safe_reply = _safe_text(reply)
+                        log(f"[VOICE] Spirit: {safe_reply}")
+                        tts(safe_reply)
+                        # keep session alive for follow-up
+                        awake_until = time.time() + IDLE_TIMEOUT
+
+        except Exception as e:
+            log(f"[VOICE] Fatal error in voice loop: {e}. Voice disabled.")
 
     t = threading.Thread(target=_loop, name="voice", daemon=True)
     t.start()
