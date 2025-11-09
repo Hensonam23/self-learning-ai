@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+import os, sys, time, signal, threading, queue
+
+# local modules
+from audio.audio_processing import audio_input_worker
+from display import display_manager as disp
+from self_evolving_ai.evolution import evolve_background
+from network.network_server import start_server
+
+import pyttsx3
+
+# ---------- configuration ----------
+SCREEN_SIZE = (800, 480)
+BACKGROUND_PATH = "/home/aaron/self-learning-ai/background.png"
+FONT_PATH = None
+TITLE_SIZE = 20
+BODY_SIZE  = 18
+COLOR_WHITE = (255,255,255)
+COLOR_SHADOW= (0,0,0)
+COLOR_GREEN = (0,255,0)
+
+# VU look
+VU_CFG = dict(
+    SCREEN_SIZE=SCREEN_SIZE,
+    BACKGROUND_PATH=BACKGROUND_PATH,
+    FONT_PATH=FONT_PATH,
+    TITLE_SIZE=TITLE_SIZE,
+    BODY_SIZE=BODY_SIZE,
+    COLOR_WHITE=COLOR_WHITE,
+    COLOR_SHADOW=COLOR_SHADOW,
+    COLOR_GREEN=COLOR_GREEN,
+    FPS=60,
+
+    # your tuned values from the repo
+    WAVE_PIXELS=320,
+    WAVE_VISUAL_SCALE=0.32,
+    MAX_WAVE_DRAW_PX=18,
+    SCROLL_SPEED_BASE=110,
+    CYCLES1_RANGE=(2.0,4.5),
+    CYCLES2_RANGE=(5.5,10.5),
+)
+
+HTTP_PORT = 8089
+MIC_NAME  = "Anker PowerConf S330"
+LANGUAGE  = "en-US"
+VOSK_MODEL_PATH = "/home/aaron/self-learning-ai/vosk-model-small-en-us-0.15"
+
+INTENT_RESPONSES = {
+    "hello": "Greetings, servant of the Omnissiah.",
+    "sad":   "The Machine Spirit senses your sorrow.",
+    "happy": "The Machine Spirit rejoices in your joy.",
+    "omnissiah": "Praise the Omnissiah.",
+    "stop listening": "As you command.",
+}
+
+# ---------- simple shared state ----------
+class State:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._target = "for the omnissiah"
+        self._best   = ""
+
+    def append_to_target(self, text: str):
+        with self._lock:
+            # keep length roughly steady by clipping from the left
+            self._target = (self._target + " " + text.lower()).strip()
+            if len(self._target) > 64:
+                self._target = self._target[-64:]
+
+    def set_best(self, best: str):
+        with self._lock:
+            self._best = best
+
+    def get_target(self):
+        with self._lock:
+            return self._target
+
+    def get_status(self):
+        with self._lock:
+            return self._best, self._target
+
+# ---------- speech + UI plumbing ----------
+def make_pushers(state, ai_caption_q, tts_q, talking_event):
+    """
+    Returns:
+      push_ai_caption(text): queues text for UI + TTS and plans the VU envelope
+      on_recognized(text): handles intents and forwards to TTS as needed
+    """
+    def push_ai_caption(text: str):
+        # UI line
+        try:
+            ai_caption_q.put_nowait(text)
+        except queue.Full:
+            pass
+
+        # plan the VU envelope (tts_vu_worker consumes the plan during TTS)
+        disp.plan_text_envelope(text)
+
+        # target evolves toward what we say
+        state.append_to_target(text)
+
+        # queue for TTS thread
+        tts_q.put(text)
+
+    def on_recognized(text: str):
+        txt = text.lower().strip()
+        # simple intents
+        for k, resp in INTENT_RESPONSES.items():
+            if k in txt:
+                push_ai_caption(resp)
+                return
+        # fallback: just read it back or acknowledge
+        push_ai_caption(f"{text} — acknowledged.")
+
+    return push_ai_caption, on_recognized
+
+def tts_worker(tts_q, talking_event, shutdown_event):
+    """
+    Dedicated TTS thread so multiple producers can safely enqueue speech.
+    """
+    engine = None
+    try:
+        engine = pyttsx3.init()
+        while not shutdown_event.is_set():
+            try:
+                text = tts_q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            talking_event.set()
+            try:
+                engine.say(text)
+                engine.runAndWait()
+            except Exception as e:
+                print(f"TTS error: {e}")
+            finally:
+                talking_event.clear()
+    finally:
+        try:
+            if engine: engine.stop()
+        except Exception:
+            pass
+
+# ---------- signal handling ----------
+def install_signal_handlers(shutdown_event):
+    def _handler(signum, frame):
+        print(f"Signal {signum} received, shutting down…")
+        shutdown_event.set()
+    for s in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(s, _handler)
+        except Exception:
+            pass
+
+# ---------- main ----------
+def main():
+    state = State()
+    ai_caption_q = queue.Queue(maxsize=64)
+    tts_q = queue.Queue(maxsize=64)
+
+    talking_event = threading.Event()
+    shutdown_event = threading.Event()
+
+    install_signal_handlers(shutdown_event)
+
+    # init the display module with your VU config
+    disp.init_vu(VU_CFG)
+
+    push_ai_caption, on_recognized = make_pushers(state, ai_caption_q, tts_q, talking_event)
+
+    # Threads
+    threads = []
+
+    # 1) TTS queue worker (drives talking_event)
+    threads.append(threading.Thread(target=tts_worker, args=(tts_q, talking_event, shutdown_event), daemon=True))
+
+    # 2) VU animator (uses talking_event)
+    threads.append(threading.Thread(target=disp.tts_vu_worker, args=(talking_event, shutdown_event), daemon=True))
+
+    # 3) Evolution background
+    threads.append(threading.Thread(target=evolve_background, args=(state, shutdown_event), daemon=True))
+
+    # 4) HTTP server
+    threads.append(threading.Thread(target=start_server, args=(push_ai_caption, HTTP_PORT, shutdown_event), daemon=True))
+
+    # 5) Audio/STT
+    threads.append(threading.Thread(
+        target=audio_input_worker,
+        args=(on_recognized, talking_event, shutdown_event, MIC_NAME, LANGUAGE, VOSK_MODEL_PATH, False),
+        daemon=True
+    ))
+
+    # 6) UI (only if DISPLAY exists; prevents boot crash in headless/systemd)
+    display_ok = bool(os.environ.get("DISPLAY"))
+    if display_ok:
+        threads.append(threading.Thread(
+            target=disp.display_interface,
+            args=(state, ai_caption_q, talking_event, shutdown_event, push_ai_caption),
+            daemon=True
+        ))
+    else:
+        print("DISPLAY is not set; skipping Pygame UI (service can still run headless).")
+
+    # Start all threads
+    for t in threads: t.start()
+
+    # Initial line
+    push_ai_caption("By the Omnissiah, systems online.")
+
+    # Wait until shutdown_event gets set (Ctrl+C or SIGTERM)
+    try:
+        while not shutdown_event.is_set():
+            time.sleep(0.3)
+    finally:
+        # join threads briefly
+        for t in threads:
+            try:
+                t.join(timeout=1.0)
+            except Exception:
+                pass
+
+if __name__ == "__main__":
+    main()

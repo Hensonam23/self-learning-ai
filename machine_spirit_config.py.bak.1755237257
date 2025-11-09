@@ -1,0 +1,27 @@
+# machine_spirit_config.py
+# Safe config loader: reads from environment only; contains NO secrets.
+
+import os
+
+def _csv(name, default=""):
+    raw = os.getenv(name, default)
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+HTTP_PORT   = int(os.getenv("MS_HTTP_PORT", "8089"))
+MEMORY_FILE = os.getenv("MS_MEMORY_FILE", "/home/aaron/self-learning-ai/memory.json")
+
+GOOGLE_HOME_EMAIL    = os.getenv("MS_GOOGLE_HOME_EMAIL", "")
+GOOGLE_HOME_PASSWORD = os.getenv("MS_GOOGLE_HOME_PASSWORD", "")
+ADT_EMAIL            = os.getenv("MS_ADT_EMAIL", "")
+ADT_PASSWORD         = os.getenv("MS_ADT_PASSWORD", "")
+
+# CSV -> list of IPs
+SMART_LIGHT_IPS      = _csv("MS_SMART_LIGHT_IPS", "")
+
+PUSHOVER_TOKEN = os.getenv("MS_PUSHOVER_TOKEN", "")
+PUSHOVER_USER  = os.getenv("MS_PUSHOVER_USER", "")
+
+KNOWLEDGE_SOURCES = _csv(
+    "MS_KNOWLEDGE_SOURCES",
+    "machine learning,raspberry pi projects,python automation,coding,ai self learning"
+)
