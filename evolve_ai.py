@@ -1,6 +1,6 @@
 import random
 import numpy as np
-import http.server
+import http.server  # Fixed import
 import socketserver
 import pygame
 from pygame.locals import *
@@ -11,16 +11,14 @@ import threading
 # Machine Spirit parameters
 TARGET_PHRASE = "for the omnissiah"
 GENOME_LENGTH = 15
-POPULATION_SIZE = 20
-MUTATION_RATE = 0.2
+POPULATION_SIZE = 100  # Increased for better convergence
+MUTATION_RATE = 0.05
 
 # Global variables for living AI state
 best_genome = ""
 input_text = ""  # For user interactions
-mouth_curve = 0  # Mouth state
-blink_time = 0  # For blinking eyes
+talking = False  # Tracks if AI is "talking"
 evolution_thread = None
-fullscreen = False  # Toggle for future AI control
 
 # Create random genome
 def create_genome():
@@ -63,78 +61,80 @@ def evolve_background():
         population = survivors + offspring
         time.sleep(5)  # Update every 5 seconds
 
-# Live, resizable "face" display (Adeptus Mechanicus themed: mechanical skull, binary eyes, cog mouth)
-def display_face():
-    global input_text, mouth_curve, blink_time, fullscreen
+# Live display with background and waveform
+def display_interface():
+    global input_text, talking
     try:
         os.environ['SDL_VIDEODRIVER'] = 'x11'  # Use X11 for DSI compatibility
         os.environ['DISPLAY'] = ':0'  # Use default display
         pygame.init()
         screen = pygame.display.set_mode((800, 480))  # Resizable window
-        pygame.display.set_caption("Machine Spirit Face")
+        pygame.display.set_caption("Machine Spirit Interface")
         clock = pygame.time.Clock()
-        
+
+        # Load background image from current directory
+        background = pygame.image.load("/home/aaron/self-learning-ai/background.png")
+        background = pygame.transform.scale(background, (800, 480))  # Scale to screen
+
         font = pygame.font.SysFont('Arial', 30)  # Smaller font
         running = True
+        waveform_data = np.zeros(400)  # Initial waveform data
+        waveform_pos = 0  # Position for scrolling waveform
+        last_talk_time = 0
+
         while running:
             current_time = time.time()
             for event in pygame.event.get():
                 if event.type == QUIT:
                     running = False
                 elif event.type == KEYDOWN:
-                    if event.key == K_f:  # Toggle fullscreen for future AI control
-                        fullscreen = not fullscreen
-                        if fullscreen:
-                            screen = pygame.display.set_mode((800, 480), FULLSCREEN)
+                    if event.key == K_RETURN:
+                        if "hello" in input_text.lower() or "sad" in input_text.lower():
+                            talking = True
+                            last_talk_time = current_time
                         else:
-                            screen = pygame.display.set_mode((800, 480))
-                    elif event.key == K_RETURN:
-                        # React to input
-                        if "hello" in input_text.lower():
-                            mouth_curve = 3.14  # Smile
-                        elif "sad" in input_text.lower():
-                            mouth_curve = -3.14  # Frown
-                        else:
-                            mouth_curve = 0  # Neutral
+                            talking = False
                         input_text = ""  # Clear input
                     elif event.key == K_BACKSPACE:
                         input_text = input_text[:-1]
                     else:
-                        input_text += event.unicode
-            
-            screen.fill((0, 0, 0))  # Black background
-            # Draw Adeptus Mechanicus servo-skull face
-            # Mechanical skull outline
-            pygame.draw.polygon(screen, (150, 150, 150), [(250, 100), (550, 100), (600, 200), (600, 300), (550, 400), (250, 400), (200, 300), (200, 200)], 5)  # Angular skull
-            # Binary red eyes with blink (glow effect)
-            eye_color = (255, 0, 0) if current_time - blink_time > 2 else (100, 0, 0)  # Dim for blink
-            if current_time - blink_time > 2:
-                blink_time = current_time
-            pygame.draw.circle(screen, eye_color, (300, 200), 40)  # Left eye with binary pulse
-            pygame.draw.circle(screen, eye_color, (500, 200), 40)  # Right eye with binary pulse
-            # Cog mouth with pistons (mechanical wave)
-            mouth_wave = 3.14 + (0.5 * random.random() - 0.25)  # Slight random wave
-            for tooth in range(8):  # More cog teeth for Mechanicus
-                tooth_x = 300 + tooth * 25
-                pygame.draw.rect(screen, (200, 200, 200), (tooth_x, 300, 15, 20))  # Cog teeth
-            pygame.draw.arc(screen, (200, 200, 200), (300, 300, 200, 100), 3.14 - mouth_curve - mouth_wave, 6.28, 5)  # Mouth arc with pistons
-            # Subtle Omnissiah symbol (simplified gear and skull)
-            pygame.draw.circle(screen, (100, 100, 100), (400, 150), 20, 2)  # Small gear
-            pygame.draw.line(screen, (100, 100, 100), (390, 140), (410, 140), 2)  # Top of skull
-            # Render evolved text below the face
-            text = font.render(best_genome, True, (200, 200, 200))  # Gray for Mechanicus aesthetic
-            text_rect = text.get_rect(center=(400, 400))
+                        input_text += event.unicode  # Allow typing
+
+            # Update background
+            screen.blit(background, (0, 0))
+
+            # Update waveform if talking (simulated for 2 seconds after input)
+            if talking and (current_time - last_talk_time) < 2:
+                waveform_data = np.roll(waveform_data, -1)  # Shift left
+                waveform_data[-1] = np.sin(current_time * 5) * 50 + np.random.normal(0, 10, 1)[0]  # New amplitude
+            else:
+                waveform_data = np.zeros(400)  # Reset if not talking
+
+            # Draw waveform (bottom 100 pixels)
+            for x in range(400):
+                y = int(240 + waveform_data[(waveform_pos + x) % 400])  # Center at 240, height 100
+                if x > 0:
+                    pygame.draw.line(screen, (0, 255, 0), (x-1 + 200, 240 + int(waveform_data[(waveform_pos + x - 1) % 400])),
+                                    (x + 200, y), 2)  # Green waveform
+
+            # Render evolved text
+            text = font.render(best_genome, True, (200, 200, 200))  # Gray text
+            text_rect = text.get_rect(center=(400, 100))
             screen.blit(text, text_rect)
+
             # Render input text
             input_render = font.render(input_text, True, (200, 200, 200))
-            input_rect = input_render.get_rect(center=(400, 450))
+            input_rect = input_render.get_rect(center=(400, 300))
             screen.blit(input_render, input_rect)
+
             pygame.display.flip()
             clock.tick(30)  # 30 FPS
-        
-        pygame.quit()
+            waveform_pos = (waveform_pos + 1) % 400  # Move waveform
+
     except Exception as e:
         print(f"Touchscreen error: {e}")
+    finally:
+        pygame.quit()
 
 # Start background evolution thread
 evolution_thread = threading.Thread(target=evolve_background)
@@ -142,7 +142,7 @@ evolution_thread.daemon = True  # Runs in background, exits with main
 evolution_thread.start()
 
 # Start resizable display
-display_face()
+display_interface()
 
 # HTTP server (runs after display quits)
 PORT = 8089
