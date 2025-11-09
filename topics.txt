@@ -1,0 +1,10 @@
+python decorators
+python asyncio event loop
+python context managers
+data structures: heaps, tries, graphs
+algorithms: dynamic programming, greedy
+computer networking basics
+linux process & signals
+shell scripting patterns
+unit testing with pytest
+raspberry pi gpio basics

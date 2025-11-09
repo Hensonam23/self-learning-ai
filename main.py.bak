@@ -7,15 +7,21 @@ HEADLESS = not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) 
 if HEADLESS:
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
-import time, threading, queue, signal, json
-import pyttsx3
+import json
+import queue
 import re
+import signal
+import threading
+import time
+
+import pyttsx3
 
 # Optional deps are imported lazily inside functions
 from audio.audio_processing import audio_input_worker
-from display.display_manager import init_vu, plan_text_envelope, tts_vu_worker, display_interface
-from self_evolving_ai.evolution import evolve_background
+from display.display_manager import (display_interface, init_vu,
+                                     plan_text_envelope, tts_vu_worker)
 from network.network_server import start_server
+from self_evolving_ai.evolution import evolve_background
 
 # ======= Hard Rules (Untouchable) =======
 RULES = (
