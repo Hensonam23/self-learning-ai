@@ -4,6 +4,7 @@ import os, time, threading
 
 from network.network_server import app as http_app, serve_async, push_web, push_voice
 from brain import Brain  # local-only brain
+from audio.alsa_utils import silence_alsa
 
 HTTP_PORT = int(os.environ.get("MS_HTTP_PORT", "8089"))
 STT_MODE  = os.environ.get("MS_STT", "vosk").lower()
@@ -21,6 +22,7 @@ def on_web_ask(text: str) -> str:
 http_app.config["ON_ASK"] = on_web_ask
 
 def voice_loop():
+    silence_alsa()
     try:
         import speech_recognition as sr
     except Exception as e:
@@ -61,7 +63,12 @@ def voice_loop():
 
     idx = pick_index()
     if idx is None:
-        push_voice("[VOICE] No microphone found.")
+        names = list_mics()
+        if names:
+            joined = ", ".join(f"{i}:{n}" for i, n in enumerate(names))
+            push_voice(f"[VOICE] No microphone found. Devices: {joined}")
+        else:
+            push_voice("[VOICE] No microphone found. Devices: <none>")
         return
 
     vs_model = None

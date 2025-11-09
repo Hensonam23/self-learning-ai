@@ -101,6 +101,16 @@ def queue_learning(topic: str) -> None:
     _save_unlocked(mem)
 
 @_with_lock
+def queue_learning_item(item: Dict[str, Any]) -> None:
+    """Append a fully specified learning queue item."""
+    mem = _load_unlocked()
+    obj = dict(item)
+    obj.setdefault("ts", _utc_now())
+    obj.setdefault("status", "queued")
+    mem["learning_queue"].append(obj)
+    _save_unlocked(mem)
+
+@_with_lock
 def list_learning_queue() -> List[Dict[str, Any]]:
     mem = _load_unlocked()
     return list(mem.get("learning_queue", []))
@@ -122,7 +132,12 @@ def pop_learning_queue() -> Optional[Dict[str, Any]]:
     return item
 
 @_with_lock
-def add_knowledge(topic: str, summary: str, sources: Optional[List[str]] = None, meta: Optional[Dict[str, Any]] = None) -> None:
+def add_knowledge(
+    topic: str,
+    summary: str,
+    sources: Optional[List[str]] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> None:
     mem = _load_unlocked()
     mem["knowledge"].append({
         "ts": _utc_now(),
@@ -134,13 +149,24 @@ def add_knowledge(topic: str, summary: str, sources: Optional[List[str]] = None,
     _save_unlocked(mem)
 
 # Back-compat for earlier code that expects this name
-def add_learning_summary(topic: str, summary: str, sources: Optional[List[str]] = None, meta: Optional[Dict[str, Any]] = None) -> None:
+def add_learning_summary(
+    topic: str,
+    summary: str,
+    sources: Optional[List[str]] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Backward-compat wrapper for add_knowledge."""
     add_knowledge(topic, summary, sources, meta)
     # Also drop a note so it's visible in quick tails
     append_note(f"LEARNED: {topic}", tags=["learn"])
 
 @_with_lock
-def log_error(context: str, message: str, correct_answer: Optional[str] = None, extra: Optional[Dict[str, Any]] = None) -> None:
+def log_error(
+    context: str,
+    message: str,
+    correct_answer: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
     """Record mistakes so the system can review & avoid repeats later."""
     mem = _load_unlocked()
     mem["errors"].append({
@@ -148,10 +174,16 @@ def log_error(context: str, message: str, correct_answer: Optional[str] = None, 
         "context": context,
         "message": message,
         "correct_answer": correct_answer,
-        "extra": extra or {}
+        "extra": extra or {},
     })
     _save_unlocked(mem)
 
 # Convenience: store a Q/A pair when the system had to research
-def remember_answer(question: str, answer: str, sources: Optional[List[str]] = None, meta: Optional[Dict[str, Any]] = None) -> None:
+def remember_answer(
+    question: str,
+    answer: str,
+    sources: Optional[List[str]] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Record an answer we had to look up as knowledge."""
     add_knowledge(topic=question, summary=answer, sources=sources, meta=meta)
