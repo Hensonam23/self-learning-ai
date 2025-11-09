@@ -3,6 +3,9 @@ from typing import Optional
 
 import speech_recognition as sr
 
+from .alsa_utils import silence_alsa
+
+silence_alsa()
 
 def _pick_device_index(preferred: str | None) -> Optional[int]:
     """Return a device_index for Microphone or None to let SR choose."""

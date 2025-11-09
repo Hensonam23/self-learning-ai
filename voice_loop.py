@@ -2,11 +2,14 @@
 from __future__ import annotations
 import time, threading
 
+from audio.alsa_utils import silence_alsa
+
 WAKE_WORDS = ("machine spirit", "hey machine spirit")
 TAIL_SECONDS = 3.0
 IDLE_SECONDS = 20.0
 
 def start_voice_thread(push_cb, shutdown_event: threading.Event, answer_fn):
+    silence_alsa()
     try:
         import speech_recognition as sr
         print("[VOICE] SpeechRecognition available.")
