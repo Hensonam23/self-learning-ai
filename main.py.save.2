@@ -140,26 +140,18 @@ def push_ai_caption(text: str):
         print(f"TTS error: {e}")
         talking_event.clear()
 
+
 def handle_intent_or_ack(text: str):
-    t = (text or "").strip()
-    # Typed commands: /learn TOPIC   |   learn TOPIC   |    /search TOPIC   |   search TOPIC
-    m = re.match(r'^(?:/learn|/search|learn/search)\s+(.+), t, flags=re.I)
-    if m:
-        query = m.group(1).strip()
+    tl = text.lower()
+    if "machine spirit, search for" in tl:
+        query = tl.replace("machine spirit, search for", "").strip()
         search_and_learn(query)
         return
-    # Voice phrase fallback
-    if "machine spirit, search for" in t.lower():
-        query = t.lower().replace("machine spirit, search for", "").strip()
-        search_and_learn(query)
-        return
-    # Simple intents
     for key, response in INTENT_RESPONSES.items():
-        if key in t.lower():
+        if key in tl:
             push_ai_caption(response)
             return
-    # Default: acknowledge
-    push_ai_caption(t + " — acknowledged.")
+    push_ai_caption(text + " — acknowledged.")
 
 def search_and_learn(query):
     try:

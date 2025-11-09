@@ -1,0 +1,12 @@
+python decorators
+asyncio event loop
+python context managers
+iterators and generators
+pytest unit testing
+typing and type hints
+dataclasses vs pydantic
+concurrency vs parallelism in python
+multiprocessing vs multithreading
+design patterns in python
+numpy broadcasting
+sqlalchemy orm patterns

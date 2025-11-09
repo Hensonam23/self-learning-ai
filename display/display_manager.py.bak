@@ -141,7 +141,7 @@ def _shadow_text(text, font, text_color, shadow_color, shadow_offset=(2,2)):
     surf.blit(shadow, shadow_offset); surf.blit(base, (0,0))
     return surf
 
-def display_interface(state, ai_caption_q, talking_event, shutdown_event, push_ai_caption, on_user_text):
+def display_interface(state, ai_caption_q, talking_event, shutdown_event, push_ai_caption):
     try:
         pygame.init()
         print("Pygame initialized")
@@ -168,6 +168,7 @@ def display_interface(state, ai_caption_q, talking_event, shutdown_event, push_a
         except queue.Full:
             pass
 
+        phase_drift = 0.0
         input_text = ""
         current_ai_caption = ""
 
@@ -183,7 +184,7 @@ def display_interface(state, ai_caption_q, talking_event, shutdown_event, push_a
                         user_prompt = input_text.strip()
                         input_text = ""
                         if user_prompt:
-                            on_user_text(user_prompt)
+                            push_ai_caption(f"{user_prompt} — acknowledged.")
                     elif event.key == K_BACKSPACE:
                         input_text = input_text[:-1]
                     else:
@@ -215,15 +216,17 @@ def display_interface(state, ai_caption_q, talking_event, shutdown_event, push_a
             # Full-width scrolling wave (AI talking only)
             pts = []
             shift = ((now * vu_scroll_px_s) % WAVE_PIXELS)
-            k1 = 2.0 * math.pi * float(3.0) / float(WAVE_PIXELS)
-            k2 = 2.0 * math.pi * float(7.0) / float(WAVE_PIXELS)
+            phase_drift += 0.015
+            k1 = 2.0 * math.pi * float(vu_cycles1) / float(WAVE_PIXELS)
+            k2 = 2.0 * math.pi * float(vu_cycles2) / float(WAVE_PIXELS)
             base_px = vu_amp * (wave_height_px / 2.0) * WAVE_VISUAL_SCALE
             if base_px > MAX_WAVE_DRAW_PX:
                 base_px = MAX_WAVE_DRAW_PX
 
             for xpix_rel in range(WAVE_PIXELS):
                 pos = (xpix_rel + shift)
-                w = 0.62 * abs(math.sin(k1 * pos)) + 0.38 * abs(math.sin(k2 * pos + 0.7))
+                w = 0.62 * abs(math.sin(k1 * pos + 0.4 * math.sin(phase_drift))) \
+                    + 0.38 * abs(math.sin(k2 * pos * (1.0 + 0.02 * math.sin(0.6 * phase_drift)) + 0.7))
                 amp_px = base_px * float(w)
                 ypix = int(wave_center_y - amp_px)
                 xpix = wave_left + xpix_rel

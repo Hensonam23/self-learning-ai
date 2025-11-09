@@ -14,75 +14,60 @@ def _downmix_to_mono_int16(raw_bytes, channels):
     except ValueError:
         return raw_bytes
 
-def _best_input_device(p: pyaudio.PyAudio, preferred_name: str, preferred_index: int | None):
-    """
-    Choose a real hardware capture device first (avoid 'pulse'/'default' unless explicitly asked).
-    If preferred_index is valid with input channels, use it.
-    Else try case-insensitive substring match by preferred_name.
-    Else choose the first non-pulse/non-default device with input channels.
-    Else fall back to pulse/default if that’s all we have.
-    """
+def _find_input_device(p: pyaudio.PyAudio, preferred_name: str):
     print("Available audio devices:")
-    devices = []
+    pulse_index = None
+    default_input_index = None
+    fav_index = None
+    fav_rate = None
+    fav_inch = None
     for i in range(p.get_device_count()):
-        d = p.get_device_info_by_index(i)
-        name = str(d.get('name',''))
-        rate = int(d.get('defaultSampleRate') or 44100)
-        in_ch = int(d.get('maxInputChannels') or 0)
-        out_ch = int(d.get('maxOutputChannels') or 0)
+        dev = p.get_device_info_by_index(i)
+        name = dev.get('name','')
+        rate = int(dev.get('defaultSampleRate') or 44100)
+        in_ch = int(dev.get('maxInputChannels') or 0)
+        out_ch = int(dev.get('maxOutputChannels') or 0)
         print(f"Device {i}: {name} (Rate: {rate}, Input: {in_ch}, Output: {out_ch})")
-        devices.append((i, name, rate, in_ch, out_ch))
+        if in_ch > 0 and default_input_index is None:
+            default_input_index = i
+        if 'pulse' in name.lower():
+            pulse_index = i
+        if preferred_name and preferred_name.lower() in name.lower():
+            # only accept as favorite if it actually has input channels
+            if in_ch > 0:
+                fav_index, fav_rate, fav_inch = i, rate, in_ch
 
-    # 1) explicit index
-    if preferred_index is not None and preferred_index >= 0:
-        for (i, name, rate, in_ch, _) in devices:
-            if i == preferred_index and in_ch > 0:
-                print(f"Selecting explicit device index {i}: {name}")
-                return i, rate, max(1, in_ch)
+    # Prefer the favorite device if it has input
+    if fav_index is not None:
+        print(f"Selecting preferred mic with input: {preferred_name} at index {fav_index}")
+        return fav_index, int(fav_rate or 48000), max(1, int(fav_inch or 1))
 
-    # 2) preferred name (try to avoid virtual devices)
-    if preferred_name:
-        pn = preferred_name.lower()
-        # exact/substring match, non-virtual first
-        hw_matches = [(i,n,r,in_ch) for (i,n,r,in_ch,_) in devices
-                      if in_ch>0 and pn in n.lower() and ('pulse' not in n.lower()) and ('default' not in n.lower())]
-        if hw_matches:
-            i,n,r,in_ch = hw_matches[0]
-            print(f"Selecting preferred hardware mic: {n} at index {i}")
-            return i, r, max(1, in_ch)
-        # as last resort, allow pulse/default if they match the preferred name
-        virt_matches = [(i,n,r,in_ch) for (i,n,r,in_ch,_) in devices
-                        if in_ch>0 and pn in n.lower()]
-        if virt_matches:
-            i,n,r,in_ch = virt_matches[0]
-            print(f"Selecting preferred (virtual) mic: {n} at index {i}")
-            return i, r, max(1, in_ch)
+    # Otherwise prefer Pulse (so we can use the desktop's default source)
+    if pulse_index is not None:
+        dev = p.get_device_info_by_index(pulse_index)
+        in_ch = int(dev.get('maxInputChannels') or 1)
+        print(f"Selecting PulseAudio input: pulse at index {pulse_index}")
+        return pulse_index, int(dev.get('defaultSampleRate') or 44100), max(1, in_ch)
 
-    # 3) first non-virtual device with input
-    for (i, n, r, in_ch, _) in devices:
-        if in_ch>0 and ('pulse' not in n.lower()) and ('default' not in n.lower()):
-            print(f"Selecting first hardware input: {n} at index {i}")
-            return i, r, max(1, in_ch)
-
-    # 4) pulse/default fallback
-    for (i, n, r, in_ch, _) in devices:
-        if in_ch>0:
-            which = "PulseAudio" if 'pulse' in n.lower() else "default"
-            print(f"Falling back to {which} input: {n} at index {i}")
-            return i, r, max(1, in_ch)
-
-    raise RuntimeError("No input device found")
+    # Fall back to the first input device
+    if default_input_index is None:
+        raise RuntimeError("No input device found")
+    dev = p.get_device_info_by_index(default_input_index)
+    print(f"Selecting default input at index {default_input_index}")
+    return default_input_index, int(dev.get('defaultSampleRate') or 44100), max(1, int(dev.get('maxInputChannels') or 1))
 
 def audio_input_worker(on_recognized, talking_event, shutdown_event,
                        mic_name, language, vosk_model_path, debug=False):
     """
     Capture mic -> VAD -> STT (Vosk offline if present; else Google).
+    No waveform from mic; display only uses AI TTS envelope.
     Cleanly exits when shutdown_event is set.
     """
     FORMAT = pyaudio.paInt16
     SAMPLE_WIDTH = 2
     CHUNK = 4096
 
+    # Force debug from env if set (so we can toggle via .env)
     if not debug:
         debug = os.getenv("DEBUG_AUDIO","0") not in ("0","false","False","")
 
@@ -103,21 +88,15 @@ def audio_input_worker(on_recognized, talking_event, shutdown_event,
     stream = None
 
     try:
-        # read optional forced index from env
-        env_idx = os.getenv("MIC_DEVICE_INDEX", "").strip()
-        forced_idx = int(env_idx) if env_idx.isdigit() else None
-
-        mic_index, rate, in_channels = _best_input_device(p, mic_name or "", forced_idx)
-
-        # Always try 1 channel first, then fall back to the device's max input channels
+        mic_index, rate, in_channels = _find_input_device(p, mic_name)
         channels_to_use = 1
         try:
             stream = p.open(format=FORMAT, channels=channels_to_use, rate=rate,
                             input=True, input_device_index=mic_index,
                             frames_per_buffer=CHUNK)
         except Exception as e:
-            print(f"Mono open failed ({e}); retrying with channels={max(1, in_channels)}")
-            channels_to_use = max(1, in_channels)
+            print(f"Mono open failed ({e}); retrying with channels={min(2, in_channels or 1)}")
+            channels_to_use = max(1, min(2, in_channels or 1))
             stream = p.open(format=FORMAT, channels=channels_to_use, rate=rate,
                             input=True, input_device_index=mic_index,
                             frames_per_buffer=CHUNK)
@@ -133,8 +112,7 @@ def audio_input_worker(on_recognized, talking_event, shutdown_event,
             a = np.frombuffer(mono, dtype=np.int16)
             baseline_vals.append(float(np.mean(np.abs(a))) / 32768.0)
         noise_floor = float(np.median(baseline_vals)) if baseline_vals else 0.004
-        # Lower, more forgiving gate + clamp to sane min/max
-        amp_gate = min(max(noise_floor * 1.3, 0.003), 0.06)
+        amp_gate = max(noise_floor * 1.8, 0.006)  # more sensitive
         if debug:
             print(f"Noise floor: {noise_floor:.4f}  ->  speech gate: {amp_gate:.4f}")
 
@@ -142,10 +120,11 @@ def audio_input_worker(on_recognized, talking_event, shutdown_event,
         speech_frames = []
         below_gate_streak = 0
 
-        min_phrase_seconds = 0.35
+        # more permissive timings
+        min_phrase_seconds = 0.45
         max_phrase_seconds = 4.00
-        end_silence_seconds = 0.20
-        min_snr_for_recog = 1.15
+        end_silence_seconds = 0.25
+        min_snr_for_recog = 1.2
 
         last_debug = time.time()
 
@@ -222,3 +201,8 @@ def audio_input_worker(on_recognized, talking_event, shutdown_event,
         finally:
             try: p.terminate()
             except Exception: pass
+PY
+
+# restart and watch logs
+sudo systemctl restart machine-spirit
+journalctl -u machine-spirit -n 100 -f

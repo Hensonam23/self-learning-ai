@@ -1,28 +1,27 @@
-import os, http.server, socketserver, urllib.parse, hmac
+import http.server, socketserver, urllib.parse
 
-def start_server(push_ai_caption, port=8089, shutdown_event=None):
-    MS_TOKEN = os.environ.get("MS_HTTP_TOKEN", "").strip()
-
-    def _authorized(headers, query_params):
-        if not MS_TOKEN:
-            return True  # if no token set, allow all (but you DID set one)
-        supplied = headers.get("X-MS-Token", "")
-        if not supplied:
-            supplied = " ".join(query_params.get("token", [""]))
-        try:
-            return hmac.compare_digest(supplied, MS_TOKEN)
-        except Exception:
-            return False
-
+def start_server(push_ai_caption, learn_func, port=8089, shutdown_event=None, token=None):
     class Handler(http.server.SimpleHTTPRequestHandler):
+        def _get_token(self):
+            # Header takes precedence, then query ?token=
+            hdr = self.headers.get('X-MS-Token', '')
+            if hdr:
+                return hdr.strip()
+            _, _, query = self.path.partition('?')
+            params = urllib.parse.parse_qs(query)
+            return ' '.join(params.get('token', [''])).strip()
+
+        def _auth(self):
+            if not token:
+                return True
+            return self._get_token() == str(token)
+
         def do_GET(self):
+            if not self._auth():
+                self.send_response(401); self.end_headers(); self.wfile.write(b"Unauthorized"); return
+
             path, _, query = self.path.partition('?')
             params = urllib.parse.parse_qs(query)
-
-            if not _authorized(self.headers, params):
-                self.send_response(401); self.end_headers()
-                self.wfile.write(b"Unauthorized")
-                return
 
             if path == '/hello':
                 push_ai_caption("Hello, servant of the Omnissiah.")
@@ -34,6 +33,18 @@ def start_server(push_ai_caption, port=8089, shutdown_event=None):
                     push_ai_caption(text)
                 else:
                     self.send_response(400); self.end_headers(); self.wfile.write(b"Missing ?text="); return
+            elif path == '/learn':
+                topic = ' '.join(params.get('topic', [''])).strip()
+                if topic:
+                    learn_func(topic)
+                else:
+                    self.send_response(400); self.end_headers(); self.wfile.write(b"Missing ?topic="); return
+            elif path == '/search':
+                q = ' '.join(params.get('q', [''])).strip()
+                if q:
+                    learn_func(q)
+                else:
+                    self.send_response(400); self.end_headers(); self.wfile.write(b"Missing ?q="); return
             else:
                 self.send_response(404); self.end_headers(); self.wfile.write(b"404 - Not Found"); return
 
@@ -42,11 +53,24 @@ def start_server(push_ai_caption, port=8089, shutdown_event=None):
             self.end_headers()
             self.wfile.write(b"OK")
 
+        def log_message(self, fmt, *args):
+            # Quieter logs
+            return
+
+    class ReuseTCPServer(socketserver.TCPServer):
+        allow_reuse_address = True
+
     try:
-        with socketserver.TCPServer(("", port), Handler) as httpd:
-            httpd.timeout = 0.5
-            print(f"Machine Spirit serving at port {port}")
-            while shutdown_event is None or not shutdown_event.is_set():
-                httpd.handle_request()
+        httpd = ReuseTCPServer(("", port), Handler)
+        httpd.timeout = 0.5  # so handle_request() returns regularly
+        print(f"Machine Spirit serving at port {port}")
+        while shutdown_event is None or not shutdown_event.is_set():
+            httpd.handle_request()
     except Exception as e:
         print(f"HTTP server error: {e}")
+    finally:
+        try:
+            httpd.server_close()
+            print("HTTP server closed.")
+        except Exception:
+            pass
