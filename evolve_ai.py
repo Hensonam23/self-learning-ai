@@ -1,35 +1,49 @@
 import random
 import numpy as np
-import http.server  # Fixed import
+import http.server
 import socketserver
 import pygame
 from pygame.locals import *
 import os
 import time
 import threading
+from collections import deque
+import queue
 
 # Machine Spirit parameters
 TARGET_PHRASE = "for the omnissiah"
-GENOME_LENGTH = 15
-POPULATION_SIZE = 100  # Increased for better convergence
+GENOME_LENGTH = len(TARGET_PHRASE)
+POPULATION_SIZE = 100
 MUTATION_RATE = 0.05
+SCREEN_SIZE = (800, 480)
+BACKGROUND_PATH = "/home/aaron/self-learning-ai/background.png"
+FPS = 60
+FONT_PATH = None
+TITLE_SIZE = 36
+BODY_SIZE = 28
+COLOR_WHITE = (255, 255, 255)
+COLOR_SHADOW = (0, 0, 0)
+COLOR_GREEN = (0, 255, 0)
 
 # Global variables for living AI state
 best_genome = ""
-input_text = ""  # For user interactions
-talking = False  # Tracks if AI is "talking"
-evolution_thread = None
+input_text = ""
+talking = False
+last_talk_time = 0.0
+WAVE_PIXELS = 600
+wave_envelope = deque([0.0] * WAVE_PIXELS, maxlen=WAVE_PIXELS)
+ai_caption_q = queue.Queue(maxsize=32)  # UI text only
+ai_speak_q = queue.Queue(maxsize=32)    # Words/utterances to drive the wave (demo)
+ai_amp_q = queue.Queue(maxsize=4096)    # Real-time amplitudes
+current_ai_caption = ""
 
-# Create random genome
+# Evolutionary helpers
 def create_genome():
     return ''.join(random.choices('abcdefghijklmnopqrstuvwxyz ', k=GENOME_LENGTH))
 
-# Fitness
 def fitness(genome):
-    score = sum(a == b for a, b in zip(genome, TARGET_PHRASE))
-    return score / GENOME_LENGTH
+    return sum(a == b for a, b in zip(genome, TARGET_PHRASE)) / GENOME_LENGTH
 
-# Mutate
 def mutate(genome):
     genome_list = list(genome)
     for i in range(len(genome_list)):
@@ -37,114 +51,225 @@ def mutate(genome):
             genome_list[i] = random.choice('abcdefghijklmnopqrstuvwxyz ')
     return ''.join(genome_list)
 
-# Crossover
 def crossover(parent1, parent2):
     point = random.randint(1, GENOME_LENGTH - 1)
     return parent1[:point] + parent2[point:]
 
-# Background evolution thread for constant self-learning
 def evolve_background():
     global best_genome
     population = [create_genome() for _ in range(POPULATION_SIZE)]
+    best_genome = population[0]
     while True:
         population.sort(key=fitness, reverse=True)
-        best = population[0]
-        if fitness(best) > fitness(best_genome):
-            best_genome = best
+        if fitness(population[0]) > fitness(best_genome):
+            best_genome = population[0]
         survivors = population[:POPULATION_SIZE // 4]
         offspring = []
         while len(offspring) < POPULATION_SIZE - len(survivors):
-            parent1, parent2 = random.sample(survivors, 2)
-            child = crossover(parent1, parent2)
-            child = mutate(child)
-            offspring.append(child)
+            offspring.append(mutate(crossover(*random.sample(survivors, 2))))
         population = survivors + offspring
-        time.sleep(5)  # Update every 5 seconds
+        time.sleep(5)
 
-# Live display with background and waveform
-def display_interface():
-    global input_text, talking
+# AI ↔ Display integration
+def push_ai_caption(text: str):
+    global talking, last_talk_time
     try:
-        os.environ['SDL_VIDEODRIVER'] = 'x11'  # Use X11 for DSI compatibility
-        os.environ['DISPLAY'] = ':0'  # Use default display
-        pygame.init()
-        screen = pygame.display.set_mode((800, 480))  # Resizable window
-        pygame.display.set_caption("Machine Spirit Interface")
-        clock = pygame.time.Clock()
+        ai_caption_q.put_nowait(text)
+    except queue.Full:
+        pass
+    try:
+        ai_speak_q.put_nowait(text)
+    except queue.Full:
+        pass
+    talking = True
+    last_talk_time = time.time()
 
-        # Load background image from current directory
-        background = pygame.image.load("/home/aaron/self-learning-ai/background.png")
-        background = pygame.transform.scale(background, (800, 480))  # Scale to screen
+def push_ai_amplitude(amp: float):
+    amp = max(0.0, min(1.0, float(amp or 0.0)))
+    try:
+        ai_amp_q.put_nowait(amp)
+    except queue.Full:
+        pass
 
-        font = pygame.font.SysFont('Arial', 30)  # Smaller font
-        running = True
-        waveform_data = np.zeros(400)  # Initial waveform data
-        waveform_pos = 0  # Position for scrolling waveform
-        last_talk_time = 0
+# DEMO ENVELOPE (word-by-word)
+def word_envelope(word: str, rate_hz: int = 120):
+    base = 0.09
+    per_char = 0.025
+    duration = min(0.45, base + per_char * len(word))
+    n = max(8, int(duration * rate_hz))
+    attack = max(2, int(0.25 * n))
+    decay = n - attack
+    t1 = np.linspace(0, 1, attack)
+    t2 = np.linspace(1, 0, decay)
+    env = np.concatenate([0.5 - 0.5 * np.cos(np.pi * t1), 0.5 + 0.5 * np.cos(np.pi * t2)])
+    vowel_boost = 0.15 * (sum(1 for c in word.lower() if c in 'aeiouy') / max(1, len(word)))
+    env = np.clip(0.25 + (0.65 + vowel_boost) * env, 0.0, 1.0)
+    return env.tolist()
 
-        while running:
-            current_time = time.time()
-            for event in pygame.event.get():
-                if event.type == QUIT:
-                    running = False
-                elif event.type == KEYDOWN:
-                    if event.key == K_RETURN:
-                        if "hello" in input_text.lower() or "sad" in input_text.lower():
-                            talking = True
-                            last_talk_time = current_time
-                        else:
-                            talking = False
-                        input_text = ""  # Clear input
-                    elif event.key == K_BACKSPACE:
-                        input_text = input_text[:-1]
-                    else:
-                        input_text += event.unicode  # Allow typing
+def demo_speaker_worker():
+    gap_s = 0.06
+    rate_hz = 120
+    gap_samples = int(gap_s * rate_hz)
+    while True:
+        try:
+            text = ai_speak_q.get(timeout=0.1)
+        except queue.Empty:
+            time.sleep(0.01)
+            continue
+        words = [w for w in text.split() if w]
+        for w in words:
+            for amp in word_envelope(w, rate_hz=rate_hz):
+                push_ai_amplitude(amp)
+                time.sleep(1.0 / rate_hz)
+            for _ in range(gap_samples):
+                push_ai_amplitude(0.0)
+                time.sleep(1.0 / rate_hz)
+        for amp in np.linspace(0.2, 0.0, 24):
+            push_ai_amplitude(float(amp))
+            time.sleep(1.0 / rate_hz)
 
-            # Update background
+# Text rendering helpers
+def load_fonts():
+    if FONT_PATH and os.path.isfile(FONT_PATH):
+        return pygame.font.Font(FONT_PATH, TITLE_SIZE), pygame.font.Font(FONT_PATH, BODY_SIZE)
+    else:
+        return pygame.font.SysFont('DejaVu Sans', TITLE_SIZE), pygame.font.SysFont('DejaVu Sans', BODY_SIZE)
+
+def render_shadow_text(text: str, font: pygame.font.Font, text_color, shadow_color, shadow_offset=(2, 2)):
+    base = font.render(text, True, text_color)
+    shadow = font.render(text, True, shadow_color)
+    surf = pygame.Surface((base.get_width() + shadow_offset[0], base.get_height() + shadow_offset[1]), pygame.SRCALPHA)
+    shadow.set_alpha(51)  # ~20% opacity
+    surf.blit(shadow, shadow_offset)
+    surf.blit(base, (0, 0))
+    return surf
+
+# Display (Pygame)
+def display_interface():
+    global input_text, talking, last_talk_time, current_ai_caption
+    pygame.init()
+    screen = pygame.display.set_mode(SCREEN_SIZE)
+    pygame.display.set_caption("Machine Spirit Interface")
+    clock = pygame.time.Clock()
+
+    # Load background image
+    background = None
+    if os.path.isfile(BACKGROUND_PATH):
+        try:
+            background = pygame.image.load(BACKGROUND_PATH)
+            background = pygame.transform.scale(background, SCREEN_SIZE)
+        except Exception:
+            pass
+
+    title_font, body_font = load_fonts()
+    wave_left = (SCREEN_SIZE[0] - WAVE_PIXELS) // 2
+    wave_center_y = SCREEN_SIZE[1] // 2 + 40  # Centered vertically
+    wave_height_px = 120
+
+    try:
+        push_ai_caption("By the Omnissiah, systems online.")
+    except queue.Full:
+        pass
+
+    while True:
+        now = time.time()
+        for event in pygame.event.get():
+            if event.type == QUIT:
+                return
+            elif event.type == KEYDOWN:
+                if event.key == K_RETURN:
+                    user_prompt = input_text.strip()
+                    input_text = ""
+                    if user_prompt:
+                        push_ai_caption(f"{user_prompt} — acknowledged.")
+                elif event.key == K_BACKSPACE:
+                    input_text = input_text[:-1]
+                else:
+                    input_text += event.unicode
+
+        # Pull any new caption for the UI (non-blocking)
+        try:
+            while True:
+                current_ai_caption = ai_caption_q.get_nowait()
+                talking = True
+                last_talk_time = now
+        except queue.Empty:
+            pass
+
+        # Background
+        if background:
             screen.blit(background, (0, 0))
+        else:
+            screen.fill((10, 15, 20))
 
-            # Update waveform if talking (simulated for 2 seconds after input)
-            if talking and (current_time - last_talk_time) < 2:
-                waveform_data = np.roll(waveform_data, -1)  # Shift left
-                waveform_data[-1] = np.sin(current_time * 5) * 50 + np.random.normal(0, 10, 1)[0]  # New amplitude
-            else:
-                waveform_data = np.zeros(400)  # Reset if not talking
+        # Top: mantra
+        genome_surf = render_shadow_text(best_genome, title_font, COLOR_WHITE, COLOR_SHADOW)
+        screen.blit(genome_surf, genome_surf.get_rect(center=(SCREEN_SIZE[0] // 2, 50)))
 
-            # Draw waveform (bottom 100 pixels)
-            for x in range(400):
-                y = int(240 + waveform_data[(waveform_pos + x) % 400])  # Center at 240, height 100
-                if x > 0:
-                    pygame.draw.line(screen, (0, 255, 0), (x-1 + 200, 240 + int(waveform_data[(waveform_pos + x - 1) % 400])),
-                                    (x + 200, y), 2)  # Green waveform
+        # Axis
+        pygame.draw.line(screen, (40, 80, 120), (wave_left, wave_center_y), (wave_left + WAVE_PIXELS, wave_center_y), 1)
 
-            # Render evolved text
-            text = font.render(best_genome, True, (200, 200, 200))  # Gray text
-            text_rect = text.get_rect(center=(400, 100))
-            screen.blit(text, text_rect)
+        # Consume -> smooth -> draw
+        max_per_frame = 16
+        decay = 0.92
+        pulled = 0
+        while pulled < max_per_frame:
+            try:
+                wave_envelope.append(ai_amp_q.get_nowait())
+                pulled += 1
+            except queue.Empty:
+                break
+        if pulled == 0:
+            wave_envelope.append(wave_envelope[-1] * decay)
 
-            # Render input text
-            input_render = font.render(input_text, True, (200, 200, 200))
-            input_rect = input_render.get_rect(center=(400, 300))
-            screen.blit(input_render, input_rect)
+        amps = np.asarray(wave_envelope, dtype=float)
+        if amps.size >= 5:
+            kernel = np.array([1, 2, 3, 2, 1], dtype=float)
+            kernel /= kernel.sum()
+            smooth = np.convolve(amps, kernel, mode='same')
+        else:
+            smooth = amps
 
-            pygame.display.flip()
-            clock.tick(30)  # 30 FPS
-            waveform_pos = (waveform_pos + 1) % 400  # Move waveform
+        # Upsample for smoother curve
+        x = np.arange(len(smooth))
+        xi = np.linspace(0, len(smooth) - 1, len(smooth) * 2)
+        yi = np.interp(xi, x, smooth)
+        pts = []
+        for i, amp in enumerate(yi):
+            xpix = wave_left + int(i * (WAVE_PIXELS * 1.0 / len(yi)))
+            ypix = int(wave_center_y - (amp * (wave_height_px / 2.0)))
+            pts.append((xpix, ypix))
 
-    except Exception as e:
-        print(f"Touchscreen error: {e}")
-    finally:
-        pygame.quit()
+        if len(pts) >= 2:
+            pygame.draw.aalines(screen, COLOR_GREEN, False, pts)
+
+        # Caption
+        if current_ai_caption:
+            cap_surf = render_shadow_text(current_ai_caption, body_font, COLOR_WHITE, COLOR_SHADOW)
+            screen.blit(cap_surf, cap_surf.get_rect(center=(SCREEN_SIZE[0] // 2, wave_center_y + wave_height_px // 2 + 40)))
+
+        # Input
+        if input_text:
+            inp_surf = render_shadow_text(input_text, body_font, COLOR_WHITE, COLOR_SHADOW)
+            screen.blit(inp_surf, inp_surf.get_rect(center=(SCREEN_SIZE[0] // 2, SCREEN_SIZE[1] - 50)))
+
+        pygame.display.flip()
+        clock.tick(FPS)
 
 # Start background evolution thread
-evolution_thread = threading.Thread(target=evolve_background)
-evolution_thread.daemon = True  # Runs in background, exits with main
-evolution_thread.start()
+threading.Thread(target=evolve_background, daemon=True).start()
+# Demo worker drives per-word waves
+threading.Thread(target=demo_speaker_worker, daemon=True).start()
 
-# Start resizable display
-display_interface()
+# Start resizable display and keep open with HTTP server
+try:
+    display_interface()
+except SystemExit:
+    pass
+finally:
+    pygame.quit()
 
-# HTTP server (runs after display quits)
+# HTTP server (runs after display, keeps process alive)
 PORT = 8089
 Handler = http.server.SimpleHTTPRequestHandler
 with socketserver.TCPServer(("", PORT), Handler) as httpd:
