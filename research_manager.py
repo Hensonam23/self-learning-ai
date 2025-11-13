@@ -3,18 +3,18 @@
 """
 Research manager for the Machine Spirit.
 
-This does NOT perform live web requests yet.
-Instead, it keeps a structured queue of topics or URLs that the
-Machine Spirit has flagged as needing deeper research.
+This does NOT perform live web requests itself.
+It keeps a structured queue of topics or URLs that the Machine Spirit
+has flagged as needing deeper research.
 
-Later, a separate script or module can process this queue and attach
-real research results.
+A separate script (research_worker.py) can process this queue and
+attach real research results.
 """
 
 import json
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 
 RESEARCH_QUEUE_PATH = "data/research_queue.json"
@@ -52,7 +52,8 @@ def _save_queue(path: str, data: List[Dict[str, Any]]) -> None:
 
 class ResearchManager:
     """
-    Provides simple methods to queue research tasks.
+    Provides simple methods to queue research tasks and to inspect/update
+    the queue.
 
     Types of tasks:
     - "topic": a user question or topic that needs better answers.
@@ -65,10 +66,15 @@ class ResearchManager:
     def __init__(self, path: str = RESEARCH_QUEUE_PATH) -> None:
         self.path = path
 
-    def _append_entry(self, entry: Dict[str, Any]) -> None:
-        queue = _load_queue(self.path)
-        queue.append(entry)
+    # ---- low-level helpers -------------------------------------------------
+
+    def _load(self) -> List[Dict[str, Any]]:
+        return _load_queue(self.path)
+
+    def _save(self, queue: List[Dict[str, Any]]) -> None:
         _save_queue(self.path, queue)
+
+    # ---- public API: add items --------------------------------------------
 
     def queue_topic(
         self,
@@ -77,6 +83,7 @@ class ResearchManager:
         channel: str = "cli",
     ) -> None:
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        queue = self._load()
         entry: Dict[str, Any] = {
             "timestamp": ts,
             "type": "topic",
@@ -84,8 +91,10 @@ class ResearchManager:
             "user_text": user_text,
             "reason": reason,
             "status": "pending",
+            "notes_key": None,  # key into research_notes.json if we attach notes
         }
-        self._append_entry(entry)
+        queue.append(entry)
+        self._save(queue)
 
     def queue_url(
         self,
@@ -94,6 +103,7 @@ class ResearchManager:
         channel: str = "cli",
     ) -> None:
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        queue = self._load()
         entry: Dict[str, Any] = {
             "timestamp": ts,
             "type": "url",
@@ -101,5 +111,28 @@ class ResearchManager:
             "url": url,
             "reason": reason,
             "status": "pending",
+            "notes_key": None,
         }
-        self._append_entry(entry)
+        queue.append(entry)
+        self._save(queue)
+
+    # ---- public API: inspect / update queue --------------------------------
+
+    def get_queue(self) -> List[Dict[str, Any]]:
+        """
+        Return the full queue list.
+        """
+        return self._load()
+
+    def save_queue(self, queue: List[Dict[str, Any]]) -> None:
+        """
+        Overwrite the queue with a modified list.
+        """
+        self._save(queue)
+
+    def list_pending_indices(self) -> List[int]:
+        """
+        Convenience: returns indices of entries whose status is 'pending'.
+        """
+        queue = self._load()
+        return [i for i, e in enumerate(queue) if e.get("status") == "pending"]

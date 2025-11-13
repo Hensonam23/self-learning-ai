@@ -29,5 +29,8 @@
   "what is my pc good for?": "My PC is a Ryzen 7 5800X with 32GB RAM and it's great for 2K gaming with high FPS and strong performance in modern games.",
   "no, that's wrong. my pc is a ryzen 7 5800x with 32gb ram and it's great for 2k gaming with high fps.": "> no, that's wrong. my pc is a ryzen 7 5800x with 32gb ram and it's great for 2k gaming with high fps is Make sure cpu is boosting fully and ram in bios is set to 3600 and not defaul 2133mhz, also check gpu & cpu temps, what resolution? It is commonly used for gaming.",
   "no, that's wrong. my pc is a ryzen 7 5800x with 32gb ram and it's great for 2k gaming with high fps and strong performance in modern games.": "No, that's wrong. my pc is a ryzen 7 5800x with 32gb ram and it's great for 2k gaming with high fps and strong performance in modern games is Find and fix cpu or gpu bottlenecks in your pc . It is commonly used for gaming.",
-  "what is the perfect snack?": "The perfect snack depends on what I'm doing, but usually something light, easy to eat, and not too messy, like trail mix or chips, so it doesn't distract me."
+  "what is the perfect snack?": "The perfect snack depends on what I'm doing, but usually something light, easy to eat, and not too messy, like trail mix or chips, so it doesn't distract me.",
+  "cat data/local_knowledge.json": "Greetings. Core systems are online and listening.",
+  "what is the best snack?": "Greetings. Core systems are online and listening.",
+  "scan https://example.com": "Greetings. Core systems are online and listening."
 }

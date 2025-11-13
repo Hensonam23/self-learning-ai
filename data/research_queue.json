@@ -1,0 +1,56 @@
+[
+  {
+    "timestamp": "2025-11-13T04:23:50Z",
+    "type": "url",
+    "channel": "cli",
+    "url": "https://example.com",
+    "reason": "scan_command",
+    "status": "done",
+    "notes_key": "url::https://example.com"
+  },
+  {
+    "timestamp": "2025-11-13T04:24:06Z",
+    "type": "topic",
+    "channel": "cli",
+    "user_text": "> what is the perfect snack?",
+    "reason": "insight_flag_needs_research",
+    "status": "done",
+    "notes_key": "topic::> what is the perfect snack?"
+  },
+  {
+    "timestamp": "2025-11-13T04:24:27Z",
+    "type": "url",
+    "channel": "cli",
+    "url": "https://example.com",
+    "reason": "scan_command",
+    "status": "done",
+    "notes_key": "url::https://example.com"
+  },
+  {
+    "timestamp": "2025-11-13T04:48:53Z",
+    "type": "topic",
+    "channel": "cli",
+    "user_text": "cat data/local_knowledge.json",
+    "reason": "insight_flag_needs_research",
+    "status": "done",
+    "notes_key": "topic::cat data/local_knowledge.json"
+  },
+  {
+    "timestamp": "2025-11-13T05:28:58Z",
+    "type": "topic",
+    "channel": "cli",
+    "user_text": "> what is the best snack?",
+    "reason": "evolution_from_chatlog",
+    "status": "done",
+    "notes_key": "topic::> what is the best snack?"
+  },
+  {
+    "timestamp": "2025-11-13T05:28:58Z",
+    "type": "topic",
+    "channel": "cli",
+    "user_text": "> scan https://example.com",
+    "reason": "evolution_from_chatlog",
+    "status": "done",
+    "notes_key": "topic::> scan https://example.com"
+  }
+]
