@@ -11,21 +11,21 @@ It will:
 
 - Load data/research_queue.json
 - For each entry with status == "pending":
-    - If type == "topic": ask the answer_engine to research and explain it.
-    - If type == "url": ask the answer_engine to scan/summarize the URL.
+    - If type == "topic": ask the web answer engine to research and explain it.
+    - If type == "url": ask the web answer engine to scan/summarize the URL.
 - Store results in data/research_notes.json.
-- For topics, also store a normalized Q&A entry into data/local_knowledge.json.
+- For topics, also store a normalized Q&A entry into structured memory via
+  MemoryManager (which also updates data/local_knowledge.json).
 - Mark processed entries as status == "done".
-
-This lets the Machine Spirit gradually become smarter between sessions.
 """
 
 import json
 import os
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from research_manager import ResearchManager, RESEARCH_QUEUE_PATH
+from memory_manager import MemoryManager, normalize_question
 
 try:
     # Use the same answer engine the web/chat side uses
@@ -35,7 +35,6 @@ except Exception:
         return "Research worker could not load the web answer engine. No external research was performed."
 
 
-LOCAL_KNOWLEDGE_PATH = "data/local_knowledge.json"
 RESEARCH_NOTES_PATH = "data/research_notes.json"
 
 
@@ -69,23 +68,6 @@ def _save_json_dict(path: str, data: Dict[str, Any]) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
     os.replace(tmp, path)
-
-
-# ---- normalization ---------------------------------------------------------
-
-def _normalize_question(text: str) -> str:
-    """
-    Same idea as TeachabilityManager._normalize:
-
-    - strip whitespace
-    - lowercase
-    - strip leading '>' markers
-    - collapse internal spaces
-    """
-    t = text.strip().lower()
-    while t.startswith(">"):
-        t = t[1:].lstrip()
-    return " ".join(t.split())
 
 
 # ---- processing functions --------------------------------------------------
@@ -165,7 +147,7 @@ def run_worker() -> None:
 
     print(f"Found {len(pending_indices)} pending research task(s). Processing...")
 
-    local_knowledge = _load_json_dict(LOCAL_KNOWLEDGE_PATH)
+    mem = MemoryManager()
     research_notes = _load_json_dict(RESEARCH_NOTES_PATH)
 
     for idx in pending_indices:
@@ -178,8 +160,6 @@ def run_worker() -> None:
         print("Channel:", entry.get("channel"))
         print("Status:", entry.get("status"))
 
-        result: Dict[str, Any]
-
         if entry_type == "topic":
             print("Processing topic:", entry.get("user_text"))
             result = _process_topic(entry)
@@ -187,6 +167,7 @@ def run_worker() -> None:
             if result.get("ok"):
                 summary = result["summary"]
                 question = result["source_question"]
+
                 # Save into research_notes
                 notes_key = f"topic::{question}"
                 research_notes[notes_key] = {
@@ -194,12 +175,13 @@ def run_worker() -> None:
                     "summary": summary,
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 }
-                # Also store into local_knowledge so the brain can answer later
-                norm_q = _normalize_question(question)
-                local_knowledge[norm_q] = summary
+
+                # Also store into structured memory
+                mem.set(question, summary)
+
                 entry["notes_key"] = notes_key
                 entry["status"] = "done"
-                print("  -> Stored summary in research_notes and local_knowledge.")
+                print("  -> Stored summary in research_notes and structured memory.")
             else:
                 entry["status"] = "error"
                 entry["error"] = result.get("reason")
@@ -231,14 +213,12 @@ def run_worker() -> None:
             entry["status"] = "error"
             entry["error"] = "unknown_type"
 
-    # Save updated queue and knowledge files
+    # Save updated queue and notes
     mgr.save_queue(queue)
-    _save_json_dict(LOCAL_KNOWLEDGE_PATH, local_knowledge)
     _save_json_dict(RESEARCH_NOTES_PATH, research_notes)
 
     print("\nResearch worker completed.")
     print("Updated queue:", RESEARCH_QUEUE_PATH)
-    print("Updated local knowledge:", LOCAL_KNOWLEDGE_PATH)
     print("Updated research notes:", RESEARCH_NOTES_PATH)
 
 

@@ -11,9 +11,11 @@ What this does:
       - research_worker.py will:
           * call the web answer engine for topics/URLs
           * store summaries in data/research_notes.json
-          * store topic summaries in data/local_knowledge.json
-4. Because TeachabilityManager normalizes and cleans local_knowledge.json on load,
-   the next time the brain runs it can answer more questions from its new knowledge.
+          * store topic summaries in structured memory (which also updates
+            data/local_knowledge.json).
+4. Because TeachabilityManager and MemoryManager normalize and structure
+   knowledge on load, the next time the brain runs it can answer more
+   questions from its new knowledge.
 
 Usage:
 
@@ -31,7 +33,7 @@ import time
 from typing import Any, Dict, List
 
 from research_manager import ResearchManager, RESEARCH_QUEUE_PATH
-from teachability_manager import normalize_question
+from memory_manager import normalize_question
 from research_worker import run_worker as run_research_worker
 
 
