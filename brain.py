@@ -164,23 +164,16 @@ class Brain:
         taught = self.teach.lookup(user_text)
         used_teaching = taught is not None
 
+        # 3) Decide where the raw answer comes from
         if taught is not None:
-            # Inject canonical explanation into the prompt
-            prompt = (
-                "You were corrected by the user previously on this topic.\n"
-                "They gave you this explanation, which is the source of truth:\n\n"
-                f"{taught['canonical_explanation']}\n\n"
-                "Now answer the user's new question in your own words:\n\n"
-                f"User: {user_text}"
-            )
+            # We ALREADY KNOW the canonical explanation, so just use it directly.
+            raw_answer = taught["canonical_explanation"]
         else:
-            prompt = user_text
-
-        # 3) Call local answer engine to get a raw answer
-        try:
-            raw_answer = local_respond(prompt)
-        except Exception as e:
-            raw_answer = f"Error while calling local answer engine: {e!r}"
+            # No prior teaching; ask the local answer engine.
+            try:
+                raw_answer = local_respond(user_text)
+            except Exception as e:
+                raw_answer = f"Error while calling local answer engine: {e!r}"
 
         # 4) Run the insight layer to tag confidence
         insight_context: Dict[str, Any] = {

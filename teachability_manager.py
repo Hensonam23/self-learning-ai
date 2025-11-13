@@ -1,108 +1,158 @@
+#!/usr/bin/env python3
+
+"""
+Teachability manager for the Machine Spirit.
+
+Responsible for:
+- Loading/saving local_knowledge.json.
+- Normalizing questions.
+- Recording user corrections.
+- Looking up canonical explanations for questions.
+
+This version:
+- Cleans up old messy keys (prompt garbage).
+- ONLY records corrections when the user message clearly starts with a
+  correction phrase like "No, that's wrong." (after stripping leading '>').
+"""
+
 import json
 import os
-import time
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
+
+
+LOCAL_KNOWLEDGE_PATH = "data/local_knowledge.json"
+
+
+def _ensure_dir(path: str) -> None:
+    d = os.path.dirname(path)
+    if d and not os.path.isdir(d):
+        os.makedirs(d, exist_ok=True)
+
+
+def _load_json_dict(path: str) -> Dict[str, Any]:
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        backup = f"{path}.corrupt"
+        try:
+            os.replace(path, backup)
+        except Exception:
+            pass
+        return {}
+
+
+def _save_json_dict(path: str, data: Dict[str, Any]) -> None:
+    _ensure_dir(path)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _strip_leading_markers(text: str) -> str:
+    """
+    Strip leading '>' markers and spaces. So:
+
+      '> No, that is wrong...' -> 'No, that is wrong...'
+      '>>  no, that is wrong'  -> 'no, that is wrong'
+    """
+    t = text.strip()
+    while t.startswith(">"):
+        t = t[1:].lstrip()
+    return t
+
+
+def normalize_question(text: str) -> str:
+    """
+    Shared normalization for questions:
+
+    - strip whitespace
+    - lowercase
+    - strip leading '>' markers
+    - collapse internal whitespace
+    """
+    t = _strip_leading_markers(text).lower()
+    return " ".join(t.split())
 
 
 class TeachabilityManager:
-    """
-    Simple teachability layer that works with data/local_knowledge.json
-    as a dict of:
-
-        {
-          "normalized question text": "canonical answer",
-          ...
-        }
-
-    Key behavior:
-    - Normalize all questions (lowercase, trimmed, collapse spaces).
-    - Strip any leading '>' characters so copy-pasted prompts like
-      '> what is my pc good for?' map to 'what is my pc good for?'.
-    - When you correct an answer, overwrite the entry for the previous question.
-    - When you ask again, look up the normalized question and return it.
-    """
-
-    def __init__(self, path: str = "data/local_knowledge.json"):
+    def __init__(self, path: str = LOCAL_KNOWLEDGE_PATH) -> None:
         self.path = path
-        self._data: Dict[str, str] = {}
-        self._loaded = False
+        raw = _load_json_dict(self.path)
+        self.knowledge: Dict[str, str] = self._clean_and_normalize(raw)
+        # Save cleaned version immediately
+        self._save()
 
-    # ---------- helpers ----------
+    # ------------------------------------------------------------------ #
+    # Internal helpers
+    # ------------------------------------------------------------------ #
 
-    def _normalize(self, text: str) -> str:
-        # Strip whitespace
-        t = text.strip().lower()
-        # Strip any number of leading '>' characters and following spaces
-        while t.startswith(">"):
-            t = t[1:].lstrip()
-        # Collapse internal whitespace to single spaces
-        return " ".join(t.split())
+    def _clean_and_normalize(self, raw: Dict[str, Any]) -> Dict[str, str]:
+        """
+        Take the raw dict from local_knowledge.json and turn it into a clean
+        mapping:
 
-    def _ensure_loaded(self) -> None:
-        if self._loaded:
-            return
+            normalized_question -> canonical_explanation (string)
 
-        if os.path.exists(self.path):
-            try:
-                with open(self.path, "r", encoding="utf-8") as f:
-                    obj = json.load(f)
-                if isinstance(obj, dict):
-                    # normalize all existing keys once
-                    normalized: Dict[str, str] = {}
-                    for k, v in obj.items():
-                        nk = self._normalize(str(k))
-                        normalized[nk] = str(v)
-                    self._data = normalized
-                else:
-                    # if it's not a dict, back it up and start empty
-                    backup = f"{self.path}.corrupt_{int(time.time())}"
-                    try:
-                        os.replace(self.path, backup)
-                    except Exception:
-                        pass
-                    self._data = {}
-            except Exception:
-                backup = f"{self.path}.corrupt_{int(time.time())}"
-                try:
-                    os.replace(self.path, backup)
-                except Exception:
-                    pass
-                self._data = {}
-        else:
-            self._data = {}
+        - Drop keys/values that look like old prompt garbage.
+        - If multiple entries map to the same normalized question, keep
+          the shorter value (tends to keep simpler explanations).
+        """
+        store: Dict[str, str] = {}
 
-        # ensure parent dir exists
-        parent = os.path.dirname(self.path)
-        if parent and not os.path.isdir(parent):
-            os.makedirs(parent, exist_ok=True)
+        for k, v in raw.items():
+            if not isinstance(k, str) or not isinstance(v, str):
+                continue
 
-        self._loaded = True
+            lk = k.lower()
+            lv = v.lower()
+
+            # Filter obviously bad keys/values from old bugs
+            if "you were corrected by the user previously" in lk:
+                continue
+            if "source of truth:" in lk:
+                continue
+            if "you were corrected by the user previously" in lv:
+                continue
+            if "source of truth:" in lv:
+                continue
+
+            norm = normalize_question(k)
+            if not norm:
+                continue
+
+            if norm in store:
+                existing = store[norm]
+                if len(v) < len(existing):
+                    store[norm] = v
+            else:
+                store[norm] = v
+
+        return store
 
     def _save(self) -> None:
-        self._ensure_loaded()
-        tmp_path = self.path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, indent=2, ensure_ascii=False)
-        os.replace(tmp_path, self.path)
+        _save_json_dict(self.path, self.knowledge)
 
-    # ---------- public API ----------
+    # ------------------------------------------------------------------ #
+    # Public API used by the Brain
+    # ------------------------------------------------------------------ #
 
-    def lookup(self, question: str) -> Optional[dict]:
+    def lookup(self, user_text: str) -> Optional[Dict[str, str]]:
         """
-        Return:
-
-            {"question": <normalized_key>, "canonical_explanation": <answer>}
-
-        or None if we don't know this question yet.
+        Try to find a canonical explanation for this question.
         """
-        self._ensure_loaded()
-        key = self._normalize(question)
-        if key not in self._data:
+        norm = normalize_question(user_text)
+        canon = self.knowledge.get(norm)
+        if not canon:
             return None
 
         return {
-            "question": key,
-            "canonical_explanation": self._data[key],
+            "question": norm,
+            "canonical_explanation": canon,
         }
 
     def record_correction(
@@ -110,99 +160,55 @@ class TeachabilityManager:
         previous_question: Optional[str],
         previous_answer: Optional[str],
         user_message: str,
-    ) -> Optional[dict]:
+    ) -> Optional[Dict[str, str]]:
         """
-        If user_message looks like a correction to previous_answer,
-        store the explanation as the canonical answer for previous_question.
+        Detect a correction pattern like:
+
+            "No, that's wrong. <explanation>"
+
+        and store <explanation> as the canonical explanation for the
+        previous question.
+
+        If the message does NOT start with a known correction phrase
+        (after stripping leading '>'), this does nothing and returns None.
         """
-        if not previous_question or not previous_answer:
+        if not previous_question:
             return None
 
-        if not self._looks_like_correction(user_message):
+        raw_msg = user_message.strip()
+        # For prefix detection, strip leading '>' markers
+        clean_msg = _strip_leading_markers(raw_msg)
+        lower_clean = clean_msg.lower()
+
+        prefix_candidates = [
+            "no, that's wrong.",
+            "no that's wrong.",
+            "that's wrong.",
+            "no, that is wrong.",
+            "no that is wrong.",
+        ]
+
+        matched_prefix = None
+        for pref in prefix_candidates:
+            if lower_clean.startswith(pref):
+                matched_prefix = pref
+                break
+
+        if matched_prefix is None:
+            # Not a correction; ignore
             return None
 
-        explanation = self._extract_explanation(user_message)
+        # Find the prefix in the CLEAN version, then map to the same slice
+        # in the CLEAN version itself for the explanation.
+        explanation = clean_msg[len(matched_prefix):].strip()
         if not explanation:
             return None
 
-        self._ensure_loaded()
-        key = self._normalize(previous_question)
-        self._data[key] = explanation
+        norm_q = normalize_question(previous_question)
+        self.knowledge[norm_q] = explanation
         self._save()
 
         return {
-            "question": key,
+            "question": norm_q,
             "canonical_explanation": explanation,
         }
-
-    # ---------- correction heuristics ----------
-
-    def _strip_leading_markers(self, text: str) -> str:
-        # Remove leading '>' and spaces
-        t = text.strip()
-        while t.startswith(">"):
-            t = t[1:].lstrip()
-        return t
-
-    def _looks_like_correction(self, user_message: str) -> bool:
-        t = self._strip_leading_markers(user_message)
-        text = t.lower()
-
-        negative_starts = (
-            "no,", "no ", "nope", "nah",
-            "that's wrong", "thats wrong", "that is wrong",
-            "not quite", "actually,", "actually ",
-            "correction:",
-            "you are wrong", "you're wrong", "youre wrong",
-            "this is wrong",
-            "that's not right", "thats not right",
-        )
-        if text.startswith(negative_starts):
-            return True
-
-        contains_markers = (
-            "that's not correct",
-            "thats not correct",
-            "isn't correct",
-            "is not correct",
-            "you missed",
-            "you forgot",
-            "the correct answer is",
-            "the right answer is",
-            "it should be",
-            "it's actually",
-            "its actually",
-        )
-        return any(m in text for m in contains_markers)
-
-    def _extract_explanation(self, user_message: str) -> str:
-        """
-        Strip obvious "you're wrong" preamble and return just the explanation.
-
-        Example:
-        "No, that's wrong. My PC is a Ryzen 7..." -> "My PC is a Ryzen 7..."
-        """
-        text = self._strip_leading_markers(user_message)
-
-        # First remove prefixes like "No,", "Nope", "Correction:", etc.
-        prefixes = [
-            "No,", "no,", "No ", "no ",
-            "Nope,", "nope,", "Nope ", "nope ",
-            "Actually,", "actually,", "Actually ", "actually ",
-            "Correction:", "correction:",
-            "You're wrong because", "you're wrong because",
-            "You are wrong because", "you are wrong because",
-        ]
-        for p in prefixes:
-            if text.startswith(p):
-                text = text[len(p):].lstrip()
-                break
-
-        # Then handle "that's wrong..." as a whole sentence
-        lower = text.lower()
-        if lower.startswith("that's wrong") or lower.startswith("thats wrong"):
-            dot_index = text.find(".")
-            if dot_index != -1:
-                text = text[dot_index + 1 :].lstrip()
-
-        return text.strip()
