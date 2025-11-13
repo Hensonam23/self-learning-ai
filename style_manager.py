@@ -29,8 +29,15 @@ class StyleManager:
     ) -> str:
         """
         user_text: the message you sent
-        raw_answer: text returned by the answer engine
-        context: extra flags like {"used_teaching": True, "confidence": "high"}
+        raw_answer: text returned by the answer engine or tools
+        context: extra flags like:
+            {
+              "used_teaching": True/False,
+              "confidence": "high"/"medium"/"low"/"needs_teaching"/"error",
+              "needs_research": True/False,
+              "needs_teaching": True/False,
+              "tool": "scan"/"summarize"/"explain_new"/None,
+            }
         """
         text = raw_answer or ""
 
@@ -87,28 +94,30 @@ class StyleManager:
     def _apply_persona(self, text: str, context: Dict[str, Any]) -> str:
         """
         Add a small Machine Spirit flavor. Keep it simple and readable.
-        Also reflect confidence when it is low.
+        Also reflect confidence and research when they are low/needed.
         """
         stripped = text.lstrip()
 
         confidence = context.get("confidence", "medium")
         used_teaching = bool(context.get("used_teaching"))
-
-        # If answer already has a clear "voice", leave it alone, just maybe
-        # prefix with persona on low confidence.
-        lowered = stripped.lower()
+        needs_research = bool(context.get("needs_research"))
 
         base = stripped
 
         # Low confidence or needs teaching -> be honest about it
         if confidence in ("low", "needs_teaching", "error"):
-            # If the base text is already a full sentence, we gently add a disclaimer.
             disclaimer = (
                 " My analysis may be incomplete. If this seems wrong, correct me and I will update my understanding."
             )
             base = base + disclaimer
 
+        # If we have flagged this for deeper research, mention it
+        if needs_research:
+            research_note = " I have also marked this topic for deeper research so I can improve my answer over time."
+            base = base + research_note
+
         # Decide how to prefix
+        lowered = base.lower()
         if lowered.startswith(("machine spirit:", "greetings", "core systems")):
             # Already has persona feel; just return cleaned text.
             return base

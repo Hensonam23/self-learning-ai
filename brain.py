@@ -19,6 +19,7 @@ from teachability_manager import TeachabilityManager
 from style_manager import StyleManager
 from insight_manager import InsightManager
 from knowledge_tools import KnowledgeTools
+from research_manager import ResearchManager
 
 
 CHATLOG_PATH = "data/chatlog.json"
@@ -92,6 +93,7 @@ class Brain:
         self.style = StyleManager()
         self.insight = InsightManager()
         self.tools = KnowledgeTools()
+        self.research = ResearchManager()
         # Last REAL question we answered (not corrections)
         self.last_question_for_teach: Optional[str] = None
         self.last_answer_for_teach: Optional[str] = None
@@ -103,6 +105,19 @@ class Brain:
         tool_result = self.tools.handle(user_text)
         if tool_result is not None:
             raw_answer = tool_result["answer"]
+            tool_name = tool_result.get("tool")
+            meta = tool_result.get("meta", {})
+
+            # If tool suggests research (for example, scan <url>), queue it
+            qr = meta.get("queue_research")
+            if isinstance(qr, dict):
+                if qr.get("type") == "url" and "url" in qr:
+                    self.research.queue_url(
+                        url=qr["url"],
+                        reason="scan_command",
+                        channel=channel,
+                    )
+
             # For tools, we treat confidence as medium and skip teachability
             style_context: Dict[str, Any] = {
                 "used_teaching": False,
@@ -110,7 +125,7 @@ class Brain:
                 "confidence": "medium",
                 "needs_teaching": False,
                 "needs_research": False,
-                "tool": tool_result.get("tool"),
+                "tool": tool_name,
             }
             answer_text = self.style.format_answer(
                 user_text=user_text,
@@ -131,7 +146,7 @@ class Brain:
                 "confidence": "medium",
                 "needs_teaching": False,
                 "needs_research": False,
-                "tool_used": tool_result.get("tool"),
+                "tool_used": tool_name,
                 "teaching_question": None,
                 "teaching_entry_created_or_updated": False,
             }
@@ -180,6 +195,14 @@ class Brain:
         confidence = analysis["confidence"]
         needs_teaching = analysis["needs_teaching"]
         needs_research = analysis["needs_research"]
+
+        # 4.5) If this clearly needs research, queue the topic
+        if needs_research:
+            self.research.queue_topic(
+                user_text=user_text,
+                reason="insight_flag_needs_research",
+                channel=channel,
+            )
 
         # 5) Run the style / persona layer as a final pass
         style_context: Dict[str, Any] = {

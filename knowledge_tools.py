@@ -156,22 +156,27 @@ class KnowledgeTools:
         ans = (
             "I have recorded this URL for analysis: {url}\n\n"
             "Later, you can say things like 'summarize that page' or "
-            "'explain that page like I'm new', and I will treat it as a "
+            " 'explain that page like I'm new', and I will treat it as a "
             "stored reference point."
         ).format(url=url)
 
         return {
             "tool": "scan",
             "answer": ans,
-            "meta": {"ok": True, "url": url},
+            "meta": {
+                "ok": True,
+                "url": url,
+                # Hint to the Brain that this should also be queued for research
+                "queue_research": {
+                    "type": "url",
+                    "url": url,
+                },
+            },
         }
 
     def _handle_summarize(self, target: str) -> Dict[str, Any]:
         """
         Very lightweight summarization placeholder.
-
-        We do NOT actually have deep NLP here, but giving you a structured
-        response still makes this more useful than generic Q&A.
         """
         ans = (
             "Here is a brief summary based only on the text you gave me:\n\n"
