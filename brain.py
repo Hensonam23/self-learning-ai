@@ -18,6 +18,7 @@ except Exception:
 from teachability_manager import TeachabilityManager
 from style_manager import StyleManager
 from insight_manager import InsightManager
+from knowledge_tools import KnowledgeTools
 
 
 CHATLOG_PATH = "data/chatlog.json"
@@ -90,12 +91,52 @@ class Brain:
         self.teach = TeachabilityManager()
         self.style = StyleManager()
         self.insight = InsightManager()
+        self.tools = KnowledgeTools()
         # Last REAL question we answered (not corrections)
         self.last_question_for_teach: Optional[str] = None
         self.last_answer_for_teach: Optional[str] = None
 
     def handle_message(self, user_text: str, channel: str = "cli") -> Dict[str, Any]:
         ts = _utc_now()
+
+        # 0) Try knowledge-tools first (scan/summarize/explain-like-new)
+        tool_result = self.tools.handle(user_text)
+        if tool_result is not None:
+            raw_answer = tool_result["answer"]
+            # For tools, we treat confidence as medium and skip teachability
+            style_context: Dict[str, Any] = {
+                "used_teaching": False,
+                "channel": channel,
+                "confidence": "medium",
+                "needs_teaching": False,
+                "needs_research": False,
+                "tool": tool_result.get("tool"),
+            }
+            answer_text = self.style.format_answer(
+                user_text=user_text,
+                raw_answer=raw_answer,
+                context=style_context,
+            )
+
+            # Still update last question so you can correct tool outputs
+            self.last_question_for_teach = user_text
+            self.last_answer_for_teach = answer_text
+
+            entry: Dict[str, Any] = {
+                "timestamp": ts,
+                "channel": channel,
+                "question": user_text,
+                "answer": answer_text,
+                "used_teaching": False,
+                "confidence": "medium",
+                "needs_teaching": False,
+                "needs_research": False,
+                "tool_used": tool_result.get("tool"),
+                "teaching_question": None,
+                "teaching_entry_created_or_updated": False,
+            }
+            _append_chatlog(entry)
+            return entry
 
         # 1) See if this message is correcting the last REAL question
         teaching_entry = self.teach.record_correction(
@@ -169,6 +210,7 @@ class Brain:
             "confidence": confidence,
             "needs_teaching": needs_teaching,
             "needs_research": needs_research,
+            "tool_used": None,
             "teaching_question": taught["question"] if taught else None,
             "teaching_entry_created_or_updated": bool(teaching_entry),
         }
