@@ -16,6 +16,8 @@ except Exception:
         return "I'm online but my local answer engine is not loaded."
 
 from teachability_manager import TeachabilityManager
+from style_manager import StyleManager
+from insight_manager import InsightManager
 
 
 CHATLOG_PATH = "data/chatlog.json"
@@ -86,7 +88,9 @@ def _safe_print(text: str) -> None:
 class Brain:
     def __init__(self) -> None:
         self.teach = TeachabilityManager()
-        # This is the last REAL question we answered (not corrections)
+        self.style = StyleManager()
+        self.insight = InsightManager()
+        # Last REAL question we answered (not corrections)
         self.last_question_for_teach: Optional[str] = None
         self.last_answer_for_teach: Optional[str] = None
 
@@ -116,26 +120,55 @@ class Brain:
         else:
             prompt = user_text
 
-        # 3) Call local answer engine
+        # 3) Call local answer engine to get a raw answer
         try:
-            answer_text = local_respond(prompt)
+            raw_answer = local_respond(prompt)
         except Exception as e:
-            answer_text = f"Error while calling local answer engine: {e!r}"
+            raw_answer = f"Error while calling local answer engine: {e!r}"
 
-        # 4) Update last REAL question only if this message was NOT a correction
+        # 4) Run the insight layer to tag confidence
+        insight_context: Dict[str, Any] = {
+            "used_teaching": used_teaching,
+            "channel": channel,
+        }
+        analysis = self.insight.analyze(
+            user_text=user_text,
+            raw_answer=raw_answer,
+            context=insight_context,
+        )
+        confidence = analysis["confidence"]
+        needs_teaching = analysis["needs_teaching"]
+        needs_research = analysis["needs_research"]
+
+        # 5) Run the style / persona layer as a final pass
+        style_context: Dict[str, Any] = {
+            "used_teaching": used_teaching,
+            "channel": channel,
+            "confidence": confidence,
+            "needs_teaching": needs_teaching,
+            "needs_research": needs_research,
+        }
+        answer_text = self.style.format_answer(
+            user_text=user_text,
+            raw_answer=raw_answer,
+            context=style_context,
+        )
+
+        # 6) Update last REAL question only if this message was NOT a correction
         if teaching_entry is None:
             self.last_question_for_teach = user_text
             self.last_answer_for_teach = answer_text
-        # If teaching_entry is not None, we keep last_question_for_teach pointing
-        # to the original question that was corrected.
 
-        # 5) Log
+        # 7) Log
         entry: Dict[str, Any] = {
             "timestamp": ts,
             "channel": channel,
             "question": user_text,
             "answer": answer_text,
             "used_teaching": used_teaching,
+            "confidence": confidence,
+            "needs_teaching": needs_teaching,
+            "needs_research": needs_research,
             "teaching_question": taught["question"] if taught else None,
             "teaching_entry_created_or_updated": bool(teaching_entry),
         }
