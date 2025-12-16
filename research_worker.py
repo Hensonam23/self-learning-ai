@@ -67,7 +67,10 @@ def make_keywords(topic: str) -> list[str]:
     raw = topic.lower().replace("/", " ").replace("-", " ").replace("_", " ")
     raw = raw.replace("—", " ").replace("–", " ")
     parts = [p.strip() for p in raw.split() if p.strip()]
-    stop = {"the", "a", "an", "and", "or", "to", "of", "in", "for", "on", "with", "is", "are", "between"}
+    stop = {
+        "the", "a", "an", "and", "or", "to", "of", "in", "for", "on", "with",
+        "is", "are", "between", "difference", "vs", "versus"
+    }
     parts = [p for p in parts if p not in stop]
     out = []
     for p in parts:
@@ -173,13 +176,44 @@ def apply_student_voice(text: str, style: dict) -> str:
 
 
 # -------------------------
+# Weak draft detection
+# -------------------------
+def is_weak_text(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if not t:
+        return True
+    weak_markers = [
+        "write a clean",
+        "main point",
+        "(one sentence)",
+        "( )",
+        "basic draft",
+        "i made a draft",
+        "might be rough",
+        "needs a clean",
+    ]
+    if any(m in t for m in weak_markers):
+        return True
+    if len(t) < 40:
+        return True
+    return False
+
+
+def draft_is_weak(existing: dict) -> bool:
+    if not isinstance(existing, dict):
+        return True
+    short = existing.get("short", "")
+    detailed = existing.get("detailed", existing.get("answer", ""))
+    return is_weak_text(short) or is_weak_text(detailed)
+
+
+# -------------------------
 # Compare draft detection
 # -------------------------
 def parse_compare_topic(topic: str) -> tuple[str, str] | None:
     t = topic.strip()
     tl = t.lower()
 
-    # "difference between X and Y"
     m = re.search(r"difference\s+between\s+(.+?)\s+and\s+(.+)$", tl)
     if m:
         a = t[m.start(1) : m.end(1)].strip()
@@ -187,7 +221,6 @@ def parse_compare_topic(topic: str) -> tuple[str, str] | None:
         if a and b:
             return a, b
 
-    # "X vs Y" or "X versus Y"
     if " vs " in tl:
         parts = re.split(r"\s+vs\s+", t, maxsplit=1, flags=re.IGNORECASE)
         if len(parts) == 2 and parts[0].strip() and parts[1].strip():
@@ -202,8 +235,28 @@ def parse_compare_topic(topic: str) -> tuple[str, str] | None:
 
 
 def draft_compare(topic: str, a: str, b: str) -> tuple[str, str]:
+    al = a.lower().strip()
+    bl = b.lower().strip()
+
+    if (("tcp" in al and "udp" in bl) or ("udp" in al and "tcp" in bl)):
+        short = (
+            "TCP vs UDP: TCP is reliable and connection based. UDP is faster and lighter but not guaranteed.\n"
+            "TCP is used for web and downloads. UDP is used for streaming and games a lot."
+        )
+        detailed = (
+            "TCP vs UDP (draft)\n\n"
+            "Simple definition:\n"
+            "1) TCP is connection based and focuses on reliability.\n"
+            "2) UDP is connectionless and focuses on speed and low overhead.\n\n"
+            "Main differences:\n"
+            "1) Reliability. TCP retries and orders data. UDP does not guarantee delivery or order.\n"
+            "2) Setup. TCP does a handshake. UDP just sends.\n"
+            "3) Use cases. TCP is good for web pages, email, file transfers. UDP is common for voice, video, gaming.\n"
+        )
+        return short, detailed
+
     short = (
-        f"{a} vs {b}: A quick compare draft.\n"
+        f"{a} vs {b}: A compare draft.\n"
         "The main difference is what each one is used for."
     )
     detailed = (
@@ -213,194 +266,81 @@ def draft_compare(topic: str, a: str, b: str) -> tuple[str, str]:
         f"2) {b} is: (one sentence)\n\n"
         "Main differences:\n"
         f"1) Purpose. {a} is mainly for ( ). {b} is mainly for ( ).\n"
-        f"2) Where it sits. {a} is used at (layer or area). {b} is used at (layer or area).\n"
-        f"3) What you see in troubleshooting. {a} problems look like ( ). {b} problems look like ( ).\n\n"
-        "Quick example:\n"
-        f"1) If you are trying to do (task), you probably care about {a}.\n"
-        f"2) If you are trying to do (task), you probably care about {b}.\n"
+        f"2) Troubleshooting. {a} problems look like ( ). {b} problems look like ( ).\n"
     )
     return short, detailed
 
 
 # -------------------------
-# Draft recipes (offline)
+# Real offline recipes
 # -------------------------
-def draft_osi(topic: str):
+def draft_arp(topic: str):
     short = (
-        "OSI model: A 7 layer way to break networking into steps.\n"
-        "It helps you troubleshoot by narrowing down where the problem is."
+        "ARP: It finds the MAC address for an IPv4 address on your local network.\n"
+        "A device asks who has an IP, and the owner replies with its MAC."
     )
     detailed = (
-        "OSI model (draft)\n\n"
+        "ARP (draft)\n\n"
         "Simple definition:\n"
-        "1) It is a reference model that breaks networking into 7 layers.\n"
-        "2) It helps you point to where a problem is happening.\n\n"
-        "Layers (bottom to top):\n"
-        "1) Physical. Cables, signals, Wi Fi radio.\n"
-        "2) Data Link. MAC addresses, switching, local delivery.\n"
-        "3) Network. IP and routing between networks.\n"
-        "4) Transport. TCP or UDP, ports, reliability.\n"
-        "5) Session. Connection and session handling.\n"
-        "6) Presentation. Formatting and encryption.\n"
-        "7) Application. HTTP, DNS, SMTP.\n"
+        "1) ARP maps an IPv4 address to a MAC address on a local network.\n\n"
+        "How it works:\n"
+        "1) Your PC broadcasts an ARP request asking who has an IP.\n"
+        "2) The device replies with its MAC address.\n"
+        "3) Your PC stores it in an ARP cache for a while.\n"
     )
     return short, detailed
 
 
-def draft_tcpip(topic: str):
+def draft_icmp(topic: str):
     short = (
-        "TCP IP model: The real internet stack.\n"
-        "It is usually shown as 4 layers and it maps to OSI."
+        "ICMP: A control protocol used for testing and error messages on IP networks.\n"
+        "Ping and traceroute often use ICMP."
     )
     detailed = (
-        "TCP IP model (draft)\n\n"
+        "ICMP (draft)\n\n"
         "Simple definition:\n"
-        "1) It is the practical model used on real networks.\n"
-        "2) It groups networking into fewer layers than OSI.\n\n"
-        "Common 4 layers:\n"
-        "1) Link. Ethernet or Wi Fi.\n"
-        "2) Internet. IP and routing.\n"
-        "3) Transport. TCP or UDP plus ports.\n"
-        "4) Application. HTTP, DNS, SMTP, SSH.\n"
+        "1) ICMP is used for network status and error messages.\n"
+        "2) It helps devices and routers report problems like unreachable networks.\n\n"
+        "Common uses:\n"
+        "1) Ping uses ICMP echo request and echo reply.\n"
+        "2) Traceroute often uses ICMP time exceeded to show the path.\n\n"
+        "Key point:\n"
+        "1) ICMP is for diagnostics and control, not for sending application data like files.\n"
     )
     return short, detailed
 
 
-def draft_dns(topic: str):
+def draft_vlan(topic: str):
     short = (
-        "DNS: It turns names like google.com into an IP address.\n"
-        "If DNS breaks, names stop working even if the internet is up."
+        "VLAN: A virtual LAN. It splits one physical network into separate logical networks.\n"
+        "It helps with security and organization."
     )
     detailed = (
-        "DNS (draft)\n\n"
+        "VLAN (draft)\n\n"
         "Simple definition:\n"
-        "1) DNS maps domain names to IP addresses.\n\n"
+        "1) A VLAN is a logical network separated at Layer 2.\n\n"
         "Key points:\n"
-        "1) Your device asks a resolver. That can be your router, ISP, or public DNS.\n"
-        "2) Results are cached to speed things up.\n"
-        "3) Bad DNS can make browsing slow or fail.\n"
+        "1) VLANs separate groups like staff vs guests.\n"
+        "2) A trunk port carries multiple VLANs between switches.\n"
+        "3) VLANs need routing to talk to each other (inter-VLAN routing).\n"
     )
     return short, detailed
 
 
-def draft_ports(topic: str):
+def better_fallback(topic: str):
+    t = topic.strip()
     short = (
-        "Ports: A number that tells your computer which program should get the network traffic.\n"
-        "IP gets it to the device. Port gets it to the right app."
+        f"{t}: I do not have a built in recipe for this yet.\n"
+        "I made a basic draft. If it is wrong, teach a better answer."
     )
     detailed = (
-        "Ports (draft)\n\n"
-        "Simple definition:\n"
-        "1) Ports are numbers used with TCP or UDP.\n"
-        "2) They help direct traffic to the right service on a device.\n\n"
-        "Common examples:\n"
-        "1) 80 is HTTP\n"
-        "2) 443 is HTTPS\n"
-        "3) 22 is SSH\n"
-        "4) 53 is DNS\n"
-    )
-    return short, detailed
-
-
-def draft_dhcp(topic: str):
-    short = (
-        "DHCP: It automatically gives devices an IP address and other network settings.\n"
-        "Without it, you usually have to set IP info manually."
-    )
-    detailed = (
-        "DHCP (draft)\n\n"
-        "Simple definition:\n"
-        "1) DHCP automatically assigns network settings.\n"
-        "2) It usually gives IP address, subnet mask, gateway, and DNS.\n\n"
-        "Troubleshooting hint:\n"
-        "1) If you see 169.254.x.x, DHCP likely failed.\n"
-    )
-    return short, detailed
-
-
-def draft_nat(topic: str):
-    short = (
-        "NAT: It lets many devices share one public IP on the internet.\n"
-        "This is usually done by your router."
-    )
-    detailed = (
-        "NAT (draft)\n\n"
-        "Simple definition:\n"
-        "1) NAT translates private IP addresses to a public IP for internet traffic.\n\n"
-        "Key points:\n"
-        "1) Many devices share one public IP.\n"
-        "2) The router tracks connections so replies go to the right device.\n"
-        "3) Port forwarding is often used for inbound connections.\n"
-    )
-    return short, detailed
-
-
-def draft_subnet(topic: str):
-    short = (
-        "Subnet: A way to split IP networks into smaller parts.\n"
-        "It helps decide what is local and what must be routed."
-    )
-    detailed = (
-        "Subnet (draft)\n\n"
-        "Simple definition:\n"
-        "1) A subnet defines which IPs are local to each other.\n"
-        "2) It is shown by a subnet mask or CIDR like /24.\n\n"
-        "Example:\n"
-        "1) 192.168.1.10 and 192.168.1.20 with /24 are on the same local network.\n"
-    )
-    return short, detailed
-
-
-def draft_gateway(topic: str):
-    short = (
-        "Default gateway: The router your device uses to reach other networks.\n"
-        "If it is wrong, local can work but internet fails."
-    )
-    detailed = (
-        "Default gateway (draft)\n\n"
-        "Simple definition:\n"
-        "1) The gateway is the next hop router for traffic leaving your subnet.\n\n"
-        "Key points:\n"
-        "1) Local traffic stays in the subnet.\n"
-        "2) Internet traffic goes to the gateway.\n"
-    )
-    return short, detailed
-
-
-def draft_router_vs_switch(topic: str):
-    short = (
-        "Switch: moves traffic inside the same network using MAC addresses.\n"
-        "Router: moves traffic between networks using IP routing."
-    )
-    detailed = (
-        "Router vs Switch (draft)\n\n"
-        "Simple definition:\n"
-        "1) Switch is mostly Layer 2. It forwards frames by MAC.\n"
-        "2) Router is Layer 3. It routes packets by IP.\n\n"
-        "Key points:\n"
-        "1) Switch connects devices on the same LAN.\n"
-        "2) Router connects your LAN to other networks like the internet.\n"
-    )
-    return short, detailed
-
-
-def smart_fallback(topic: str):
-    short = (
-        f"{topic}: I made a draft. It might be rough.\n"
-        "If you want it better, teach it or ask for more detail."
-    )
-    detailed = (
-        f"{topic} (draft)\n\n"
+        f"{t} (basic draft)\n\n"
         "Simple definition:\n"
         "1) Write a clean 1 to 2 sentence definition here.\n\n"
         "Key points:\n"
         "1) Main point.\n"
         "2) Main point.\n"
-        "3) Main point.\n\n"
-        "Example:\n"
-        "1) Short real world example.\n\n"
-        "Common confusion:\n"
-        "1) What people mix it up with.\n"
+        "3) Main point.\n"
     )
     return short, detailed
 
@@ -413,26 +353,14 @@ def generate_drafts(topic: str) -> tuple[str, str]:
 
     t = normalize_key_simple(topic)
 
-    if "osi" in t and "model" in t:
-        return draft_osi(topic)
-    if "tcp" in t and "ip" in t:
-        return draft_tcpip(topic)
-    if t == "dns" or "domain name system" in t:
-        return draft_dns(topic)
-    if "port" in t or "ports" in t:
-        return draft_ports(topic)
-    if "dhcp" in t:
-        return draft_dhcp(topic)
-    if "nat" in t:
-        return draft_nat(topic)
-    if "subnet" in t or "cidr" in t or "subnet mask" in t:
-        return draft_subnet(topic)
-    if "gateway" in t:
-        return draft_gateway(topic)
-    if ("router" in t and "switch" in t) or "router vs switch" in t:
-        return draft_router_vs_switch(topic)
+    if t == "arp" or "address resolution protocol" in t:
+        return draft_arp(topic)
+    if t == "icmp" or "internet control message protocol" in t:
+        return draft_icmp(topic)
+    if t == "vlan" or "virtual lan" in t:
+        return draft_vlan(topic)
 
-    return smart_fallback(topic)
+    return better_fallback(topic)
 
 
 def parse_max_tasks(argv: list[str]) -> int:
@@ -466,6 +394,8 @@ def main() -> None:
 
     drafts = notes_data["drafts"]
     wrote = 0
+    refreshed = 0
+    skipped = 0
 
     while queue and wrote < max_tasks:
         task = queue.pop(0)
@@ -484,6 +414,15 @@ def main() -> None:
         if not topic:
             topic = "unknown topic"
 
+        # If draft exists and is NOT weak, skip writing a new one.
+        existing = drafts.get(key)
+        if existing and not draft_is_weak(existing):
+            skipped += 1
+            continue
+
+        if existing and draft_is_weak(existing):
+            refreshed += 1
+
         ks = make_keywords(topic)
         short, detailed = generate_drafts(topic)
 
@@ -497,28 +436,19 @@ def main() -> None:
             "short": short,
             "detailed": detailed,
             "created_at": utc_now_iso(),
-            "source": "offline_recipe_style_v3",
-            "style_meta": {
-                "max_sentence_words": style.get("max_sentence_words", 18),
-                "samples": style.get("samples", []),
-            },
+            "source": "offline_recipe_style_v5_refresh_weak",
         }
 
         wrote += 1
         print(f"Wrote draft: {topic}")
 
-    # Save updated queue + drafts
     queue_data["queue"] = queue
     notes_data["drafts"] = drafts
     save_json(RESEARCH_QUEUE_PATH, queue_data)
     save_json(RESEARCH_NOTES_PATH, notes_data)
 
-    if wrote == 0:
-        print("No drafts written.")
-    else:
-        print(f"Done. Wrote {wrote} draft(s). Remaining in queue: {len(queue)}")
+    print(f"Done. Wrote {wrote} draft(s). Refreshed {refreshed}. Skipped {skipped}. Remaining in queue: {len(queue)}")
 
 
 if __name__ == "__main__":
     main()
-
