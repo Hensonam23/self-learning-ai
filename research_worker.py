@@ -1,226 +1,273 @@
-#!/usr/bin/env python3
-
-"""
-Research worker for the Machine Spirit.
-
-This script should be run manually, for example:
-
-    python3 research_worker.py
-
-It will:
-
-- Load data/research_queue.json
-- For each entry with status == "pending":
-    - If type == "topic": ask the web answer engine to research and explain it.
-    - If type == "url": ask the web answer engine to scan/summarize the URL.
-- Store results in data/research_notes.json.
-- For topics, also store a normalized Q&A entry into structured memory via
-  MemoryManager (which also updates data/local_knowledge.json).
-- Mark processed entries as status == "done".
-"""
+from __future__ import annotations
 
 import json
-import os
-import time
-from typing import Any, Dict
-
-from research_manager import ResearchManager, RESEARCH_QUEUE_PATH
-from memory_manager import MemoryManager, normalize_question
-
-try:
-    # Use the same answer engine the web/chat side uses
-    from answer_engine import respond as web_respond  # type: ignore
-except Exception:
-    def web_respond(text: str) -> str:
-        return "Research worker could not load the web answer engine. No external research was performed."
+from pathlib import Path
+from datetime import datetime, timezone
 
 
-RESEARCH_NOTES_PATH = "data/research_notes.json"
+APP_ROOT = Path(__file__).resolve().parent
+RESEARCH_QUEUE_PATH = APP_ROOT / "data" / "research_queue.json"
+RESEARCH_NOTES_PATH = APP_ROOT / "data" / "research_notes.json"
 
 
-# ---- basic file helpers ----------------------------------------------------
-
-def _ensure_dir(path: str) -> None:
-    d = os.path.dirname(path)
-    if d and not os.path.isdir(d):
-        os.makedirs(d, exist_ok=True)
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _load_json_dict(path: str) -> Dict[str, Any]:
-    if not os.path.exists(path):
-        return {}
+def normalize_key_simple(text: str) -> str:
+    key = (text or "").strip().lower()
+    while key.endswith("?"):
+        key = key[:-1].strip()
+    return key
+
+
+def load_json(path: Path, default):
+    if not path.exists():
+        return default
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            obj = json.load(f)
-        return obj if isinstance(obj, dict) else {}
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        backup = f"{path}.corrupt_{int(time.time())}"
-        try:
-            os.replace(path, backup)
-        except Exception:
-            pass
-        return {}
+        return default
 
 
-def _save_json_dict(path: str, data: Dict[str, Any]) -> None:
-    _ensure_dir(path)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, path)
+def save_json(path: Path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-# ---- processing functions --------------------------------------------------
+def ensure_files_exist() -> None:
+    if not RESEARCH_QUEUE_PATH.exists():
+        save_json(RESEARCH_QUEUE_PATH, {"queue": []})
+    if not RESEARCH_NOTES_PATH.exists():
+        save_json(RESEARCH_NOTES_PATH, {"drafts": {}})
 
-def _process_topic(entry: Dict[str, Any]) -> Dict[str, Any]:
-    user_text = entry.get("user_text", "").strip()
-    if not user_text:
-        return {
-            "ok": False,
-            "reason": "empty_user_text",
-            "summary": "No user_text found for this topic entry.",
-        }
 
-    prompt = (
-        "You are the web/research half of a local assistant called the Machine Spirit.\n"
-        "The user previously asked this question or raised this topic:\n\n"
-        f"\"{user_text}\"\n\n"
-        "Using your full external knowledge and tools, produce a clear, accurate explanation "
-        "that can be stored as reference knowledge. Use plain text (no markdown), keep it "
-        "compact but understandable. Focus on what the Machine Spirit should remember "
-        "to answer this correctly in the future."
+def coerce_queue_structure(queue_data):
+    if isinstance(queue_data, dict):
+        q = queue_data.get("queue", [])
+        return {"queue": q if isinstance(q, list) else []}
+    if isinstance(queue_data, list):
+        return {"queue": queue_data}
+    return {"queue": []}
+
+
+def coerce_notes_structure(notes_data):
+    if isinstance(notes_data, dict):
+        if "drafts" in notes_data and isinstance(notes_data["drafts"], dict):
+            return {"drafts": notes_data["drafts"]}
+        return {"drafts": notes_data}
+    return {"drafts": {}}
+
+
+def make_keywords(topic: str) -> list[str]:
+    raw = topic.lower().replace("/", " ").replace("-", " ").replace("_", " ")
+    parts = [p.strip() for p in raw.split() if p.strip()]
+    stop = {"the", "a", "an", "and", "or", "to", "of", "in", "for", "on", "with", "is", "are"}
+    parts = [p for p in parts if p not in stop]
+    out = []
+    for p in parts:
+        if p not in out:
+            out.append(p)
+    return out[:12]
+
+
+# --------- Offline knowledge recipes (hand-built) ---------
+def draft_for_osi_model(topic: str):
+    short = (
+        "OSI model: A 7-layer way to break networking into chunks so it's easier to understand and troubleshoot.\n"
+        "It goes from physical stuff (cables) up to apps (web, email)."
     )
 
-    try:
-        summary = web_respond(prompt)
-    except Exception as e:
-        summary = f"Research error while calling web_respond: {e!r}"
-
-    return {
-        "ok": True,
-        "summary": summary,
-        "source_question": user_text,
-    }
-
-
-def _process_url(entry: Dict[str, Any]) -> Dict[str, Any]:
-    url = entry.get("url", "").strip()
-    if not url:
-        return {
-            "ok": False,
-            "reason": "empty_url",
-            "summary": "No URL found for this entry.",
-        }
-
-    prompt = (
-        "You are the web/research half of a local assistant called the Machine Spirit.\n"
-        "You have been given this URL to inspect:\n\n"
-        f"{url}\n\n"
-        "Visit and read the page if you can, then produce a clear summary of the main ideas "
-        "that would be useful for future reference. Use plain text (no markdown). "
-        "If you cannot access it, explain that clearly."
+    detailed = (
+        "OSI model (draft)\n\n"
+        "Simple definition:\n"
+        "- The OSI model is a 7-layer reference model that breaks network communication into steps.\n"
+        "- It helps you describe where a problem is happening (cable vs IP vs application).\n\n"
+        "Layers (bottom to top):\n"
+        "1) Physical: cables, signals, Wi-Fi radio\n"
+        "2) Data Link: MAC addresses, switches, local delivery\n"
+        "3) Network: IP addressing + routing between networks\n"
+        "4) Transport: TCP/UDP, ports, reliable delivery\n"
+        "5) Session: managing sessions / connections (concept layer)\n"
+        "6) Presentation: formatting, encryption, compression (concept layer)\n"
+        "7) Application: what the user uses (HTTP, DNS, SMTP, etc)\n\n"
+        "Real-world example:\n"
+        "- If Wi-Fi is connected but websites won’t load, Physical/Data Link might be fine, but Network/DNS/Application could be the issue.\n\n"
+        "Common confusion:\n"
+        "- OSI is a model for understanding. The real-world TCP/IP stack is usually described as 4 or 5 layers."
     )
-
-    try:
-        summary = web_respond(prompt)
-    except Exception as e:
-        summary = f"Research error while calling web_respond for URL {url}: {e!r}"
-
-    return {
-        "ok": True,
-        "summary": summary,
-        "source_url": url,
-    }
+    return short, detailed
 
 
-# ---- main worker logic -----------------------------------------------------
+def draft_for_tcp_ip(topic: str):
+    short = (
+        "TCP/IP model: The practical internet model (usually 4 layers) used in real networks.\n"
+        "It maps roughly to OSI, but fewer layers."
+    )
+    detailed = (
+        "TCP/IP model (draft)\n\n"
+        "Simple definition:\n"
+        "- TCP/IP is the real-world networking model used for the internet.\n"
+        "- It groups networking into fewer layers than OSI.\n\n"
+        "Common 4 layers:\n"
+        "1) Link: Ethernet/Wi-Fi, MAC, switching\n"
+        "2) Internet: IP + routing\n"
+        "3) Transport: TCP/UDP + ports\n"
+        "4) Application: HTTP, DNS, SMTP, SSH, etc\n\n"
+        "Real-world example:\n"
+        "- Ping tests IP (Internet layer). Curl/browser tests Application layer.\n"
+    )
+    return short, detailed
 
-def run_worker() -> None:
-    mgr = ResearchManager()
-    queue = mgr.get_queue()
 
-    pending_indices = [i for i, e in enumerate(queue) if e.get("status") == "pending"]
+def draft_for_dns(topic: str):
+    short = (
+        "DNS: The internet's phonebook. It turns names like google.com into IP addresses.\n"
+        "If DNS is broken, the internet can 'work' but websites won't load by name."
+    )
+    detailed = (
+        "DNS (draft)\n\n"
+        "Simple definition:\n"
+        "- DNS (Domain Name System) translates domain names into IP addresses.\n\n"
+        "Key points:\n"
+        "- Your device asks a DNS resolver (often your router or ISP or public DNS).\n"
+        "- Results can be cached to speed things up.\n"
+        "- Wrong DNS can cause slow browsing or failed websites.\n\n"
+        "Real-world example:\n"
+        "- If you can ping 8.8.8.8 but not google.com, DNS is likely the problem.\n"
+    )
+    return short, detailed
 
-    if not pending_indices:
-        print("No pending research tasks in", RESEARCH_QUEUE_PATH)
+
+def draft_for_ip_address(topic: str):
+    short = (
+        "IP address: A number that identifies a device on a network (like a mailing address).\n"
+        "IPv4 looks like 192.168.1.10, IPv6 is longer."
+    )
+    detailed = (
+        "IP address (draft)\n\n"
+        "Simple definition:\n"
+        "- An IP address identifies a device and helps route traffic to it.\n\n"
+        "Key points:\n"
+        "- Private IPs (like 192.168.x.x) are used inside your home network.\n"
+        "- Public IP is what the internet sees (usually from your ISP).\n"
+        "- Subnet masks / CIDR decide what is local vs routed.\n\n"
+        "Real-world example:\n"
+        "- Two devices on the same Wi-Fi usually have different private IPs, but share one public IP through NAT."
+    )
+    return short, detailed
+
+
+def draft_for_ports(topic: str):
+    short = (
+        "Ports: Numbers used to direct network traffic to the right program on a device.\n"
+        "Example: 80/443 for web, 22 for SSH."
+    )
+    detailed = (
+        "Ports (draft)\n\n"
+        "Simple definition:\n"
+        "- A port is a number used with TCP or UDP so the OS knows which application should get the traffic.\n\n"
+        "Key points:\n"
+        "- IP gets traffic to the device. Ports get it to the right app on that device.\n"
+        "- TCP is connection-based (reliable). UDP is faster but no built-in reliability.\n\n"
+        "Examples:\n"
+        "- 80 = HTTP, 443 = HTTPS\n"
+        "- 22 = SSH\n"
+        "- 53 = DNS\n"
+    )
+    return short, detailed
+
+
+def smart_fallback(topic: str):
+    short = (
+        f"{topic}: A draft explanation is being built.\n"
+        "If you want it better, ask for more detail or teach a better definition."
+    )
+    detailed = (
+        f"{topic} (draft)\n\n"
+        "Simple definition:\n"
+        f"- {topic} means: (write a clean 1–2 sentence definition here)\n\n"
+        "Key points:\n"
+        "- Point 1: (main idea)\n"
+        "- Point 2: (main idea)\n"
+        "- Point 3: (main idea)\n\n"
+        "Real-world example:\n"
+        "- (short example that makes it click)\n\n"
+        "Common confusion:\n"
+        "- (what people mix it up with)\n"
+    )
+    return short, detailed
+
+
+def generate_drafts(topic: str) -> tuple[str, str]:
+    t = normalize_key_simple(topic)
+
+    if "osi" in t and "model" in t:
+        return draft_for_osi_model(topic)
+    if "tcp/ip" in t or "tcp ip" in t or ("tcp" in t and "ip" in t and "model" in t):
+        return draft_for_tcp_ip(topic)
+    if t == "dns" or "domain name system" in t:
+        return draft_for_dns(topic)
+    if "ip address" in t or t == "ip":
+        return draft_for_ip_address(topic)
+    if "port" in t or "ports" in t:
+        return draft_for_ports(topic)
+
+    return smart_fallback(topic)
+
+
+def main() -> None:
+    ensure_files_exist()
+
+    raw_queue = load_json(RESEARCH_QUEUE_PATH, {"queue": []})
+    queue_data = coerce_queue_structure(raw_queue)
+
+    raw_notes = load_json(RESEARCH_NOTES_PATH, {"drafts": {}})
+    notes_data = coerce_notes_structure(raw_notes)
+
+    queue = queue_data["queue"]
+    if not queue:
+        print("No pending research tasks. Queue is clear.")
         return
 
-    print(f"Found {len(pending_indices)} pending research task(s). Processing...")
+    task = queue.pop(0)
+    queue_data["queue"] = queue
+    save_json(RESEARCH_QUEUE_PATH, queue_data)
 
-    mem = MemoryManager()
-    research_notes = _load_json_dict(RESEARCH_NOTES_PATH)
+    if isinstance(task, dict):
+        topic = (task.get("topic") or "").strip()
+        key = (task.get("key") or "").strip()
+    else:
+        topic = str(task).strip()
+        key = ""
 
-    for idx in pending_indices:
-        entry = queue[idx]
-        entry_type = entry.get("type")
+    if not topic and key:
+        topic = key
+    if not key:
+        key = normalize_key_simple(topic)
+    if not topic:
+        topic = "unknown topic"
 
-        print(f"\n--- Task {idx} ---")
-        print("Type:", entry_type)
-        print("Reason:", entry.get("reason"))
-        print("Channel:", entry.get("channel"))
-        print("Status:", entry.get("status"))
+    ks = make_keywords(topic)
+    short, detailed = generate_drafts(topic)
 
-        if entry_type == "topic":
-            print("Processing topic:", entry.get("user_text"))
-            result = _process_topic(entry)
+    draft = {
+        "topic": topic,
+        "key": key,
+        "keywords": ks,
+        "short": short,
+        "detailed": detailed,
+        "created_at": utc_now_iso(),
+        "source": "offline_recipe_v1",
+    }
 
-            if result.get("ok"):
-                summary = result["summary"]
-                question = result["source_question"]
+    drafts = notes_data["drafts"]
+    drafts[key] = draft
+    notes_data["drafts"] = drafts
+    save_json(RESEARCH_NOTES_PATH, notes_data)
 
-                # Save into research_notes
-                notes_key = f"topic::{question}"
-                research_notes[notes_key] = {
-                    "question": question,
-                    "summary": summary,
-                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                }
-
-                # Also store into structured memory
-                mem.set(question, summary)
-
-                entry["notes_key"] = notes_key
-                entry["status"] = "done"
-                print("  -> Stored summary in research_notes and structured memory.")
-            else:
-                entry["status"] = "error"
-                entry["error"] = result.get("reason")
-                print("  -> Failed to process topic:", result.get("reason"))
-
-        elif entry_type == "url":
-            print("Processing URL:", entry.get("url"))
-            result = _process_url(entry)
-
-            if result.get("ok"):
-                summary = result["summary"]
-                url = result["source_url"]
-                notes_key = f"url::{url}"
-                research_notes[notes_key] = {
-                    "url": url,
-                    "summary": summary,
-                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                }
-                entry["notes_key"] = notes_key
-                entry["status"] = "done"
-                print("  -> Stored URL summary in research_notes.")
-            else:
-                entry["status"] = "error"
-                entry["error"] = result.get("reason")
-                print("  -> Failed to process URL:", result.get("reason"))
-
-        else:
-            print("Unknown entry type, skipping.")
-            entry["status"] = "error"
-            entry["error"] = "unknown_type"
-
-    # Save updated queue and notes
-    mgr.save_queue(queue)
-    _save_json_dict(RESEARCH_NOTES_PATH, research_notes)
-
-    print("\nResearch worker completed.")
-    print("Updated queue:", RESEARCH_QUEUE_PATH)
-    print("Updated research notes:", RESEARCH_NOTES_PATH)
+    print(f"Wrote improved draft for: {topic}")
 
 
 if __name__ == "__main__":
-    run_worker()
+    main()
