@@ -1,0 +1,40 @@
+{
+  "topics": {
+    "a switch": {
+      "topic": "a switch",
+      "short": "",
+      "detailed": "A network switch connects devices on the same local network and forwards data using MAC addresses so traffic goes only where it needs to go.",
+      "promoted_at": "2025-12-16T04:29:47",
+      "from": "drafts",
+      "confidence_at_promotion": 1.0,
+      "approvals_at_promotion": 2
+    },
+    "router vs switch": {
+      "topic": "router vs switch",
+      "short": "Routers connect networks. Switches connect devices on a LAN.",
+      "detailed": "A router connects different networks together and forwards traffic using IP addresses. A switch connects devices within the same local network and forwards traffic using MAC addresses. Routers handle traffic between networks, switches handle traffic inside a LAN.",
+      "promoted_at": "2025-12-16T04:33:40",
+      "from": "drafts",
+      "confidence_at_promotion": 1.0,
+      "approvals_at_promotion": 2
+    },
+    "ip address and subnet mask": {
+      "topic": "ip address and subnet mask",
+      "short": "IP identifies a device. Subnet mask shows what is local.",
+      "detailed": "An IP address identifies a device on a network. A subnet mask tells which part of the IP is the network part and which part is the host part. Together, they decide what devices are local and when traffic must go to a router (default gateway).",
+      "promoted_at": "2025-12-16T04:32:58",
+      "from": "drafts",
+      "confidence_at_promotion": 1.0,
+      "approvals_at_promotion": 2
+    },
+    "tcp vs udp": {
+      "topic": "tcp vs udp",
+      "short": "TCP is reliable. UDP is faster and lightweight.",
+      "detailed": "TCP is connection based and focuses on reliability, ordering, and error recovery, so it is used when you need data to arrive correctly. UDP is connectionless and faster with less overhead, so it is used when speed matters more than perfect delivery, like streaming, voice, or online games.",
+      "promoted_at": "2025-12-16T04:33:08",
+      "from": "drafts",
+      "confidence_at_promotion": 1.0,
+      "approvals_at_promotion": 2
+    }
+  }
+}
