@@ -1,0 +1,10 @@
+{
+  "items": {
+    "> explain the osi model in simple words": {
+      "question": "> explain the osi model in simple words",
+      "answer": "> The OSI model is a way to split networking into 7 layers so we can understand what each part does...",
+      "source": "user_auto_correction",
+      "updated_at": "2025-12-16T00:04:03+00:00"
+    }
+  }
+}

@@ -25,3 +25,29 @@ logs/
 *.bak
 *.save.*
 llama.cpp/
+
+# Machine Spirit personal learned memory
+/data/knowledge/base_knowledge.json
+# --- Machine Spirit runtime memory ---
+/data/chatlog.json
+/data/local_knowledge.json
+/data/research_notes.json
+/data/research_queue.json
+/data/knowledge_tools_log.json
+
+/data/memory/
+!/data/memory/.gitkeep
+
+/data/knowledge/*
+!/data/knowledge/
+!/data/knowledge/base_knowledge.example.json
+
+# Temporary / accidental files
+explain
+how
+what
+no
+
+# Python cache
+__pycache__/
+*.pyc
