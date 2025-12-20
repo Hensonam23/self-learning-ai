@@ -11,6 +11,7 @@ DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 KNOWLEDGE_PATH = os.path.join(DATA_DIR, "local_knowledge.json")
 RESEARCH_QUEUE_PATH = os.path.join(DATA_DIR, "research_queue.json")
 RESEARCH_NOTES_DIR = os.path.join(DATA_DIR, "research_notes")
+TEMPLATE_REQUESTS_PATH = os.path.join(DATA_DIR, "template_requests.json")
 
 LOW_CONF_THRESHOLD = 0.60
 DEFAULT_UNKNOWN_CONFIDENCE = 0.30
@@ -231,7 +232,50 @@ def is_wrong_message(user: str) -> bool:
     return u in ("wrong", "thats wrong", "that's wrong", "no", "nope", "incorrect")
 
 
-# -------- /note support --------
+# ---------------- template request tracking ----------------
+
+def load_template_requests() -> List[str]:
+    req = safe_read_json(TEMPLATE_REQUESTS_PATH, [])
+    if not isinstance(req, list):
+        req = []
+    seen = set()
+    cleaned: List[str] = []
+    for t in req:
+        nt = normalize_topic(str(t))
+        if nt and nt not in seen:
+            cleaned.append(nt)
+            seen.add(nt)
+    return cleaned
+
+
+def save_template_requests(req: List[str]) -> None:
+    safe_write_json(TEMPLATE_REQUESTS_PATH, req)
+
+
+def add_template_request(topic: str) -> bool:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    req = load_template_requests()
+    nt = normalize_topic(topic)
+    if not nt:
+        return False
+    if nt in req:
+        return False
+    req.append(nt)
+    save_template_requests(req)
+    return True
+
+
+def remove_template_request(topic: str) -> bool:
+    req = load_template_requests()
+    nt = normalize_topic(topic)
+    if nt in req:
+        req.remove(nt)
+        save_template_requests(req)
+        return True
+    return False
+
+
+# ---------------- /note support ----------------
 
 def topic_to_filename(topic: str) -> str:
     t = normalize_topic(topic)
@@ -243,24 +287,32 @@ def topic_to_filename(topic: str) -> str:
 def note_template(topic: str) -> Optional[str]:
     t = normalize_topic(topic)
 
+    # ASCII only templates. No fancy quotes, no unicode dashes.
     templates: Dict[str, str] = {
         "osi model": """OSI Model (Open Systems Interconnection) - Research Note
 
-The OSI model is a 7-layer framework used to describe how network communication works. It is not a specific protocol you "run," but a way to organize and explain how data moves from an application on one device to an application on another device. Each layer has a specific job and passes data up or down to the next layer.
+The OSI model is a 7-layer framework used to describe how network communication works. It is not a specific protocol you "run", but a way to organize and explain how data moves from an application on one device to an application on another device. Each layer has a specific job and passes data up or down to the next layer.
 
-Layer 7 - Application: This is what the user interacts with (web browsing, email, file transfer). Examples often associated here include HTTP, HTTPS, SMTP, DNS, and FTP, but the key idea is "services used by applications."
+Layer 7 - Application:
+This is what the user interacts with (web browsing, email, file transfer). Examples often associated here include HTTP, HTTPS, SMTP, DNS, and FTP. The key idea is "services used by applications."
 
-Layer 6 - Presentation: This layer focuses on how data is formatted so both sides can understand it. It deals with things like encoding, compression, and encryption. Example concepts include TLS/SSL encryption and data formats.
+Layer 6 - Presentation:
+This layer focuses on how data is formatted so both sides can understand it. It deals with things like encoding, compression, and encryption. Example concepts include TLS/SSL encryption and data formats.
 
-Layer 5 - Session: This layer manages the "conversation" between two devices. It helps start, maintain, and end sessions. It also helps with checkpointing and recovery in long communications.
+Layer 5 - Session:
+This layer manages the "conversation" between two devices. It helps start, maintain, and end sessions. It can also help with checkpointing and recovery in longer communications.
 
-Layer 4 - Transport: This is where reliability and delivery rules live. TCP provides reliable delivery with sequencing and retransmissions. UDP is faster and simpler but does not guarantee delivery. This layer uses ports (like 80, 443, 53) so the right app receives the data.
+Layer 4 - Transport:
+This is where reliability and delivery rules live. TCP provides reliable delivery with sequencing and retransmissions. UDP is faster and simpler but does not guarantee delivery. This layer uses ports (like 80, 443, 53) so the right app receives the data.
 
-Layer 3 - Network: This is about routing between networks. IP addressing and routers operate here. The main goal is to move packets from one network to another using logical addresses (IP).
+Layer 3 - Network:
+This is about routing between networks. IP addressing and routers operate here. The main goal is to move packets from one network to another using logical addresses (IP).
 
-Layer 2 - Data Link: This is local network delivery on the same network segment. It uses MAC addresses and frames. Switches typically operate here. It also includes error detection like CRC.
+Layer 2 - Data Link:
+This is local network delivery on the same network segment. It uses MAC addresses and frames. Switches typically operate here. It also includes error detection like CRC.
 
-Layer 1 - Physical: This is the raw transmission layer. It includes cables, radio signals (Wi-Fi), connectors, voltages, and physical bit transmission.
+Layer 1 - Physical:
+This is the raw transmission layer. It includes cables, radio signals (Wi-Fi), connectors, voltages, and physical bit transmission.
 
 A simple way to remember it is: the top layers deal with user data and formatting, the middle layers deal with moving and controlling the conversation, and the bottom layers deal with local delivery and physical signals.
 
@@ -289,12 +341,16 @@ def build_note_instructions(topic: str) -> str:
             f"python3 research_worker.py"
         )
 
+    added = add_template_request(topic)
+    extra = "Added to template request list." if added else "Already in template request list."
+
     return (
         f"Research note file for '{normalize_topic(topic)}':\n"
         f"{path}\n\n"
         f"No template exists for this topic yet.\n"
-        f"Tell me the topic and I will generate a paste-ready note for you.\n\n"
-        f"(You can still create the file now, then paste the note when I give it.)"
+        f"{extra}\n"
+        f"Use /templates to see what you need me to write.\n"
+        f"You can still create the file now, then paste the note when I give it."
     )
 
 
@@ -308,7 +364,9 @@ Commands:
 /rate <topic> | <0.0-1.0>
 /forget <topic>
 /queue
-/note <topic>       (prints exact note filename + paste-ready note if available)
+/note <topic>        (prints exact note filename + paste-ready note if available)
+/templates           (shows topics that need note templates)
+/template_done <t>   (removes a topic from template request list)
 /exit
 
 Correction flow:
@@ -402,6 +460,27 @@ def main() -> None:
                     print("Usage: /note <topic>")
                     continue
                 print(build_note_instructions(left))
+                continue
+
+            if cmd == "/templates":
+                req = load_template_requests()
+                if not req:
+                    print("Template request list is empty.")
+                else:
+                    print("Topics needing templates:")
+                    for i, t in enumerate(req, 1):
+                        print(f"{i}. {t}")
+                continue
+
+            if cmd == "/template_done":
+                if not left:
+                    print("Usage: /template_done <topic>")
+                    continue
+                ok = remove_template_request(left)
+                if ok:
+                    print(f"Removed from template requests: {normalize_topic(left)}")
+                else:
+                    print("That topic was not in the template request list.")
                 continue
 
             if cmd == "/show":
