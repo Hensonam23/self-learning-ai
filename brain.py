@@ -35,6 +35,9 @@ CONF_LOW_THRESHOLD = 0.50
 # For manual promote command
 CONF_PROMOTE_DEFAULT = 0.10
 
+# Marker used by research notes + teachfile
+IMPROVED_MARKER = "My improved answer (paste below):"
+
 # =========================
 # Backup system (timer-based)
 # =========================
@@ -96,6 +99,39 @@ def parse_iso_dt(s: str):
         return datetime.fromisoformat(s)
     except Exception:
         return None
+
+def read_text_file(filepath: str) -> str:
+    if not filepath:
+        return ""
+
+    # allow relative paths (relative to project root)
+    fp = filepath.strip()
+    if not os.path.isabs(fp):
+        fp = os.path.join(BASE_DIR, fp)
+
+    if not os.path.exists(fp):
+        return ""
+
+    try:
+        with open(fp, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+def extract_improved_answer(text: str) -> str:
+    if not text:
+        return ""
+
+    # If the notes marker exists, only take content after it
+    if IMPROVED_MARKER in text:
+        improved = text.split(IMPROVED_MARKER, 1)[1].strip()
+        # clean common bullet prefix
+        if improved.startswith("-"):
+            improved = improved.lstrip("-").strip()
+        return improved.strip()
+
+    # otherwise use whole file
+    return text.strip()
 
 # =========================
 # JSON Load/Save
@@ -251,6 +287,7 @@ def pending_queue(queue: list) -> list:
 HELP_TEXT = """
 Commands:
   /teach <topic> | <answer>
+  /teachfile <topic> | <path_to_txt>
   /alias <alias> | <topic>
   /show <topic>
   /low [n]
@@ -320,6 +357,41 @@ def main():
 
                     save_knowledge(knowledge)
                     print(f"Taught: {topic}")
+                    continue
+
+                if cmd == "/teachfile":
+                    if "|" not in rest:
+                        print("Usage: /teachfile <topic> | <path_to_txt>")
+                        continue
+
+                    left, right = rest.split("|", 1)
+                    topic = resolve_topic(left, aliases)
+                    path = right.strip()
+
+                    if not topic or not path:
+                        print("Usage: /teachfile <topic> | <path_to_txt>")
+                        continue
+
+                    text = read_text_file(path)
+                    if not text.strip():
+                        print("Could not read file, or file is empty.")
+                        continue
+
+                    improved = extract_improved_answer(text)
+                    if not improved.strip():
+                        print("File was read, but improved answer section looks empty.")
+                        continue
+
+                    knowledge[topic] = {
+                        "answer": improved.strip(),
+                        "confidence": 0.80,
+                        "last_updated": now_iso(),
+                        "last_used": now_iso(),
+                        "notes": f"Taught from file: {path}"
+                    }
+
+                    save_knowledge(knowledge)
+                    print(f"Taught from file: {topic}")
                     continue
 
                 if cmd == "/alias":
