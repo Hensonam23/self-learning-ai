@@ -25,6 +25,7 @@ logs/
 *.bak
 *.save.*
 llama.cpp/
+backups/
 
 # Machine Spirit personal learned memory
 /data/knowledge/base_knowledge.json
