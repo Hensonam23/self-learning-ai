@@ -45,3 +45,30 @@ data/research_notes.json
 
 # Large / external
 llama.cpp/
+
+# ---- MachineSpirit runtime state ----
+.env
+.env.bak
+
+# Logs
+*.log
+logs/
+
+# Backups / old versions
+*.bak
+backup_pre_reset/
+backups/
+
+# Runtime data (learned / generated)
+data/chatlog.json
+data/local_knowledge.json
+data/memory.json
+data/memory/
+data/night_learner.log
+data/knowledge/
+data/knowledge_tools_log.json
+data/research_queue.json
+data/research_notes.json
+
+# Large / external
+llama.cpp/
