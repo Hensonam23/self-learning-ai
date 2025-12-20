@@ -1,55 +1,47 @@
-.env
-memory.json
-__pycache__/
-.mypy_cache/
-*.log
-.venv/
-venv/
-machine_spirit_config.py
+data/exports/
+data/backups/
+data/auto_ingest_state.json
 
-machine_spirit_config.py
-.env
-memory.json
-__pycache__/
-.mypy_cache/
-*.log
-.venv/
-venv/
-*.bak
-*.save
-code_dump*.md
-bfg.jar
-*.tgz
-test.wav
-logs/
-*.bak
-*.save.*
-llama.cpp/
-backups/
+# ---- MachineSpirit runtime ignores ----
+data/exports/
+data/backups/
+data/auto_ingest_state.json
 
-# Machine Spirit personal learned memory
-/data/knowledge/base_knowledge.json
-# --- Machine Spirit runtime memory ---
-/data/chatlog.json
-/data/local_knowledge.json
-/data/research_notes.json
-/data/research_queue.json
-/data/knowledge_tools_log.json
-
-/data/memory/
-!/data/memory/.gitkeep
-
-/data/knowledge/*
-!/data/knowledge/
-!/data/knowledge/base_knowledge.example.json
-!/data/knowledge/learned_knowledge.json
-
-# Temporary / accidental files
-explain
-how
-what
-no
-
-# Python cache
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# ---- MachineSpirit runtime state ----
+.env
+.env.bak
+
+# Logs
+*.log
+logs/
+
+# Backups / old versions
+*.bak
+backup_pre_reset/
+backups/
+
+# Runtime data (learned / generated)
+data/local_knowledge.json
+data/memory.json
+data/memory/
+data/night_learner.log
+data/chatlog.json
+data/knowledge/
+data/knowledge_tools_log.json
+data/research_queue.json
+data/research_notes.json
+
+# Large / external
+llama.cpp/
