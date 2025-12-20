@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import os
-import sys
 import json
 import time
 import shutil
@@ -137,18 +136,6 @@ def set_confidence(knowledge: Dict[str, Any], topic: str, conf: float) -> bool:
     knowledge[topic_n]["confidence"] = float(conf)
     knowledge[topic_n]["updated_on"] = now_iso()
     return True
-
-
-def best_fuzzy_match(query: str, choices: List[str]) -> Tuple[Optional[str], float]:
-    q = normalize_topic(query)
-    best = None
-    best_score = 0.0
-    for c in choices:
-        score = difflib.SequenceMatcher(None, q, c).ratio()
-        if score > best_score:
-            best_score = score
-            best = c
-    return best, best_score
 
 
 def top_two_matches(query: str, choices: List[str]) -> List[Tuple[str, float]]:
@@ -427,6 +414,44 @@ def is_obvious_prefix_alias(alias_key: str, target_topic: str) -> bool:
     return True
 
 
+def would_auto_accept_alias(
+    raw_input: str,
+    best_topic: str,
+    best_score: float,
+    second_score: float,
+    knowledge: Dict[str, Any],
+    alias_map: Dict[str, str]
+) -> Tuple[bool, str, str]:
+    """
+    Returns (would_accept, rule_used, reason_text)
+    Does not modify alias_map.
+    """
+    alias_key = normalize_topic(raw_input)
+    target_conf = get_confidence(knowledge, best_topic)
+
+    if alias_key in knowledge:
+        return False, "none", "Input already matches an existing topic."
+
+    if alias_key in alias_map and normalize_topic(alias_map[alias_key]) != best_topic:
+        return False, "none", "Alias exists but points to a different target."
+
+    if target_conf < AUTO_ALIAS_CONFIDENCE_THRESHOLD:
+        return False, "none", f"Target confidence too low: {target_conf:.2f} < {AUTO_ALIAS_CONFIDENCE_THRESHOLD:.2f}"
+
+    # Rule A
+    if best_score >= AUTO_ALIAS_SCORE_THRESHOLD:
+        return True, "score", f"Score rule passed: {best_score:.2f} >= {AUTO_ALIAS_SCORE_THRESHOLD:.2f} and confidence {target_conf:.2f}"
+
+    # Rule B
+    if is_obvious_prefix_alias(alias_key, best_topic):
+        margin = best_score - second_score
+        if margin >= AUTO_ALIAS_MARGIN_THRESHOLD:
+            return True, "prefix", f"Prefix rule passed. margin {margin:.2f} >= {AUTO_ALIAS_MARGIN_THRESHOLD:.2f} and confidence {target_conf:.2f}"
+        return False, "none", f"Prefix match but ambiguous. margin {margin:.2f} < {AUTO_ALIAS_MARGIN_THRESHOLD:.2f}"
+
+    return False, "none", "No auto accept rule matched."
+
+
 def auto_accept_alias_if_obvious(
     raw_input: str,
     best_topic: str,
@@ -435,26 +460,30 @@ def auto_accept_alias_if_obvious(
     knowledge: Dict[str, Any],
     alias_map: Dict[str, str]
 ) -> Tuple[bool, str]:
+    """
+    Auto accept alias when:
+      A) difflib score is very strong AND target confidence is high
+      OR
+      B) alias is an obvious prefix of the target AND target confidence is high AND match is not ambiguous
+    """
     alias_key = normalize_topic(raw_input)
-    target_conf = get_confidence(knowledge, best_topic)
 
-    if alias_key in knowledge:
+    would_accept, rule_used, _ = would_auto_accept_alias(
+        raw_input, best_topic, best_score, second_score, knowledge, alias_map
+    )
+    if not would_accept:
         return False, ""
 
-    if alias_key in alias_map and normalize_topic(alias_map[alias_key]) != best_topic:
-        return False, "Alias exists with different target. Not auto accepting."
+    alias_map[alias_key] = best_topic
+    target_conf = get_confidence(knowledge, best_topic)
+    margin = best_score - second_score
 
-    if best_score >= AUTO_ALIAS_SCORE_THRESHOLD and target_conf >= AUTO_ALIAS_CONFIDENCE_THRESHOLD:
-        alias_map[alias_key] = best_topic
-        return True, f"Auto accepted alias: {alias_key} -> {best_topic} (score {best_score:.2f}, confidence {target_conf:.2f})"
+    if rule_used == "score":
+        return True, f"Auto accepted alias: {alias_key} -> {best_topic} (score rule, score {best_score:.2f}, confidence {target_conf:.2f})"
+    if rule_used == "prefix":
+        return True, f"Auto accepted alias: {alias_key} -> {best_topic} (prefix rule, score {best_score:.2f}, margin {margin:.2f}, confidence {target_conf:.2f})"
 
-    if target_conf >= AUTO_ALIAS_CONFIDENCE_THRESHOLD and is_obvious_prefix_alias(alias_key, best_topic):
-        margin = best_score - second_score
-        if margin >= AUTO_ALIAS_MARGIN_THRESHOLD:
-            alias_map[alias_key] = best_topic
-            return True, f"Auto accepted alias: {alias_key} -> {best_topic} (prefix rule, score {best_score:.2f}, margin {margin:.2f}, confidence {target_conf:.2f})"
-
-    return False, ""
+    return True, f"Auto accepted alias: {alias_key} -> {best_topic} (confidence {target_conf:.2f})"
 
 
 def show_help() -> None:
@@ -471,8 +500,7 @@ def show_help() -> None:
     safe_print("  /confidence <topic> | <0.0-1.0>")
     safe_print("  /lowest [n]")
     safe_print("  /alias <alias> | <topic>")
-    safe_print("  /aliases [n]")
-    safe_print("  /unalias <alias>")
+    safe_print("  /why <text>")
     safe_print("  /suggest <text>")
     safe_print("  /accept")
     safe_print("")
@@ -483,6 +511,60 @@ def format_answer(entry: Dict[str, Any]) -> str:
     ans = entry.get("answer", "").strip()
     conf = entry.get("confidence", 0.0)
     return f"{ans}\n\n(confidence: {float(conf):.2f})"
+
+
+def cmd_why(
+    text: str,
+    knowledge: Dict[str, Any],
+    alias_map: Dict[str, str]
+) -> None:
+    q = text.strip()
+    if not q:
+        safe_print("Usage: /why <text>")
+        return
+
+    qn = normalize_topic(q)
+    safe_print(f"why: input='{qn}'")
+
+    resolved, reason = resolve_topic(qn, knowledge, alias_map)
+    if resolved and reason == "exact":
+        safe_print("resolve: exact topic match")
+        safe_print(f"topic: {resolved} (confidence {get_confidence(knowledge, resolved):.2f})")
+        return
+    if resolved and reason == "alias":
+        safe_print("resolve: saved alias match")
+        safe_print(f"alias: {qn} -> {resolved} (confidence {get_confidence(knowledge, resolved):.2f})")
+        return
+
+    topics = list_topics(knowledge)
+    if not topics:
+        safe_print("no topics exist yet")
+        return
+
+    top2 = top_two_matches(qn, topics)
+    best = top2[0][0] if len(top2) >= 1 else None
+    best_score = top2[0][1] if len(top2) >= 1 else 0.0
+    second = top2[1][0] if len(top2) >= 2 else None
+    second_score = top2[1][1] if len(top2) >= 2 else 0.0
+    margin = best_score - second_score
+
+    if not best:
+        safe_print("no match found")
+        return
+
+    safe_print(f"best: {best} (score {best_score:.2f}, confidence {get_confidence(knowledge, best):.2f})")
+    if second:
+        safe_print(f"second: {second} (score {second_score:.2f})")
+        safe_print(f"margin: {margin:.2f}")
+    else:
+        safe_print("second: none")
+        safe_print("margin: n/a")
+
+    would_accept, rule_used, reason_text = would_auto_accept_alias(
+        qn, best, best_score, second_score, knowledge, alias_map
+    )
+    safe_print(f"auto_accept: {str(would_accept).lower()} (rule {rule_used})")
+    safe_print(f"detail: {reason_text}")
 
 
 def main() -> None:
@@ -542,6 +624,14 @@ def main() -> None:
                 save_json(ALIAS_PATH, alias_map)
                 safe_print(f"Accepted alias: {alias_key} -> {target}")
                 last_suggested_alias = None
+                continue
+
+            if cmd.startswith("/why"):
+                parts = cmd.split(" ", 1)
+                if len(parts) < 2:
+                    safe_print("Usage: /why <text>")
+                    continue
+                cmd_why(parts[1], knowledge, alias_map)
                 continue
 
             if cmd.startswith("/suggest"):
@@ -716,44 +806,6 @@ def main() -> None:
                 alias_map[normalize_topic(alias_key)] = normalize_topic(target)
                 save_json(ALIAS_PATH, alias_map)
                 safe_print(f"Saved alias: {normalize_topic(alias_key)} -> {normalize_topic(target)}")
-                continue
-
-            if cmd.startswith("/aliases"):
-                parts = cmd.split(" ", 1)
-                n = 25
-                if len(parts) == 2 and parts[1].strip():
-                    try:
-                        n = int(parts[1].strip())
-                    except Exception:
-                        n = 25
-
-                if not alias_map:
-                    safe_print("No aliases saved.")
-                    continue
-
-                safe_print(f"Aliases (showing up to {n}):")
-                count = 0
-                for a in sorted(alias_map.keys()):
-                    t = normalize_topic(alias_map[a])
-                    conf = get_confidence(knowledge, t)
-                    safe_print(f"  {a} -> {t}  (confidence {conf:.2f})")
-                    count += 1
-                    if count >= n:
-                        break
-                continue
-
-            if cmd.startswith("/unalias"):
-                parts = cmd.split(" ", 1)
-                if len(parts) < 2 or not parts[1].strip():
-                    safe_print("Usage: /unalias <alias>")
-                    continue
-                akey = normalize_topic(parts[1].strip())
-                if akey not in alias_map:
-                    safe_print("Alias not found.")
-                    continue
-                del alias_map[akey]
-                save_json(ALIAS_PATH, alias_map)
-                safe_print(f"Removed alias: {akey}")
                 continue
 
             safe_print("Unknown command. Type /help")
