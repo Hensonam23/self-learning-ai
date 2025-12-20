@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 
-KNOWLEDGE_PATH = os.path.join(DATA_DIR, "local_knowledge.json")
+KNOWLEDGE_PATH = os.path.join(DATA_DIR, "knowledge", "learned_knowledge.json")
 RESEARCH_QUEUE_PATH = os.path.join(DATA_DIR, "research_queue.json")
 RESEARCH_NOTES_DIR = os.path.join(DATA_DIR, "research_notes")
 TEMPLATE_REQUESTS_PATH = os.path.join(DATA_DIR, "template_requests.json")

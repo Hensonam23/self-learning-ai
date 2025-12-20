@@ -41,6 +41,7 @@ llama.cpp/
 /data/knowledge/*
 !/data/knowledge/
 !/data/knowledge/base_knowledge.example.json
+!/data/knowledge/learned_knowledge.json
 
 # Temporary / accidental files
 explain
