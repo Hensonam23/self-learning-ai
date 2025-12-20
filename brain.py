@@ -139,12 +139,6 @@ def set_confidence(knowledge: Dict[str, Any], topic: str, conf: float) -> bool:
     return True
 
 
-def score_ratio(query: str, choice: str) -> float:
-    q = normalize_topic(query)
-    c = normalize_topic(choice)
-    return difflib.SequenceMatcher(None, q, c).ratio()
-
-
 def best_fuzzy_match(query: str, choices: List[str]) -> Tuple[Optional[str], float]:
     q = normalize_topic(query)
     best = None
@@ -414,10 +408,6 @@ def resolve_topic(
 
 
 def is_obvious_prefix_alias(alias_key: str, target_topic: str) -> bool:
-    """
-    True when alias_key is a prefix of target_topic and the remaining part is small.
-    Example: subnet -> subnetting
-    """
     a = normalize_topic(alias_key)
     t = normalize_topic(target_topic)
 
@@ -445,28 +435,19 @@ def auto_accept_alias_if_obvious(
     knowledge: Dict[str, Any],
     alias_map: Dict[str, str]
 ) -> Tuple[bool, str]:
-    """
-    Auto accept alias when:
-      A) difflib score is very strong AND target confidence is high
-      OR
-      B) alias is an obvious prefix of the target AND target confidence is high AND match is not ambiguous
-    """
     alias_key = normalize_topic(raw_input)
     target_conf = get_confidence(knowledge, best_topic)
 
     if alias_key in knowledge:
         return False, ""
 
-    # do not overwrite existing alias mapping to a different target
     if alias_key in alias_map and normalize_topic(alias_map[alias_key]) != best_topic:
         return False, "Alias exists with different target. Not auto accepting."
 
-    # Rule A: strong fuzzy score
     if best_score >= AUTO_ALIAS_SCORE_THRESHOLD and target_conf >= AUTO_ALIAS_CONFIDENCE_THRESHOLD:
         alias_map[alias_key] = best_topic
         return True, f"Auto accepted alias: {alias_key} -> {best_topic} (score {best_score:.2f}, confidence {target_conf:.2f})"
 
-    # Rule B: obvious prefix + high confidence + clear winner
     if target_conf >= AUTO_ALIAS_CONFIDENCE_THRESHOLD and is_obvious_prefix_alias(alias_key, best_topic):
         margin = best_score - second_score
         if margin >= AUTO_ALIAS_MARGIN_THRESHOLD:
@@ -490,6 +471,8 @@ def show_help() -> None:
     safe_print("  /confidence <topic> | <0.0-1.0>")
     safe_print("  /lowest [n]")
     safe_print("  /alias <alias> | <topic>")
+    safe_print("  /aliases [n]")
+    safe_print("  /unalias <alias>")
     safe_print("  /suggest <text>")
     safe_print("  /accept")
     safe_print("")
@@ -733,6 +716,44 @@ def main() -> None:
                 alias_map[normalize_topic(alias_key)] = normalize_topic(target)
                 save_json(ALIAS_PATH, alias_map)
                 safe_print(f"Saved alias: {normalize_topic(alias_key)} -> {normalize_topic(target)}")
+                continue
+
+            if cmd.startswith("/aliases"):
+                parts = cmd.split(" ", 1)
+                n = 25
+                if len(parts) == 2 and parts[1].strip():
+                    try:
+                        n = int(parts[1].strip())
+                    except Exception:
+                        n = 25
+
+                if not alias_map:
+                    safe_print("No aliases saved.")
+                    continue
+
+                safe_print(f"Aliases (showing up to {n}):")
+                count = 0
+                for a in sorted(alias_map.keys()):
+                    t = normalize_topic(alias_map[a])
+                    conf = get_confidence(knowledge, t)
+                    safe_print(f"  {a} -> {t}  (confidence {conf:.2f})")
+                    count += 1
+                    if count >= n:
+                        break
+                continue
+
+            if cmd.startswith("/unalias"):
+                parts = cmd.split(" ", 1)
+                if len(parts) < 2 or not parts[1].strip():
+                    safe_print("Usage: /unalias <alias>")
+                    continue
+                akey = normalize_topic(parts[1].strip())
+                if akey not in alias_map:
+                    safe_print("Alias not found.")
+                    continue
+                del alias_map[akey]
+                save_json(ALIAS_PATH, alias_map)
+                safe_print(f"Removed alias: {akey}")
                 continue
 
             safe_print("Unknown command. Type /help")
