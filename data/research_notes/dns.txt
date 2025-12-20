@@ -1,0 +1,19 @@
+DNS (Domain Name System) - Research Note
+
+DNS translates human friendly domain names like google.com into IP addresses. It allows users to access resources without remembering numeric IP addresses.
+
+Basic DNS lookup process:
+1) Client asks a DNS server for a record
+2) Server responds from cache or performs recursion
+3) Result is returned and cached for a time
+
+Common DNS record types:
+- A: domain to IPv4 address
+- AAAA: domain to IPv6 address
+- CNAME: alias to another domain
+- MX: mail server records
+- TXT: text records for verification
+
+DNS typically uses UDP port 53. TCP port 53 is used for large responses and zone transfers.
+
+DNS issues often appear as internet outages even when IP connectivity is working.

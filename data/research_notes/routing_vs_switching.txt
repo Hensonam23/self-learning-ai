@@ -1,0 +1,7 @@
+Routing vs Switching - Research Note
+
+Switching operates at Layer 2 using MAC addresses. Switches forward traffic within the same local network.
+
+Routing operates at Layer 3 using IP addresses. Routers move traffic between different networks and subnets.
+
+Switches handle LAN traffic. Routers connect networks together and break broadcast domains.
