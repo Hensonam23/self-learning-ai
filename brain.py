@@ -6,7 +6,7 @@ import json
 import time
 import shutil
 import datetime
-from typing import Tuple
+from typing import Tuple, Optional, Dict
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -74,6 +74,11 @@ QUEUE_DONE_STATUSES = {"done", "resolved", "complete"}
 
 FUZZY_ALIAS_SCORE_THRESHOLD = 0.62
 FUZZY_ALIAS_MIN_TOPIC_LEN = 3
+
+# Auto-accept settings (NEW)
+AUTO_ACCEPT_ALIASES = True
+AUTO_ACCEPT_SCORE_THRESHOLD = 0.88
+AUTO_ACCEPT_CONF_THRESHOLD = 0.75
 
 def _safe_read_json(path: str, default):
     if not os.path.exists(path):
@@ -149,48 +154,69 @@ def _jaccard(a: str, b: str) -> float:
         return 0.0
     return len(ta & tb) / max(1, len(ta | tb))
 
-def fuzzy_alias_suggestion(user_text: str, knowledge: dict, aliases: dict) -> str:
+def _match_strength_prefix(raw: str, topic: str) -> float:
+    raw_comp = re.sub(r"\s+", " ", raw).strip()
+    t_comp = re.sub(r"\s+", " ", topic).strip()
+    if not raw_comp or not t_comp:
+        return 0.0
+    if t_comp == raw_comp:
+        return 1.0
+    if t_comp.startswith(raw_comp) or raw_comp.startswith(t_comp):
+        # strong, “obvious” match
+        return 0.95
+    if len(raw_comp) >= 4 and raw_comp in t_comp:
+        return 0.90
+    return 0.0
+
+def fuzzy_alias_match(user_text: str, knowledge: dict, aliases: dict) -> Optional[Dict]:
+    """
+    Returns dict:
+      { alias, topic, score, reason }
+    or None
+    """
     raw = normalize_topic(user_text)
     if not raw or len(raw) < FUZZY_ALIAS_MIN_TOPIC_LEN:
-        return ""
+        return None
     if raw in aliases:
-        return ""
+        return None
     if raw in knowledge:
-        return ""
+        return None
 
-    raw_comp = re.sub(r"\s+", " ", raw).strip()
+    # 1) prefix/substring match (strong)
+    best = None
+    best_score = 0.0
     for t in knowledge.keys():
         if not isinstance(t, str) or not t:
             continue
-        t_comp = re.sub(r"\s+", " ", t).strip()
-        if t_comp == raw_comp:
-            return ""
-        if t_comp.startswith(raw_comp) or raw_comp.startswith(t_comp):
-            return f"Suggestion: /alias {raw} | {t}"
-        if len(raw_comp) >= 4 and raw_comp in t_comp:
-            return f"Suggestion: /alias {raw} | {t}"
+        score = _match_strength_prefix(raw, t)
+        if score > best_score:
+            best_score = score
+            best = {"alias": raw, "topic": t, "score": score, "reason": "prefix"}
 
-    best_topic = ""
-    best_score = 0.0
+    if best and best_score >= 0.90:
+        return best
 
+    # 2) token similarity fallback
     raw_tokens = _tokens(raw)
     if not raw_tokens:
-        return ""
+        return None
 
+    best_topic = ""
+    best_j = 0.0
     for t in knowledge.keys():
         if not isinstance(t, str) or not t:
             continue
         if _tokens(t).isdisjoint(raw_tokens):
             continue
-        score = _jaccard(raw, t)
-        if score > best_score:
-            best_score = score
+        j = _jaccard(raw, t)
+        if j > best_j:
+            best_j = j
             best_topic = t
 
-    if best_topic and best_score >= FUZZY_ALIAS_SCORE_THRESHOLD and best_topic != raw:
-        return f"Suggestion: /alias {raw} | {best_topic}"
+    if best_topic and best_j >= FUZZY_ALIAS_SCORE_THRESHOLD and best_topic != raw:
+        return {"alias": raw, "topic": best_topic, "score": best_j, "reason": "jaccard"}
 
-    return ""
+    return None
 
 def load_knowledge() -> dict:
     return load_json_dict(KNOWLEDGE_PATH)
@@ -535,7 +561,7 @@ def main():
     last_auto_import = 0
     AUTO_IMPORT_INTERVAL = 15
 
-    last_suggestion = ""  # NEW
+    last_suggestion = ""
 
     while True:
         try:
@@ -580,20 +606,17 @@ def main():
                     if not last_suggestion.startswith("Suggestion: /alias "):
                         print("No alias suggestion to accept yet.")
                         continue
-
                     try:
                         payload = last_suggestion.replace("Suggestion: /alias ", "").strip()
                         left, right = split_pipe_args(payload)
                         alias_key = normalize_topic(left)
                         canonical = resolve_topic(right, aliases)
-
                         if not alias_key or not canonical:
                             print("Accept failed: bad suggestion format.")
                             continue
                         if alias_key == canonical:
                             print("Accept failed: alias resolves to itself.")
                             continue
-
                         aliases[alias_key] = canonical
                         save_aliases(aliases)
                         print(f"Alias saved: '{alias_key}' -> '{canonical}'")
@@ -835,10 +858,26 @@ def main():
                         print(suggestion)
                 continue
 
-            fuzzy = fuzzy_alias_suggestion(user_input, knowledge, aliases)
-            if fuzzy:
-                last_suggestion = fuzzy
-                print(fuzzy)
+            # Unknown topic: fuzzy match
+            m = fuzzy_alias_match(user_input, knowledge, aliases)
+            if m:
+                suggestion = f"Suggestion: /alias {m['alias']} | {m['topic']}"
+                last_suggestion = suggestion
+
+                # Auto-accept when match is strong and canonical topic is confident
+                if AUTO_ACCEPT_ALIASES:
+                    entry = knowledge.get(m["topic"], {})
+                    entry = ensure_entry_schema(entry)
+                    conf = float(entry.get("confidence", CONF_DEFAULT_IF_MISSING))
+
+                    if m["score"] >= AUTO_ACCEPT_SCORE_THRESHOLD and conf >= AUTO_ACCEPT_CONF_THRESHOLD:
+                        aliases[m["alias"]] = m["topic"]
+                        save_aliases(aliases)
+                        print(f"Auto-saved alias: '{m['alias']}' -> '{m['topic']}' (score={round(m['score'],3)} conf={conf})")
+                    else:
+                        print(suggestion)
+                else:
+                    print(suggestion)
 
             reason = "No taught answer yet"
             current_confidence = 0.30
