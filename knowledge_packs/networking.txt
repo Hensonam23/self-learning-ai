@@ -1,0 +1,6 @@
+Subnetting:
+Subnetting is the process of dividing a large IP network into smaller logical networks.
+It helps reduce broadcast traffic and improves security.
+
+OSI Model:
+The OSI model has seven layers that describe how data moves through a network.

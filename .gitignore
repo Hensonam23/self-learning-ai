@@ -72,3 +72,8 @@ data/research_notes.json
 
 # Large / external
 llama.cpp/
+
+# ---- Auto-import runtime ----
+data/imports/
+data/auto_import_state.json
+auto_import_state.json
