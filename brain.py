@@ -422,10 +422,6 @@ def would_auto_accept_alias(
     knowledge: Dict[str, Any],
     alias_map: Dict[str, str]
 ) -> Tuple[bool, str, str]:
-    """
-    Returns (would_accept, rule_used, reason_text)
-    Does not modify alias_map.
-    """
     alias_key = normalize_topic(raw_input)
     target_conf = get_confidence(knowledge, best_topic)
 
@@ -438,11 +434,9 @@ def would_auto_accept_alias(
     if target_conf < AUTO_ALIAS_CONFIDENCE_THRESHOLD:
         return False, "none", f"Target confidence too low: {target_conf:.2f} < {AUTO_ALIAS_CONFIDENCE_THRESHOLD:.2f}"
 
-    # Rule A
     if best_score >= AUTO_ALIAS_SCORE_THRESHOLD:
         return True, "score", f"Score rule passed: {best_score:.2f} >= {AUTO_ALIAS_SCORE_THRESHOLD:.2f} and confidence {target_conf:.2f}"
 
-    # Rule B
     if is_obvious_prefix_alias(alias_key, best_topic):
         margin = best_score - second_score
         if margin >= AUTO_ALIAS_MARGIN_THRESHOLD:
@@ -460,12 +454,6 @@ def auto_accept_alias_if_obvious(
     knowledge: Dict[str, Any],
     alias_map: Dict[str, str]
 ) -> Tuple[bool, str]:
-    """
-    Auto accept alias when:
-      A) difflib score is very strong AND target confidence is high
-      OR
-      B) alias is an obvious prefix of the target AND target confidence is high AND match is not ambiguous
-    """
     alias_key = normalize_topic(raw_input)
 
     would_accept, rule_used, _ = would_auto_accept_alias(
@@ -500,6 +488,8 @@ def show_help() -> None:
     safe_print("  /confidence <topic> | <0.0-1.0>")
     safe_print("  /lowest [n]")
     safe_print("  /alias <alias> | <topic>")
+    safe_print("  /aliases [n]")
+    safe_print("  /unalias <alias>")
     safe_print("  /why <text>")
     safe_print("  /suggest <text>")
     safe_print("  /accept")
@@ -567,6 +557,49 @@ def cmd_why(
     safe_print(f"detail: {reason_text}")
 
 
+def cmd_aliases(
+    arg: str,
+    knowledge: Dict[str, Any],
+    alias_map: Dict[str, str]
+) -> None:
+    n = 25
+    if arg.strip():
+        try:
+            n = int(arg.strip())
+        except Exception:
+            n = 25
+
+    if not alias_map:
+        safe_print("No aliases saved.")
+        return
+
+    safe_print(f"Aliases (showing up to {n}):")
+    count = 0
+    for a in sorted(alias_map.keys()):
+        t = normalize_topic(alias_map[a])
+        conf = get_confidence(knowledge, t)
+        safe_print(f"  {a} -> {t}  (confidence {conf:.2f})")
+        count += 1
+        if count >= n:
+            break
+
+
+def cmd_unalias(
+    arg: str,
+    alias_map: Dict[str, str]
+) -> None:
+    akey = normalize_topic(arg)
+    if not akey:
+        safe_print("Usage: /unalias <alias>")
+        return
+    if akey not in alias_map:
+        safe_print("Alias not found.")
+        return
+    del alias_map[akey]
+    save_json(ALIAS_PATH, alias_map)
+    safe_print(f"Removed alias: {akey}")
+
+
 def main() -> None:
     ensure_dirs()
     knowledge, alias_map, research_queue, ingest_state = load_or_init_files()
@@ -632,6 +665,20 @@ def main() -> None:
                     safe_print("Usage: /why <text>")
                     continue
                 cmd_why(parts[1], knowledge, alias_map)
+                continue
+
+            if cmd.startswith("/aliases"):
+                parts = cmd.split(" ", 1)
+                arg = parts[1] if len(parts) == 2 else ""
+                cmd_aliases(arg, knowledge, alias_map)
+                continue
+
+            if cmd.startswith("/unalias"):
+                parts = cmd.split(" ", 1)
+                if len(parts) < 2:
+                    safe_print("Usage: /unalias <alias>")
+                    continue
+                cmd_unalias(parts[1], alias_map)
                 continue
 
             if cmd.startswith("/suggest"):
