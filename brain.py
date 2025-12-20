@@ -13,6 +13,9 @@ RESEARCH_QUEUE_PATH = os.path.join(DATA_DIR, "research_queue.json")
 RESEARCH_NOTES_DIR = os.path.join(DATA_DIR, "research_notes")
 TEMPLATE_REQUESTS_PATH = os.path.join(DATA_DIR, "template_requests.json")
 
+# NEW: alias storage
+ALIASES_PATH = os.path.join(DATA_DIR, "aliases.json")
+
 LOW_CONF_THRESHOLD = 0.60
 DEFAULT_UNKNOWN_CONFIDENCE = 0.30
 
@@ -275,6 +278,95 @@ def remove_template_request(topic: str) -> bool:
     return False
 
 
+# ---------------- aliases (NEW) ----------------
+
+def load_aliases() -> Dict[str, str]:
+    data = safe_read_json(ALIASES_PATH, {})
+    if not isinstance(data, dict):
+        data = {}
+    cleaned: Dict[str, str] = {}
+    for k, v in data.items():
+        nk = normalize_topic(str(k))
+        nv = normalize_topic(str(v))
+        if nk and nv:
+            cleaned[nk] = nv
+    # write back normalized version
+    safe_write_json(ALIASES_PATH, cleaned)
+    return cleaned
+
+
+def save_aliases(aliases: Dict[str, str]) -> None:
+    safe_write_json(ALIASES_PATH, aliases)
+
+
+def add_alias(aliases: Dict[str, str], phrase: str, canonical: str) -> bool:
+    p = normalize_topic(phrase)
+    c = normalize_topic(canonical)
+    if not p or not c:
+        return False
+    if p == c:
+        return False
+    if aliases.get(p) == c:
+        return False
+    aliases[p] = c
+    save_aliases(aliases)
+    return True
+
+
+def remove_alias(aliases: Dict[str, str], phrase: str) -> bool:
+    p = normalize_topic(phrase)
+    if p in aliases:
+        del aliases[p]
+        save_aliases(aliases)
+        return True
+    return False
+
+
+def canonicalize_input(raw: str, aliases: Dict[str, str]) -> str:
+    """
+    Convert user input into a canonical topic.
+    Order:
+      1) normalize + strip punctuation
+      2) direct alias lookup
+      3) apply built-in phrasing rules (what is / explain / define / etc)
+      4) alias lookup again after rules
+    """
+    s = normalize_topic(raw)
+
+    # remove trailing punctuation like ?, ., !
+    s = re.sub(r"[?.!]+$", "", s).strip()
+
+    # direct alias
+    if s in aliases:
+        return aliases[s]
+
+    # built-in phrase stripping
+    # examples: "what is subnetting" -> "subnetting"
+    patterns = [
+        r"^what is (.+)$",
+        r"^what are (.+)$",
+        r"^whats (.+)$",
+        r"^what's (.+)$",
+        r"^explain (.+)$",
+        r"^define (.+)$",
+        r"^tell me about (.+)$",
+        r"^give me (?:an )?overview of (.+)$",
+        r"^how does (.+) work$",
+        r"^how do (.+) work$",
+    ]
+    for pat in patterns:
+        m = re.match(pat, s)
+        if m:
+            s = normalize_topic(m.group(1))
+            break
+
+    # final alias lookup after rules
+    if s in aliases:
+        return aliases[s]
+
+    return s
+
+
 # ---------------- /note support ----------------
 
 def topic_to_filename(topic: str) -> str:
@@ -287,7 +379,6 @@ def topic_to_filename(topic: str) -> str:
 def note_template(topic: str) -> Optional[str]:
     t = normalize_topic(topic)
 
-    # ASCII only templates. No fancy quotes, no unicode dashes.
     templates: Dict[str, str] = {
         "osi model": """OSI Model (Open Systems Interconnection) - Research Note
 
@@ -297,7 +388,7 @@ Layer 7 - Application:
 This is what the user interacts with (web browsing, email, file transfer). Examples often associated here include HTTP, HTTPS, SMTP, DNS, and FTP. The key idea is "services used by applications."
 
 Layer 6 - Presentation:
-This layer focuses on how data is formatted so both sides can understand it. It deals with things like encoding, compression, and encryption. Example concepts include TLS/SSL encryption and data formats.
+This layer focuses on how data is formatted so both sides can understand it. It deals with encoding, compression, and encryption. Example concepts include TLS/SSL encryption and data formats.
 
 Layer 5 - Session:
 This layer manages the "conversation" between two devices. It helps start, maintain, and end sessions. It can also help with checkpointing and recovery in longer communications.
@@ -364,15 +455,23 @@ Commands:
 /rate <topic> | <0.0-1.0>
 /forget <topic>
 /queue
+
 /note <topic>        (prints exact note filename + paste-ready note if available)
 /templates           (shows topics that need note templates)
 /template_done <t>   (removes a topic from template request list)
-/exit
+
+# NEW alias commands:
+/alias <phrase> | <canonical_topic>
+/unalias <phrase>
+/aliases
+/canon <phrase>      (shows what the brain will map it to)
 
 Correction flow:
 After the brain answers, you can type:
 wrong
 Then it will ask you for the corrected answer and save it.
+
+/exit
 """.strip()
 
 
@@ -382,6 +481,7 @@ def main() -> None:
 
     knowledge = load_knowledge()
     queue = load_queue()
+    aliases = load_aliases()
 
     last_topic: Optional[str] = None
     waiting_for_correction: bool = False
@@ -481,6 +581,48 @@ def main() -> None:
                     print(f"Removed from template requests: {normalize_topic(left)}")
                 else:
                     print("That topic was not in the template request list.")
+                continue
+
+            # NEW alias commands
+            if cmd == "/alias":
+                if not left or right is None:
+                    print("Usage: /alias <phrase> | <canonical_topic>")
+                    continue
+                ok = add_alias(aliases, left, right)
+                aliases = load_aliases()
+                if ok:
+                    print(f"Alias saved: '{normalize_topic(left)}' -> '{normalize_topic(right)}'")
+                else:
+                    print("Alias not saved (maybe blank, same, or already exists).")
+                continue
+
+            if cmd == "/unalias":
+                if not left:
+                    print("Usage: /unalias <phrase>")
+                    continue
+                ok = remove_alias(aliases, left)
+                aliases = load_aliases()
+                if ok:
+                    print(f"Alias removed: '{normalize_topic(left)}'")
+                else:
+                    print("That alias phrase was not found.")
+                continue
+
+            if cmd == "/aliases":
+                if not aliases:
+                    print("No aliases saved yet.")
+                else:
+                    print("Aliases:")
+                    for k in sorted(aliases.keys()):
+                        print(f"- {k} -> {aliases[k]}")
+                continue
+
+            if cmd == "/canon":
+                if not left:
+                    print("Usage: /canon <phrase>")
+                    continue
+                mapped = canonicalize_input(left, aliases)
+                print(f"Canonical: {mapped}")
                 continue
 
             if cmd == "/show":
@@ -583,8 +725,8 @@ def main() -> None:
             print(f"Ok. What is the correct answer for '{normalize_topic(last_topic)}'? Paste it as your next message.")
             continue
 
-        # Normal question flow
-        topic = normalize_topic(user)
+        # NEW: canonicalize user input BEFORE lookup/queue
+        topic = canonicalize_input(user, aliases)
         last_topic = topic
 
         entry = get_entry(knowledge, topic)
