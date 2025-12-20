@@ -200,6 +200,14 @@ def should_auto_queue(raw_input: str, best_score: float) -> Tuple[bool, str]:
     return True, "OK"
 
 
+def clear_pending_queue(queue: List[Dict[str, Any]]) -> int:
+    before = len(queue)
+    kept = [q for q in queue if q.get("status") != "pending"]
+    removed = before - len(kept)
+    queue[:] = kept
+    return removed
+
+
 def promote_research_note(knowledge: Dict[str, Any], queue: List[Dict[str, Any]], topic: str) -> Tuple[bool, str]:
     topic_n = normalize_topic(topic)
     note_file = os.path.join(RESEARCH_NOTES_DIR, topic_n.replace(" ", "_") + ".txt")
@@ -498,6 +506,7 @@ def show_help() -> None:
     safe_print("  /ingest <topic> | <text_to_append_to_research_note>")
     safe_print("  /export")
     safe_print("  /queue")
+    safe_print("  /clearpending")
     safe_print("  /promote <topic>")
     safe_print("  /confidence <topic> | <0.0-1.0>")
     safe_print("  /lowest [n]")
@@ -660,6 +669,12 @@ def main() -> None:
                 save_json(ALIAS_PATH, alias_map)
                 safe_print(f"Accepted alias: {alias_key} -> {target}")
                 last_suggested_alias = None
+                continue
+
+            if cmd == "/clearpending":
+                removed = clear_pending_queue(research_queue)
+                save_json(RESEARCH_QUEUE_PATH, research_queue)
+                safe_print(f"Cleared pending queue items: {removed}")
                 continue
 
             if cmd.startswith("/why"):
@@ -889,7 +904,6 @@ def main() -> None:
                     safe_print(format_answer(knowledge[best]))
                     continue
 
-                # Only suggest if match is decent
                 if best_score >= SUGGEST_MIN_SCORE:
                     last_suggested_alias = {
                         "alias": user,
@@ -919,7 +933,6 @@ def main() -> None:
                 continue
 
         safe_print("Machine Spirit: I do not have a taught answer for that yet.")
-        # No topics at all, queueing is fine
         add_to_research_queue(research_queue, user, reason="No taught answer yet", current_confidence=0.30)
         save_json(RESEARCH_QUEUE_PATH, research_queue)
 
