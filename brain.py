@@ -17,9 +17,11 @@ BACKUP_DIR = os.path.join(DATA_DIR, "backups")
 KNOWLEDGE_PATH = os.path.join(DATA_DIR, "local_knowledge.json")
 ALIASES_PATH = os.path.join(DATA_DIR, "topic_aliases.json")
 RESEARCH_QUEUE_PATH = os.path.join(DATA_DIR, "research_queue.json")
+RESEARCH_NOTES_DIR = os.path.join(DATA_DIR, "research_notes")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(BACKUP_DIR, exist_ok=True)
+os.makedirs(RESEARCH_NOTES_DIR, exist_ok=True)
 
 # =========================
 # Tuning (Confidence)
@@ -35,8 +37,11 @@ CONF_LOW_THRESHOLD = 0.50
 # For manual promote command
 CONF_PROMOTE_DEFAULT = 0.10
 
-# Marker used by research notes + teachfile
+# teachfile + ingest marker
 IMPROVED_MARKER = "My improved answer (paste below):"
+
+# ingest tuning
+CONF_INGEST_BOOST = 0.20
 
 # =========================
 # Backup system (timer-based)
@@ -100,11 +105,20 @@ def parse_iso_dt(s: str):
     except Exception:
         return None
 
+def safe_slug(topic: str) -> str:
+    t = normalize_topic(topic)
+    out = []
+    for ch in t:
+        out.append(ch if ch.isalnum() else "_")
+    slug = "".join(out)
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return slug.strip("_") or "topic"
+
 def read_text_file(filepath: str) -> str:
     if not filepath:
         return ""
 
-    # allow relative paths (relative to project root)
     fp = filepath.strip()
     if not os.path.isabs(fp):
         fp = os.path.join(BASE_DIR, fp)
@@ -122,15 +136,12 @@ def extract_improved_answer(text: str) -> str:
     if not text:
         return ""
 
-    # If the notes marker exists, only take content after it
     if IMPROVED_MARKER in text:
         improved = text.split(IMPROVED_MARKER, 1)[1].strip()
-        # clean common bullet prefix
         if improved.startswith("-"):
             improved = improved.lstrip("-").strip()
         return improved.strip()
 
-    # otherwise use whole file
     return text.strip()
 
 # =========================
@@ -281,6 +292,96 @@ def pending_queue(queue: list) -> list:
     return [q for q in queue if q.get("status") in ("pending", "in_progress")]
 
 # =========================
+# Ingest research notes
+# =========================
+
+def ingest_notes_into_knowledge(knowledge: dict, queue: list) -> tuple[dict, list, dict]:
+    """
+    Returns: (knowledge, queue, report)
+    report = { "ingested": int, "skipped": int, "errors": int, "details": [str] }
+    """
+    report = {"ingested": 0, "skipped": 0, "errors": 0, "details": []}
+
+    try:
+        files = [f for f in os.listdir(RESEARCH_NOTES_DIR) if f.endswith(".txt")]
+    except Exception:
+        report["errors"] += 1
+        report["details"].append("ERROR: Could not list research_notes directory.")
+        return knowledge, queue, report
+
+    if not files:
+        report["skipped"] += 1
+        report["details"].append("No .txt files found in data/research_notes/")
+        return knowledge, queue, report
+
+    # For quick queue matching
+    queue_topics = {}
+    for item in queue:
+        t = normalize_topic(str(item.get("topic", "")))
+        if t:
+            queue_topics[t] = item
+
+    for fname in files:
+        path = os.path.join(RESEARCH_NOTES_DIR, fname)
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except Exception:
+            report["errors"] += 1
+            report["details"].append(f"ERROR: Could not read {fname}")
+            continue
+
+        topic = ""
+        for line in text.splitlines():
+            if line.lower().startswith("topic:"):
+                topic = line.split(":", 1)[1].strip()
+                break
+
+        if not topic:
+            report["skipped"] += 1
+            report["details"].append(f"SKIP: {fname} (missing 'Topic:' line)")
+            continue
+
+        improved = extract_improved_answer(text)
+        if not improved.strip():
+            report["skipped"] += 1
+            report["details"].append(f"SKIP: {fname} (improved answer empty)")
+            continue
+
+        # Write into knowledge (canonical key is normalized topic)
+        tkey = normalize_topic(topic)
+
+        entry = knowledge.get(tkey, {})
+        if not isinstance(entry, dict):
+            entry = {}
+
+        entry = ensure_knowledge_shape(entry)
+        entry["answer"] = improved.strip()
+        entry["last_updated"] = now_iso()
+        entry["last_used"] = now_iso()
+
+        # Boost confidence
+        entry = promote_confidence(entry, CONF_INGEST_BOOST)
+
+        old_notes = str(entry.get("notes", "")).strip()
+        entry["notes"] = (old_notes + " | Ingested from research notes").strip(" |")
+
+        knowledge[tkey] = entry
+
+        # Mark queue item done if it exists
+        if tkey in queue_topics:
+            q = queue_topics[tkey]
+            q["status"] = "done"
+            q["completed_on"] = str(date.today())
+            q["worker_note"] = f"Ingested from {fname}"
+
+        report["ingested"] += 1
+        report["details"].append(f"INGEST: {tkey} (from {fname})")
+
+    return knowledge, queue, report
+
+# =========================
 # Commands
 # =========================
 
@@ -288,6 +389,7 @@ HELP_TEXT = """
 Commands:
   /teach <topic> | <answer>
   /teachfile <topic> | <path_to_txt>
+  /ingest
   /alias <alias> | <topic>
   /show <topic>
   /low [n]
@@ -333,6 +435,23 @@ def main():
                 if cmd == "/exit":
                     print("Shutting down.")
                     break
+
+                if cmd == "/ingest":
+                    # reload fresh copies (in case files changed)
+                    knowledge = load_knowledge()
+                    research_queue = load_research_queue()
+
+                    knowledge, research_queue, report = ingest_notes_into_knowledge(knowledge, research_queue)
+
+                    save_knowledge(knowledge)
+                    save_research_queue(research_queue)
+
+                    print(f"Ingest complete. ingested={report['ingested']} skipped={report['skipped']} errors={report['errors']}")
+                    for line in report["details"][:15]:
+                        print("  " + line)
+                    if len(report["details"]) > 15:
+                        print(f"  ...and {len(report['details']) - 15} more")
+                    continue
 
                 if cmd == "/teach":
                     if "|" not in rest:
