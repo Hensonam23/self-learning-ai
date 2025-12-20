@@ -10,6 +10,7 @@ DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 
 KNOWLEDGE_PATH = os.path.join(DATA_DIR, "local_knowledge.json")
 RESEARCH_QUEUE_PATH = os.path.join(DATA_DIR, "research_queue.json")
+RESEARCH_NOTES_DIR = os.path.join(DATA_DIR, "research_notes")
 
 LOW_CONF_THRESHOLD = 0.60
 DEFAULT_UNKNOWN_CONFIDENCE = 0.30
@@ -185,25 +186,6 @@ def bump_confidence(old_conf: float, bump: float) -> float:
     return clamp_conf(old_conf + bump)
 
 
-HELP_TEXT = """
-Commands:
-
-/help
-/show <topic>
-/list
-/teach <topic> | <answer>
-/rate <topic> | <0.0-1.0>
-/forget <topic>
-/queue
-/exit
-
-Correction flow:
-After the brain answers, you can type:
-wrong
-Then it will ask you for the corrected answer and save it.
-""".strip()
-
-
 def parse_pipe_command(line: str) -> Tuple[str, Optional[str], Optional[str]]:
     parts = line.strip().split(" ", 1)
     cmd = parts[0].lower()
@@ -249,8 +231,96 @@ def is_wrong_message(user: str) -> bool:
     return u in ("wrong", "thats wrong", "that's wrong", "no", "nope", "incorrect")
 
 
+# -------- /note support --------
+
+def topic_to_filename(topic: str) -> str:
+    t = normalize_topic(topic)
+    t = re.sub(r"[^a-z0-9 _-]", "", t)
+    t = t.replace(" ", "_")
+    return t + ".txt"
+
+
+def note_template(topic: str) -> Optional[str]:
+    t = normalize_topic(topic)
+
+    templates: Dict[str, str] = {
+        "osi model": """OSI Model (Open Systems Interconnection) - Research Note
+
+The OSI model is a 7-layer framework used to describe how network communication works. It is not a specific protocol you "run," but a way to organize and explain how data moves from an application on one device to an application on another device. Each layer has a specific job and passes data up or down to the next layer.
+
+Layer 7 - Application: This is what the user interacts with (web browsing, email, file transfer). Examples often associated here include HTTP, HTTPS, SMTP, DNS, and FTP, but the key idea is "services used by applications."
+
+Layer 6 - Presentation: This layer focuses on how data is formatted so both sides can understand it. It deals with things like encoding, compression, and encryption. Example concepts include TLS/SSL encryption and data formats.
+
+Layer 5 - Session: This layer manages the "conversation" between two devices. It helps start, maintain, and end sessions. It also helps with checkpointing and recovery in long communications.
+
+Layer 4 - Transport: This is where reliability and delivery rules live. TCP provides reliable delivery with sequencing and retransmissions. UDP is faster and simpler but does not guarantee delivery. This layer uses ports (like 80, 443, 53) so the right app receives the data.
+
+Layer 3 - Network: This is about routing between networks. IP addressing and routers operate here. The main goal is to move packets from one network to another using logical addresses (IP).
+
+Layer 2 - Data Link: This is local network delivery on the same network segment. It uses MAC addresses and frames. Switches typically operate here. It also includes error detection like CRC.
+
+Layer 1 - Physical: This is the raw transmission layer. It includes cables, radio signals (Wi-Fi), connectors, voltages, and physical bit transmission.
+
+A simple way to remember it is: the top layers deal with user data and formatting, the middle layers deal with moving and controlling the conversation, and the bottom layers deal with local delivery and physical signals.
+
+The OSI model helps with troubleshooting by letting you isolate problems: cable issues at layer 1, switching/MAC issues at layer 2, routing/IP issues at layer 3, TCP/UDP and port issues at layer 4, and so on.
+""",
+    }
+
+    return templates.get(t)
+
+
+def build_note_instructions(topic: str) -> str:
+    os.makedirs(RESEARCH_NOTES_DIR, exist_ok=True)
+    fname = topic_to_filename(topic)
+    path = os.path.join("data", "research_notes", fname)
+
+    tmpl = note_template(topic)
+    if tmpl:
+        return (
+            f"Research note file for '{normalize_topic(topic)}':\n"
+            f"{path}\n\n"
+            f"Open the file and paste this:\n\n"
+            f"---------- COPY FROM HERE ----------\n"
+            f"{tmpl.strip()}\n"
+            f"----------- COPY TO HERE -----------\n\n"
+            f"Then run:\n"
+            f"python3 research_worker.py"
+        )
+
+    return (
+        f"Research note file for '{normalize_topic(topic)}':\n"
+        f"{path}\n\n"
+        f"No template exists for this topic yet.\n"
+        f"Tell me the topic and I will generate a paste-ready note for you.\n\n"
+        f"(You can still create the file now, then paste the note when I give it.)"
+    )
+
+
+HELP_TEXT = """
+Commands:
+
+/help
+/show <topic>
+/list
+/teach <topic> | <answer>
+/rate <topic> | <0.0-1.0>
+/forget <topic>
+/queue
+/note <topic>       (prints exact note filename + paste-ready note if available)
+/exit
+
+Correction flow:
+After the brain answers, you can type:
+wrong
+Then it will ask you for the corrected answer and save it.
+""".strip()
+
+
 def main() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(RESEARCH_NOTES_DIR, exist_ok=True)
 
     knowledge = load_knowledge()
     queue = load_queue()
@@ -271,11 +341,11 @@ def main() -> None:
         if not user:
             continue
 
-        # If we are waiting for a correction answer, treat next input as the corrected answer text
+        # waiting for correction text
         if waiting_for_correction:
             corrected_answer = user.strip()
             if not corrected_answer:
-                print("No correction received. Type the corrected answer, or type /exit.")
+                print("No correction received. Paste the corrected answer, or type /exit.")
                 continue
 
             topic = correction_topic or last_topic
@@ -300,7 +370,6 @@ def main() -> None:
                 save_knowledge(knowledge)
                 print(f"Saved correction for '{normalize_topic(topic)}' (confidence now {new_conf:.2f})")
             else:
-                # If it was unknown, create it at a solid starting confidence
                 set_entry(
                     knowledge,
                     topic,
@@ -327,6 +396,13 @@ def main() -> None:
             if cmd == "/exit":
                 print("Shutting down.")
                 break
+
+            if cmd == "/note":
+                if not left:
+                    print("Usage: /note <topic>")
+                    continue
+                print(build_note_instructions(left))
+                continue
 
             if cmd == "/show":
                 if not left:
@@ -418,7 +494,7 @@ def main() -> None:
             print("Unknown command. Type /help")
             continue
 
-        # If user says "wrong" right after an answer, start correction mode
+        # "wrong" flow
         if is_wrong_message(user):
             if not last_topic:
                 print("Wrong about what topic? Ask a question first, then type: wrong")
@@ -455,6 +531,8 @@ def main() -> None:
             "If you want to teach me, use:\n"
             "/teach <topic> | <your answer>\n"
             "Or type: wrong (after an answer) to enter correction mode.\n"
+            "You can also generate a research note file with:\n"
+            "/note <topic>\n"
             "I will also queue this topic for research."
         )
         conf = DEFAULT_UNKNOWN_CONFIDENCE
