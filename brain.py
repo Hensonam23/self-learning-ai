@@ -1,86 +1,57 @@
 #!/usr/bin/env python3
-
 import os
-import re
+import sys
 import json
 import time
 import shutil
+import difflib
 import datetime
-from typing import Tuple, Optional, Dict
+from typing import Dict, Any, Tuple, List, Optional
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
 KNOWLEDGE_PATH = os.path.join(DATA_DIR, "local_knowledge.json")
-ALIASES_PATH = os.path.join(DATA_DIR, "topic_aliases.json")
+ALIAS_PATH = os.path.join(DATA_DIR, "alias_map.json")
+
 RESEARCH_QUEUE_PATH = os.path.join(DATA_DIR, "research_queue.json")
-
 RESEARCH_NOTES_DIR = os.path.join(DATA_DIR, "research_notes")
+
 EXPORTS_DIR = os.path.join(DATA_DIR, "exports")
-BACKUP_DIR = os.path.join(DATA_DIR, "backups")
+BACKUPS_DIR = os.path.join(DATA_DIR, "backups")
 
-IMPORTS_DIR = os.path.join(DATA_DIR, "imports")
-AUTO_IMPORT_STATE_PATH = os.path.join(DATA_DIR, "auto_import_state.json")
-
+AUTO_INGEST_DIR = os.path.join(DATA_DIR, "auto_ingest")
 AUTO_INGEST_STATE_PATH = os.path.join(DATA_DIR, "auto_ingest_state.json")
 
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(RESEARCH_NOTES_DIR, exist_ok=True)
-os.makedirs(EXPORTS_DIR, exist_ok=True)
-os.makedirs(BACKUP_DIR, exist_ok=True)
-os.makedirs(IMPORTS_DIR, exist_ok=True)
+# Auto accept alias rules
+# difflib ratio can be low for prefix cases like subnet vs subnetting
+AUTO_ALIAS_SCORE_THRESHOLD = 0.92
+AUTO_ALIAS_CONFIDENCE_THRESHOLD = 0.70
 
-LAST_BACKUP_TIME = 0
-BACKUP_INTERVAL = 300
+# Prefix rule for obvious aliases
+AUTO_ALIAS_PREFIX_MIN_LEN = 4
+AUTO_ALIAS_PREFIX_MAX_EXTRA_CHARS = 8
+AUTO_ALIAS_MARGIN_THRESHOLD = 0.15  # best must beat runner-up by this margin
 
-FILES_TO_BACKUP = [
-    KNOWLEDGE_PATH,
-    ALIASES_PATH,
-    RESEARCH_QUEUE_PATH,
-    AUTO_INGEST_STATE_PATH,
-    AUTO_IMPORT_STATE_PATH,
-]
+# Backup timer (seconds)
+BACKUP_INTERVAL_SECONDS = 10 * 60  # 10 minutes
 
-def backup_files_if_needed():
-    global LAST_BACKUP_TIME
-    now = time.time()
-    if now - LAST_BACKUP_TIME < BACKUP_INTERVAL:
-        return
+# Auto ingest scan interval (seconds)
+AUTO_INGEST_SCAN_INTERVAL_SECONDS = 20
 
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    for fp in FILES_TO_BACKUP:
-        if not os.path.exists(fp):
-            continue
-        base = os.path.basename(fp)
-        backup_name = f"{base}_{timestamp}"
-        backup_path = os.path.join(BACKUP_DIR, backup_name)
-        try:
-            shutil.copy2(fp, backup_path)
-        except Exception:
-            pass
+def ensure_dirs() -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(RESEARCH_NOTES_DIR, exist_ok=True)
+    os.makedirs(EXPORTS_DIR, exist_ok=True)
+    os.makedirs(BACKUPS_DIR, exist_ok=True)
+    os.makedirs(AUTO_INGEST_DIR, exist_ok=True)
 
-    LAST_BACKUP_TIME = now
 
-CONF_DEFAULT_IF_MISSING = 0.40
-CONF_DECAY_PER_DAY = 0.003
-CONF_REINFORCE_ON_USE = 0.01
-CONF_INGEST_BOOST = 0.10
+def now_iso() -> str:
+    return datetime.datetime.now().isoformat(timespec="seconds")
 
-CONF_LOW_THRESHOLD = 0.50
-CONF_GOOD_THRESHOLD = 0.75
 
-QUEUE_DONE_STATUSES = {"done", "resolved", "complete"}
-
-FUZZY_ALIAS_SCORE_THRESHOLD = 0.62
-FUZZY_ALIAS_MIN_TOPIC_LEN = 3
-
-# Auto-accept settings (NEW)
-AUTO_ACCEPT_ALIASES = True
-AUTO_ACCEPT_SCORE_THRESHOLD = 0.88
-AUTO_ACCEPT_CONF_THRESHOLD = 0.75
-
-def _safe_read_json(path: str, default):
+def load_json(path: str, default: Any) -> Any:
     if not os.path.exists(path):
         return default
     try:
@@ -89,812 +60,727 @@ def _safe_read_json(path: str, default):
     except Exception:
         return default
 
-def _safe_write_json(path: str, obj):
+
+def save_json(path: str, data: Any) -> None:
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
+        json.dump(data, f, indent=2, ensure_ascii=False)
     os.replace(tmp, path)
 
-def load_json_dict(path: str) -> dict:
-    raw = _safe_read_json(path, {})
-    return raw if isinstance(raw, dict) else {}
 
-def save_json_dict(path: str, data: dict) -> None:
-    _safe_write_json(path, data)
+def normalize_topic(s: str) -> str:
+    s = s.strip().lower()
+    s = " ".join(s.split())
+    return s
 
-def load_json_list(path: str) -> list:
-    raw = _safe_read_json(path, [])
-    return raw if isinstance(raw, list) else []
 
-def save_json_list(path: str, data: list) -> None:
-    _safe_write_json(path, data)
+def safe_print(msg: str) -> None:
+    try:
+        print(msg)
+    except BrokenPipeError:
+        pass
 
-def normalize_topic(topic: str) -> str:
-    return (topic or "").strip().lower()
 
-def load_aliases() -> dict:
-    return load_json_dict(ALIASES_PATH)
+def backup_runtime_files() -> Optional[str]:
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_dir = os.path.join(BACKUPS_DIR, ts)
+    try:
+        os.makedirs(backup_dir, exist_ok=True)
+        for p in [KNOWLEDGE_PATH, ALIAS_PATH, RESEARCH_QUEUE_PATH, AUTO_INGEST_STATE_PATH]:
+            if os.path.exists(p):
+                shutil.copy2(p, os.path.join(backup_dir, os.path.basename(p)))
+        return backup_dir
+    except Exception as e:
+        safe_print(f"Backup failed: {e}")
+        return None
 
-def save_aliases(aliases: dict) -> None:
-    save_json_dict(ALIASES_PATH, aliases)
 
-def resolve_topic(topic: str, aliases: dict) -> str:
-    t = normalize_topic(topic)
-    seen = set()
-    while t in aliases and t not in seen:
-        seen.add(t)
-        t = normalize_topic(aliases.get(t, t))
-    return t
+def knowledge_get_entry(knowledge: Dict[str, Any], topic: str) -> Optional[Dict[str, Any]]:
+    topic_n = normalize_topic(topic)
+    return knowledge.get(topic_n)
 
-def alias_suggestion_for(user_text: str, base: str, aliases: dict) -> str:
-    raw = normalize_topic(user_text)
-    if not raw or not base:
-        return ""
-    if raw in aliases:
-        return ""
-    return f"Suggestion: /alias {raw} | {base}"
 
-def _stem_word(w: str) -> str:
-    w = (w or "").lower().strip()
-    if len(w) <= 4:
-        return w
-    for suf in ("ing", "ed", "es", "s"):
-        if w.endswith(suf) and len(w) - len(suf) >= 3:
-            return w[:-len(suf)]
-    return w
+def knowledge_set_entry(
+    knowledge: Dict[str, Any],
+    topic: str,
+    answer: str,
+    confidence: float,
+    notes: str = ""
+) -> None:
+    topic_n = normalize_topic(topic)
+    knowledge[topic_n] = {
+        "answer": answer.strip(),
+        "confidence": float(confidence),
+        "updated_on": now_iso(),
+        "notes": notes.strip()
+    }
 
-def _tokens(s: str):
-    toks = re.findall(r"[a-z0-9]+", (s or "").lower())
-    return set(_stem_word(t) for t in toks if t)
 
-def _jaccard(a: str, b: str) -> float:
-    ta = _tokens(a)
-    tb = _tokens(b)
-    if not ta or not tb:
+def list_topics(knowledge: Dict[str, Any]) -> List[str]:
+    return sorted(list(knowledge.keys()))
+
+
+def get_confidence(knowledge: Dict[str, Any], topic: str) -> float:
+    entry = knowledge_get_entry(knowledge, topic)
+    if not entry:
         return 0.0
-    return len(ta & tb) / max(1, len(ta | tb))
-
-def _match_strength_prefix(raw: str, topic: str) -> float:
-    raw_comp = re.sub(r"\s+", " ", raw).strip()
-    t_comp = re.sub(r"\s+", " ", topic).strip()
-    if not raw_comp or not t_comp:
+    try:
+        return float(entry.get("confidence", 0.0))
+    except Exception:
         return 0.0
-    if t_comp == raw_comp:
-        return 1.0
-    if t_comp.startswith(raw_comp) or raw_comp.startswith(t_comp):
-        # strong, “obvious” match
-        return 0.95
-    if len(raw_comp) >= 4 and raw_comp in t_comp:
-        return 0.90
-    return 0.0
 
-def fuzzy_alias_match(user_text: str, knowledge: dict, aliases: dict) -> Optional[Dict]:
-    """
-    Returns dict:
-      { alias, topic, score, reason }
-    or None
-    """
-    raw = normalize_topic(user_text)
-    if not raw or len(raw) < FUZZY_ALIAS_MIN_TOPIC_LEN:
-        return None
-    if raw in aliases:
-        return None
-    if raw in knowledge:
-        return None
 
-    # 1) prefix/substring match (strong)
+def set_confidence(knowledge: Dict[str, Any], topic: str, conf: float) -> bool:
+    topic_n = normalize_topic(topic)
+    if topic_n not in knowledge:
+        return False
+    knowledge[topic_n]["confidence"] = float(conf)
+    knowledge[topic_n]["updated_on"] = now_iso()
+    return True
+
+
+def score_ratio(query: str, choice: str) -> float:
+    q = normalize_topic(query)
+    c = normalize_topic(choice)
+    return difflib.SequenceMatcher(None, q, c).ratio()
+
+
+def best_fuzzy_match(query: str, choices: List[str]) -> Tuple[Optional[str], float]:
+    q = normalize_topic(query)
     best = None
     best_score = 0.0
-    for t in knowledge.keys():
-        if not isinstance(t, str) or not t:
-            continue
-        score = _match_strength_prefix(raw, t)
+    for c in choices:
+        score = difflib.SequenceMatcher(None, q, c).ratio()
         if score > best_score:
             best_score = score
-            best = {"alias": raw, "topic": t, "score": score, "reason": "prefix"}
+            best = c
+    return best, best_score
 
-    if best and best_score >= 0.90:
-        return best
 
-    # 2) token similarity fallback
-    raw_tokens = _tokens(raw)
-    if not raw_tokens:
-        return None
+def top_two_matches(query: str, choices: List[str]) -> List[Tuple[str, float]]:
+    qn = normalize_topic(query)
+    scored = []
+    for c in choices:
+        scored.append((c, difflib.SequenceMatcher(None, qn, c).ratio()))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored[:2]
 
-    best_topic = ""
-    best_j = 0.0
-    for t in knowledge.keys():
-        if not isinstance(t, str) or not t:
-            continue
-        if _tokens(t).isdisjoint(raw_tokens):
-            continue
-        j = _jaccard(raw, t)
-        if j > best_j:
-            best_j = j
-            best_topic = t
 
-    if best_topic and best_j >= FUZZY_ALIAS_SCORE_THRESHOLD and best_topic != raw:
-        return {"alias": raw, "topic": best_topic, "score": best_j, "reason": "jaccard"}
+def load_or_init_files() -> Tuple[Dict[str, Any], Dict[str, str], List[Dict[str, Any]], Dict[str, Any]]:
+    knowledge = load_json(KNOWLEDGE_PATH, {})
+    if not isinstance(knowledge, dict):
+        knowledge = {}
 
-    return None
+    alias_map = load_json(ALIAS_PATH, {})
+    if not isinstance(alias_map, dict):
+        alias_map = {}
 
-def load_knowledge() -> dict:
-    return load_json_dict(KNOWLEDGE_PATH)
+    research_queue = load_json(RESEARCH_QUEUE_PATH, [])
+    if not isinstance(research_queue, list):
+        research_queue = []
 
-def save_knowledge(knowledge: dict) -> None:
-    save_json_dict(KNOWLEDGE_PATH, knowledge)
+    ingest_state = load_json(AUTO_INGEST_STATE_PATH, {"processed_files": {}, "last_scan": 0})
+    if not isinstance(ingest_state, dict):
+        ingest_state = {"processed_files": {}, "last_scan": 0}
+    if "processed_files" not in ingest_state or not isinstance(ingest_state["processed_files"], dict):
+        ingest_state["processed_files"] = {}
+    if "last_scan" not in ingest_state:
+        ingest_state["last_scan"] = 0
 
-def ensure_entry_schema(entry: dict) -> dict:
-    if not isinstance(entry, dict):
-        entry = {"answer": str(entry)}
-    if "answer" not in entry:
-        entry["answer"] = ""
-    if "confidence" not in entry or not isinstance(entry["confidence"], (int, float)):
-        entry["confidence"] = float(CONF_DEFAULT_IF_MISSING)
-    if "last_updated" not in entry:
-        entry["last_updated"] = datetime.date.today().isoformat()
-    if "notes" not in entry:
-        entry["notes"] = ""
-    return entry
+    return knowledge, alias_map, research_queue, ingest_state
 
-def _days_since(date_str: str) -> int:
-    try:
-        d = datetime.date.fromisoformat(date_str)
-        return max(0, (datetime.date.today() - d).days)
-    except Exception:
-        return 0
 
-def apply_confidence_decay(entry: dict) -> dict:
-    entry = ensure_entry_schema(entry)
-    days_old = _days_since(entry.get("last_updated", ""))
-    if days_old <= 0:
-        return entry
-    decayed = float(entry["confidence"]) - (days_old * CONF_DECAY_PER_DAY)
-    if decayed < 0.05:
-        decayed = 0.05
-    if decayed > 0.99:
-        decayed = 0.99
-    entry["confidence"] = round(float(decayed), 4)
-    return entry
-
-def reinforce_confidence(entry: dict) -> dict:
-    entry = ensure_entry_schema(entry)
-    boosted = float(entry["confidence"]) + float(CONF_REINFORCE_ON_USE)
-    if boosted > 0.99:
-        boosted = 0.99
-    entry["confidence"] = round(float(boosted), 4)
-    entry["last_updated"] = datetime.date.today().isoformat()
-    return entry
-
-def promote_confidence(entry: dict, amount: float) -> dict:
-    entry = ensure_entry_schema(entry)
-    boosted = float(entry.get("confidence", CONF_DEFAULT_IF_MISSING)) + float(amount)
-    if boosted > 0.99:
-        boosted = 0.99
-    if boosted < 0.05:
-        boosted = 0.05
-    entry["confidence"] = round(float(boosted), 4)
-    entry["last_updated"] = datetime.date.today().isoformat()
-    return entry
-
-def load_research_queue() -> list:
-    return load_json_list(RESEARCH_QUEUE_PATH)
-
-def save_research_queue(queue: list) -> None:
-    save_json_list(RESEARCH_QUEUE_PATH, queue)
-
-def _topic_to_note_filename(topic: str) -> str:
-    safe = re.sub(r"[^a-zA-Z0-9]+", "_", normalize_topic(topic)).strip("_")
-    if not safe:
-        safe = "topic"
-    return safe + ".txt"
-
-def enqueue_research(queue: list, topic: str, reason: str, current_confidence: float) -> list:
-    t = normalize_topic(topic)
-    if not t:
-        return queue
+def add_to_research_queue(queue: List[Dict[str, Any]], topic: str, reason: str, current_confidence: float) -> None:
+    topic_n = normalize_topic(topic)
     for item in queue:
-        if normalize_topic(item.get("topic", "")) == t:
-            return queue
-    note_file = os.path.join(RESEARCH_NOTES_DIR, _topic_to_note_filename(t))
+        if normalize_topic(item.get("topic", "")) == topic_n and item.get("status", "") == "pending":
+            return
     queue.append({
-        "topic": t,
+        "topic": topic_n,
         "reason": reason,
         "requested_on": datetime.date.today().isoformat(),
         "status": "pending",
-        "current_confidence": round(float(current_confidence), 4),
-        "worker_note": f"Missing research note file: {note_file}"
+        "current_confidence": float(current_confidence),
+        "worker_note": f"Missing research note file: {os.path.join(RESEARCH_NOTES_DIR, topic_n.replace(' ', '_') + '.txt')}"
     })
-    return queue
 
-def pending_queue(queue: list) -> list:
-    out = []
-    for item in queue:
-        status = str(item.get("status", "pending")).lower().strip()
-        if status not in QUEUE_DONE_STATUSES:
-            out.append(item)
-    return out
 
-def mark_queue_done(queue: list, topic: str, note: str = "") -> list:
-    t = normalize_topic(topic)
+def promote_research_note(knowledge: Dict[str, Any], queue: List[Dict[str, Any]], topic: str) -> Tuple[bool, str]:
+    topic_n = normalize_topic(topic)
+    note_file = os.path.join(RESEARCH_NOTES_DIR, topic_n.replace(" ", "_") + ".txt")
+    if not os.path.exists(note_file):
+        return False, f"No research note file found: {note_file}"
+
+    with open(note_file, "r", encoding="utf-8") as f:
+        note_text = f.read().strip()
+
+    if not note_text:
+        return False, "Research note file is empty."
+
+    base_conf = max(get_confidence(knowledge, topic_n), 0.60)
+    knowledge_set_entry(knowledge, topic_n, note_text, base_conf, notes="Promoted from research note")
+
     for item in queue:
-        if normalize_topic(item.get("topic", "")) == t:
+        if normalize_topic(item.get("topic", "")) == topic_n and item.get("status", "") == "pending":
             item["status"] = "done"
             item["completed_on"] = datetime.date.today().isoformat()
-            if note:
-                item["worker_note"] = note
-            return queue
-    return queue
+            item["current_confidence"] = float(base_conf)
+            item["worker_note"] = "Upgraded knowledge using local research note"
+            break
 
-def load_auto_ingest_state() -> dict:
-    state = load_json_dict(AUTO_INGEST_STATE_PATH)
-    if "ingested_files" not in state or not isinstance(state["ingested_files"], dict):
-        state["ingested_files"] = {}
-    return state
+    return True, f"Promoted research note into knowledge for: {topic_n} (confidence {base_conf:.2f})"
 
-def save_auto_ingest_state(state: dict) -> None:
-    save_json_dict(AUTO_INGEST_STATE_PATH, state)
 
-def ingest_notes_into_knowledge(knowledge: dict, research_queue: list):
-    report = {"ingested": 0, "skipped": 0, "details": []}
-    try:
-        files = [f for f in os.listdir(RESEARCH_NOTES_DIR) if f.endswith(".txt")]
-    except Exception:
-        report["details"].append("ERROR: Could not list research_notes directory.")
-        return knowledge, research_queue, report
-    if not files:
-        report["details"].append("No .txt files found in data/research_notes/")
-        return knowledge, research_queue, report
-
-    state = load_auto_ingest_state()
-    for fname in sorted(files):
-        path = os.path.join(RESEARCH_NOTES_DIR, fname)
-        try:
-            mtime = os.path.getmtime(path)
-        except Exception:
-            report["skipped"] += 1
-            continue
-
-        key_mtime = str(mtime)
-        already = state["ingested_files"].get(fname)
-        if already == key_mtime:
-            report["skipped"] += 1
-            continue
-
-        topic_guess = normalize_topic(fname[:-4].replace("_", " "))
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-        except Exception:
-            report["skipped"] += 1
-            continue
-        if not content:
-            report["skipped"] += 1
-            continue
-
-        entry = ensure_entry_schema(knowledge.get(topic_guess, {}))
-        entry["answer"] = content
-        entry["notes"] = "Upgraded knowledge using local research note"
-        entry = promote_confidence(entry, CONF_INGEST_BOOST)
-        knowledge[topic_guess] = entry
-
-        research_queue = mark_queue_done(research_queue, topic_guess, note="Upgraded knowledge using local research note")
-        state["ingested_files"][fname] = key_mtime
-        report["ingested"] += 1
-        report["details"].append(f"Ingested: {fname} -> topic '{topic_guess}'")
-
-    save_auto_ingest_state(state)
-    return knowledge, research_queue, report
-
-def export_knowledge_markdown(knowledge: dict, aliases: dict, out_path: str) -> str:
-    lines = []
-    lines.append("# Machine Spirit Knowledge Export")
-    lines.append("")
-    lines.append(f"- Exported on: `{datetime.datetime.now().isoformat(timespec='seconds')}`")
-    lines.append(f"- Topics: `{len(knowledge)}`")
-    lines.append(f"- Aliases: `{len(aliases)}`")
-    lines.append("")
-    if aliases:
-        lines.append("## Aliases")
-        lines.append("")
-        for a in sorted(aliases.keys()):
-            lines.append(f"- `{a}` -> `{aliases[a]}`")
-        lines.append("")
-    lines.append("## Topics")
-    lines.append("")
-    for k in sorted(knowledge.keys()):
-        entry = ensure_entry_schema(knowledge[k])
-        entry = apply_confidence_decay(entry)
-        conf = entry.get("confidence", "")
-        lines.append(f"### {k}")
-        lines.append("")
-        lines.append(f"- Confidence: `{conf}`")
-        lines.append("")
-        answer = entry.get("answer", "").strip()
-        lines.append(answer if answer else "_No answer stored._")
-        lines.append("")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+def export_knowledge(knowledge: Dict[str, Any], alias_map: Dict[str, str]) -> str:
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = os.path.join(EXPORTS_DIR, f"export_{ts}.json")
+    payload = {
+        "exported_on": now_iso(),
+        "knowledge": knowledge,
+        "alias_map": alias_map
+    }
+    save_json(out_path, payload)
     return out_path
 
-def parse_topic_blocks(text: str):
-    lines = text.splitlines()
-    current_topic = None
-    buf = []
 
-    def flush():
-        nonlocal current_topic, buf
-        if current_topic:
-            ans = "\n".join([x.rstrip() for x in buf]).strip()
-            if ans:
-                yield (current_topic.strip(), ans)
-        current_topic = None
-        buf = []
+def parse_teach_payload(text: str) -> Optional[Tuple[str, str]]:
+    if "|" not in text:
+        return None
+    left, right = text.split("|", 1)
+    topic = normalize_topic(left)
+    answer = right.strip()
+    if not topic or not answer:
+        return None
+    return topic, answer
 
-    for line in lines:
-        stripped = line.strip()
-        if stripped.endswith(":") and len(stripped) > 1:
-            if current_topic is not None:
-                for item in flush():
-                    yield item
-            current_topic = stripped[:-1]
-            buf = []
-        else:
-            if current_topic is not None:
-                buf.append(line)
 
-    if current_topic is not None:
-        ans = "\n".join([x.rstrip() for x in buf]).strip()
-        if ans:
-            yield (current_topic.strip(), ans)
-
-def import_file_into_knowledge(filepath: str, knowledge: dict, overwrite: bool = False, note: str = "Imported from file") -> Tuple[int, int]:
+def teach_from_file(knowledge: Dict[str, Any], filepath: str) -> Tuple[int, int]:
+    ok = 0
+    bad = 0
+    if not os.path.exists(filepath):
+        return (0, 1)
     with open(filepath, "r", encoding="utf-8") as f:
-        text = f.read()
+        for raw in f.readlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            parsed = parse_teach_payload(line)
+            if not parsed:
+                bad += 1
+                continue
+            topic, answer = parsed
+            knowledge_set_entry(
+                knowledge,
+                topic,
+                answer,
+                confidence=max(get_confidence(knowledge, topic), 0.55),
+                notes="Taught via teachfile"
+            )
+            ok += 1
+    return ok, bad
 
-    imported = 0
-    skipped = 0
-    today = datetime.date.today().isoformat()
 
-    for topic, answer in parse_topic_blocks(text):
-        key = normalize_topic(topic)
-        if not key:
+def import_json_file(knowledge: Dict[str, Any], alias_map: Dict[str, str], filepath: str) -> Tuple[bool, str]:
+    if not os.path.exists(filepath):
+        return False, "File not found."
+
+    payload = load_json(filepath, None)
+    if payload is None:
+        return False, "Could not read JSON."
+
+    if isinstance(payload, dict) and "knowledge" in payload:
+        k = payload.get("knowledge", {})
+        a = payload.get("alias_map", {})
+        if isinstance(k, dict):
+            for t, entry in k.items():
+                t_n = normalize_topic(t)
+                if isinstance(entry, dict) and "answer" in entry:
+                    knowledge[t_n] = entry
+        if isinstance(a, dict):
+            for k_alias, v_topic in a.items():
+                alias_map[normalize_topic(k_alias)] = normalize_topic(v_topic)
+        return True, "Imported export payload."
+    elif isinstance(payload, dict):
+        for t, entry in payload.items():
+            t_n = normalize_topic(t)
+            if isinstance(entry, dict) and "answer" in entry:
+                knowledge[t_n] = entry
+            elif isinstance(entry, str):
+                knowledge_set_entry(
+                    knowledge,
+                    t_n,
+                    entry,
+                    confidence=max(get_confidence(knowledge, t_n), 0.50),
+                    notes="Imported from json string"
+                )
+        return True, "Imported topic dictionary."
+    else:
+        return False, "Unsupported JSON structure."
+
+
+def import_folder(knowledge: Dict[str, Any], alias_map: Dict[str, str], folder: str) -> Tuple[int, int]:
+    if not os.path.isdir(folder):
+        return (0, 1)
+
+    ok = 0
+    bad = 0
+    for name in sorted(os.listdir(folder)):
+        path = os.path.join(folder, name)
+        if os.path.isdir(path):
             continue
-        if key in knowledge and not overwrite:
-            skipped += 1
-            continue
-        knowledge[key] = {
-            "answer": answer,
-            "confidence": 0.95,
-            "last_updated": today,
-            "notes": note
-        }
-        imported += 1
+        if name.lower().endswith(".json"):
+            success, _ = import_json_file(knowledge, alias_map, path)
+            ok += 1 if success else 0
+            bad += 0 if success else 1
+        elif name.lower().endswith(".txt"):
+            k_ok, k_bad = teach_from_file(knowledge, path)
+            ok += k_ok
+            bad += k_bad
+    return ok, bad
 
-    return imported, skipped
 
-def load_auto_import_state() -> dict:
-    state = load_json_dict(AUTO_IMPORT_STATE_PATH)
-    if "files" not in state or not isinstance(state["files"], dict):
-        state["files"] = {}
-    return state
-
-def save_auto_import_state(state: dict) -> None:
-    save_json_dict(AUTO_IMPORT_STATE_PATH, state)
-
-def auto_import_folder(knowledge: dict, overwrite: bool = False):
-    state = load_auto_import_state()
-    report = []
-    did_change = False
+def ingest_text_to_research_note(topic: str, text: str) -> Tuple[bool, str]:
+    topic_n = normalize_topic(topic)
+    note_file = os.path.join(RESEARCH_NOTES_DIR, topic_n.replace(" ", "_") + ".txt")
     try:
-        files = sorted([f for f in os.listdir(IMPORTS_DIR) if f.endswith(".txt") or f.endswith(".md")])
-    except Exception:
-        return False, ["ERROR: Could not list data/imports/"]
-    if not files:
-        return False, ["No import files found in data/imports/"]
+        with open(note_file, "a", encoding="utf-8") as f:
+            if os.path.getsize(note_file) > 0:
+                f.write("\n\n")
+            f.write(text.strip())
+        return True, f"Ingested into: {note_file}"
+    except Exception as e:
+        return False, f"Ingest failed: {e}"
 
-    for fname in files:
-        path = os.path.join(IMPORTS_DIR, fname)
+
+def auto_ingest_scan(
+    knowledge: Dict[str, Any],
+    alias_map: Dict[str, str],
+    ingest_state: Dict[str, Any]
+) -> List[str]:
+    processed = ingest_state.get("processed_files", {})
+    logs = []
+
+    if not os.path.isdir(AUTO_INGEST_DIR):
+        return logs
+
+    for name in sorted(os.listdir(AUTO_INGEST_DIR)):
+        path = os.path.join(AUTO_INGEST_DIR, name)
+        if os.path.isdir(path):
+            continue
+
         try:
-            mtime = os.path.getmtime(path)
+            stat = os.stat(path)
         except Exception:
             continue
-        last = state["files"].get(fname)
-        if last == str(mtime):
+
+        key = os.path.abspath(path)
+        mtime = int(stat.st_mtime)
+
+        if key in processed and processed[key] == mtime:
             continue
-        try:
-            imported, skipped = import_file_into_knowledge(path, knowledge, overwrite=overwrite, note=f"Auto-imported from data/imports/{fname}")
-            state["files"][fname] = str(mtime)
-            save_auto_import_state(state)
-            if imported > 0:
-                did_change = True
-            report.append(f"Auto-import: {fname} imported={imported} skipped={skipped} overwrite={overwrite}")
-        except Exception:
-            report.append(f"Auto-import: {fname} FAILED (read/parse error)")
-    return did_change, report
 
-def split_command(cmdline: str) -> Tuple[str, str]:
-    parts = cmdline.strip().split(maxsplit=1)
-    if not parts:
-        return "", ""
-    if len(parts) == 1:
-        return parts[0].strip(), ""
-    return parts[0].strip(), parts[1].strip()
+        if name.lower().endswith(".json"):
+            success, msg = import_json_file(knowledge, alias_map, path)
+            logs.append(f"auto_ingest: {name}: {msg}")
+        elif name.lower().endswith(".txt"):
+            ok, bad = teach_from_file(knowledge, path)
+            logs.append(f"auto_ingest: {name}: taught ok={ok} bad={bad}")
+        else:
+            logs.append(f"auto_ingest: {name}: skipped unsupported file type")
 
-def split_pipe_args(rest: str) -> Tuple[str, str]:
-    if "|" not in rest:
-        return rest.strip(), ""
-    left, right = rest.split("|", 1)
-    return left.strip(), right.strip()
+        processed[key] = mtime
 
-def print_help():
-    print("Commands:")
-    print("  /help")
-    print("  /teach <topic> | <answer>")
-    print("  /teachfile <topic> | <path_to_txt>")
-    print("  /import <filename>")
-    print("  /import --overwrite <filename>")
-    print("  /importfolder")
-    print("  /alias <alias> | <topic>")
-    print("  /accept          (accept last alias suggestion)")
-    print("  /suggest         (reprint last suggestion)")
-    print("  /export")
-    print("  /ingest")
-    print("  /queue")
-    print("  /queue done <topic>")
-    print("  /promote <topic> | <amount>")
-    print("  /confidence <topic>")
-    print("  /lowest <n>")
-    print("")
+    ingest_state["processed_files"] = processed
+    ingest_state["last_scan"] = int(time.time())
+    return logs
 
-def main():
-    print("Machine Spirit brain online. Type a message, or /help for commands. Ctrl+C to exit.")
 
-    knowledge = load_knowledge()
-    aliases = load_aliases()
-    research_queue = load_research_queue()
+def resolve_topic(
+    user_input: str,
+    knowledge: Dict[str, Any],
+    alias_map: Dict[str, str]
+) -> Tuple[Optional[str], Optional[str]]:
+    t = normalize_topic(user_input)
 
-    last_auto_ingest = 0
-    AUTO_INGEST_INTERVAL = 120
+    if t in knowledge:
+        return t, "exact"
 
-    last_auto_import = 0
-    AUTO_IMPORT_INTERVAL = 15
+    if t in alias_map:
+        mapped = normalize_topic(alias_map[t])
+        if mapped in knowledge:
+            return mapped, "alias"
 
-    last_suggestion = ""
+    return None, None
+
+
+def is_obvious_prefix_alias(alias_key: str, target_topic: str) -> bool:
+    """
+    True when alias_key is a prefix of target_topic and the remaining part is small.
+    Example: subnet -> subnetting
+    """
+    a = normalize_topic(alias_key)
+    t = normalize_topic(target_topic)
+
+    if a == t:
+        return False
+    if len(a) < AUTO_ALIAS_PREFIX_MIN_LEN:
+        return False
+    if not t.startswith(a):
+        return False
+
+    extra = len(t) - len(a)
+    if extra <= 0:
+        return False
+    if extra > AUTO_ALIAS_PREFIX_MAX_EXTRA_CHARS:
+        return False
+
+    return True
+
+
+def auto_accept_alias_if_obvious(
+    raw_input: str,
+    best_topic: str,
+    best_score: float,
+    second_score: float,
+    knowledge: Dict[str, Any],
+    alias_map: Dict[str, str]
+) -> Tuple[bool, str]:
+    """
+    Auto accept alias when:
+      A) difflib score is very strong AND target confidence is high
+      OR
+      B) alias is an obvious prefix of the target AND target confidence is high AND match is not ambiguous
+    """
+    alias_key = normalize_topic(raw_input)
+    target_conf = get_confidence(knowledge, best_topic)
+
+    if alias_key in knowledge:
+        return False, ""
+
+    # do not overwrite existing alias mapping to a different target
+    if alias_key in alias_map and normalize_topic(alias_map[alias_key]) != best_topic:
+        return False, "Alias exists with different target. Not auto accepting."
+
+    # Rule A: strong fuzzy score
+    if best_score >= AUTO_ALIAS_SCORE_THRESHOLD and target_conf >= AUTO_ALIAS_CONFIDENCE_THRESHOLD:
+        alias_map[alias_key] = best_topic
+        return True, f"Auto accepted alias: {alias_key} -> {best_topic} (score {best_score:.2f}, confidence {target_conf:.2f})"
+
+    # Rule B: obvious prefix + high confidence + clear winner
+    if target_conf >= AUTO_ALIAS_CONFIDENCE_THRESHOLD and is_obvious_prefix_alias(alias_key, best_topic):
+        margin = best_score - second_score
+        if margin >= AUTO_ALIAS_MARGIN_THRESHOLD:
+            alias_map[alias_key] = best_topic
+            return True, f"Auto accepted alias: {alias_key} -> {best_topic} (prefix rule, score {best_score:.2f}, margin {margin:.2f}, confidence {target_conf:.2f})"
+
+    return False, ""
+
+
+def show_help() -> None:
+    safe_print("Commands:")
+    safe_print("  /help")
+    safe_print("  /teach <topic> | <answer>")
+    safe_print("  /teachfile <path_to_txt>")
+    safe_print("  /import <path_to_json>")
+    safe_print("  /importfolder <path_to_folder>")
+    safe_print("  /ingest <topic> | <text_to_append_to_research_note>")
+    safe_print("  /export")
+    safe_print("  /queue")
+    safe_print("  /promote <topic>")
+    safe_print("  /confidence <topic> | <0.0-1.0>")
+    safe_print("  /lowest [n]")
+    safe_print("  /alias <alias> | <topic>")
+    safe_print("  /suggest <text>")
+    safe_print("  /accept")
+    safe_print("")
+    safe_print("Type a message to ask a topic. Ctrl+C to exit.")
+
+
+def format_answer(entry: Dict[str, Any]) -> str:
+    ans = entry.get("answer", "").strip()
+    conf = entry.get("confidence", 0.0)
+    return f"{ans}\n\n(confidence: {float(conf):.2f})"
+
+
+def main() -> None:
+    ensure_dirs()
+    knowledge, alias_map, research_queue, ingest_state = load_or_init_files()
+
+    last_backup_time = time.time()
+    last_ingest_scan_time = 0.0
+
+    last_suggested_alias: Optional[Dict[str, Any]] = None
+    last_suggested_list: List[Tuple[str, float]] = []
+
+    safe_print("Machine Spirit brain online. Type a message, or /help for commands. Ctrl+C to exit.")
 
     while True:
+        if time.time() - last_backup_time >= BACKUP_INTERVAL_SECONDS:
+            backup_runtime_files()
+            last_backup_time = time.time()
+
+        if time.time() - last_ingest_scan_time >= AUTO_INGEST_SCAN_INTERVAL_SECONDS:
+            logs = auto_ingest_scan(knowledge, alias_map, ingest_state)
+            if logs:
+                for line in logs:
+                    safe_print(line)
+                save_json(KNOWLEDGE_PATH, knowledge)
+                save_json(ALIAS_PATH, alias_map)
+                save_json(AUTO_INGEST_STATE_PATH, ingest_state)
+            last_ingest_scan_time = time.time()
+
         try:
-            backup_files_if_needed()
+            user = input("> ").strip()
+        except KeyboardInterrupt:
+            safe_print("\nShutting down.")
+            save_json(KNOWLEDGE_PATH, knowledge)
+            save_json(ALIAS_PATH, alias_map)
+            save_json(RESEARCH_QUEUE_PATH, research_queue)
+            save_json(AUTO_INGEST_STATE_PATH, ingest_state)
+            return
 
-            now = time.time()
+        if not user:
+            continue
 
-            if now - last_auto_ingest > AUTO_INGEST_INTERVAL:
-                last_auto_ingest = now
-                knowledge, research_queue, report = ingest_notes_into_knowledge(knowledge, research_queue)
-                if report.get("ingested", 0) > 0:
-                    save_knowledge(knowledge)
-                    save_research_queue(research_queue)
+        if user.startswith("/"):
+            cmd = user.strip()
 
-            if now - last_auto_import > AUTO_IMPORT_INTERVAL:
-                last_auto_import = now
-                changed, _ = auto_import_folder(knowledge, overwrite=False)
-                if changed:
-                    save_knowledge(knowledge)
-
-            user_input = input("> ").strip()
-            if not user_input:
+            if cmd == "/help":
+                show_help()
                 continue
 
-            aliases = load_aliases()
+            if cmd == "/accept":
+                if not last_suggested_alias:
+                    safe_print("Nothing to accept yet.")
+                    continue
+                alias_key = normalize_topic(last_suggested_alias["alias"])
+                target = normalize_topic(last_suggested_alias["target"])
+                alias_map[alias_key] = target
+                save_json(ALIAS_PATH, alias_map)
+                safe_print(f"Accepted alias: {alias_key} -> {target}")
+                last_suggested_alias = None
+                continue
 
-            if user_input.startswith("/"):
-                cmd, rest = split_command(user_input)
-
-                if cmd in ("/help", "/h", "/?"):
-                    print_help()
+            if cmd.startswith("/suggest"):
+                parts = cmd.split(" ", 1)
+                if len(parts) < 2 or not parts[1].strip():
+                    safe_print("Usage: /suggest <text>")
+                    continue
+                q = parts[1].strip()
+                choices = list_topics(knowledge)
+                if not choices:
+                    safe_print("No topics exist yet.")
                     continue
 
-                if cmd == "/suggest":
-                    if last_suggestion:
-                        print(last_suggestion)
-                    else:
-                        print("No suggestion yet.")
-                    continue
+                scored = []
+                qn = normalize_topic(q)
+                for c in choices:
+                    scored.append((c, difflib.SequenceMatcher(None, qn, c).ratio()))
+                scored.sort(key=lambda x: x[1], reverse=True)
+                last_suggested_list = scored[:5]
 
-                if cmd == "/accept":
-                    if not last_suggestion.startswith("Suggestion: /alias "):
-                        print("No alias suggestion to accept yet.")
-                        continue
-                    try:
-                        payload = last_suggestion.replace("Suggestion: /alias ", "").strip()
-                        left, right = split_pipe_args(payload)
-                        alias_key = normalize_topic(left)
-                        canonical = resolve_topic(right, aliases)
-                        if not alias_key or not canonical:
-                            print("Accept failed: bad suggestion format.")
-                            continue
-                        if alias_key == canonical:
-                            print("Accept failed: alias resolves to itself.")
-                            continue
-                        aliases[alias_key] = canonical
-                        save_aliases(aliases)
-                        print(f"Alias saved: '{alias_key}' -> '{canonical}'")
-                    except Exception:
-                        print("Accept failed: could not parse suggestion.")
-                    continue
+                safe_print("Suggestions:")
+                for t, s in last_suggested_list:
+                    safe_print(f"  {t}  (score {s:.2f}, confidence {get_confidence(knowledge, t):.2f})")
+                continue
 
-                if cmd == "/importfolder":
-                    changed, rep = auto_import_folder(knowledge, overwrite=False)
-                    for line in rep[:25]:
-                        print("-", line)
-                    if changed:
-                        save_knowledge(knowledge)
-                        print("Import folder scan: changes saved.")
-                    else:
-                        print("Import folder scan: no new changes.")
-                    continue
-
-                if cmd == "/ingest":
-                    research_queue = load_research_queue()
-                    knowledge, research_queue, report = ingest_notes_into_knowledge(knowledge, research_queue)
-                    if report.get("ingested", 0) > 0:
-                        save_knowledge(knowledge)
-                        save_research_queue(research_queue)
-                    print(f"Ingest report: ingested={report.get('ingested')} skipped={report.get('skipped')}")
-                    for d in report.get("details", [])[:25]:
-                        print("-", d)
-                    continue
-
-                if cmd == "/queue":
-                    research_queue = load_research_queue()
-                    if rest.lower().startswith("done "):
-                        topic = rest[5:].strip()
-                        if not topic:
-                            print("Usage: /queue done <topic>")
-                            continue
-                        research_queue = mark_queue_done(research_queue, topic, note="Marked done by user")
-                        save_research_queue(research_queue)
-                        print(f"Marked done: {normalize_topic(topic)}")
-                        continue
-
-                    pend = pending_queue(research_queue)
-                    if not pend:
-                        print("No pending research tasks. Queue is clear.")
-                        continue
-                    print(f"Pending research tasks: {len(pend)}")
-                    for item in pend[:25]:
-                        t = item.get("topic", "")
-                        r = item.get("reason", "")
-                        c = item.get("current_confidence", "")
-                        print(f"- {t}  (conf={c})  reason={r}")
-                    continue
-
-                if cmd == "/export":
-                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    out_path = os.path.join(EXPORTS_DIR, f"knowledge_export_{timestamp}.md")
-                    saved = export_knowledge_markdown(knowledge, aliases, out_path)
-                    print(f"Exported: {saved}")
-                    continue
-
-                if cmd == "/import":
-                    args = rest.split()
-                    overwrite = False
-                    if not args:
-                        print("Usage: /import <filename> OR /import --overwrite <filename>")
-                        continue
-                    if args[0] == "--overwrite":
-                        overwrite = True
-                        args = args[1:]
-                    if not args:
-                        print("Usage: /import <filename> OR /import --overwrite <filename>")
-                        continue
-                    filename = " ".join(args).strip()
-                    path = os.path.join(BASE_DIR, filename)
-                    if not os.path.exists(path):
-                        print(f"Import failed: file not found: {filename}")
-                        continue
-                    try:
-                        imported, skipped = import_file_into_knowledge(path, knowledge, overwrite=overwrite, note="Imported from file")
-                        save_knowledge(knowledge)
-                        print(f"Import complete. Imported: {imported}, Skipped: {skipped}, Overwrite: {overwrite}")
-                    except Exception:
-                        print("Import failed: could not read/parse file.")
-                    continue
-
+            if cmd.startswith("/teach"):
                 if cmd == "/teach":
-                    left, right = split_pipe_args(rest)
-                    if not left or not right:
-                        print("Usage: /teach <topic> | <answer>")
-                        continue
-                    topic = normalize_topic(left)
-                    answer = right.strip()
-                    if not topic:
-                        print("Usage: /teach <topic> | <answer>")
-                        continue
-                    knowledge[topic] = ensure_entry_schema(knowledge.get(topic, {}))
-                    knowledge[topic]["answer"] = answer
-                    knowledge[topic]["confidence"] = 0.75
-                    knowledge[topic]["last_updated"] = datetime.date.today().isoformat()
-                    knowledge[topic]["notes"] = "Updated by user re teach"
-                    save_knowledge(knowledge)
-                    research_queue = load_research_queue()
-                    research_queue = mark_queue_done(research_queue, topic, note="Taught by user")
-                    save_research_queue(research_queue)
-                    print(f"Taught: {topic}")
+                    safe_print("Usage: /teach <topic> | <answer>")
                     continue
+                payload = cmd[len("/teach"):].strip()
+                parsed = parse_teach_payload(payload)
+                if not parsed:
+                    safe_print("Usage: /teach <topic> | <answer>")
+                    continue
+                topic, answer = parsed
+                new_conf = max(get_confidence(knowledge, topic), 0.55)
+                knowledge_set_entry(knowledge, topic, answer, new_conf, notes="Updated by user via teach")
+                save_json(KNOWLEDGE_PATH, knowledge)
+                safe_print(f"Taught: {topic} (confidence {new_conf:.2f})")
+                continue
 
-                if cmd == "/teachfile":
-                    left, right = split_pipe_args(rest)
-                    if not left or not right:
-                        print("Usage: /teachfile <topic> | <path_to_txt>")
-                        continue
-                    topic = normalize_topic(left)
-                    fpath = right.strip()
-                    if not os.path.isabs(fpath):
-                        fpath = os.path.join(BASE_DIR, fpath)
-                    if not os.path.exists(fpath):
-                        print(f"File not found: {fpath}")
-                        continue
+            if cmd.startswith("/teachfile"):
+                parts = cmd.split(" ", 1)
+                if len(parts) < 2:
+                    safe_print("Usage: /teachfile <path_to_txt>")
+                    continue
+                path = parts[1].strip()
+                ok, bad = teach_from_file(knowledge, path)
+                save_json(KNOWLEDGE_PATH, knowledge)
+                safe_print(f"Teachfile complete. ok={ok} bad={bad}")
+                continue
+
+            if cmd.startswith("/importfolder"):
+                parts = cmd.split(" ", 1)
+                if len(parts) < 2:
+                    safe_print("Usage: /importfolder <path_to_folder>")
+                    continue
+                folder = parts[1].strip()
+                ok, bad = import_folder(knowledge, alias_map, folder)
+                save_json(KNOWLEDGE_PATH, knowledge)
+                save_json(ALIAS_PATH, alias_map)
+                safe_print(f"Importfolder complete. ok={ok} bad={bad}")
+                continue
+
+            if cmd.startswith("/import"):
+                parts = cmd.split(" ", 1)
+                if len(parts) < 2:
+                    safe_print("Usage: /import <path_to_json>")
+                    continue
+                path = parts[1].strip()
+                success, msg = import_json_file(knowledge, alias_map, path)
+                if success:
+                    save_json(KNOWLEDGE_PATH, knowledge)
+                    save_json(ALIAS_PATH, alias_map)
+                safe_print(msg)
+                continue
+
+            if cmd.startswith("/ingest"):
+                payload = cmd[len("/ingest"):].strip()
+                parsed = parse_teach_payload(payload)
+                if not parsed:
+                    safe_print("Usage: /ingest <topic> | <text_to_append_to_research_note>")
+                    continue
+                topic, text = parsed
+                ok, msg = ingest_text_to_research_note(topic, text)
+                if ok:
+                    add_to_research_queue(
+                        research_queue,
+                        topic,
+                        reason="Manual ingest added new research note content",
+                        current_confidence=get_confidence(knowledge, topic)
+                    )
+                    save_json(RESEARCH_QUEUE_PATH, research_queue)
+                safe_print(msg)
+                continue
+
+            if cmd == "/export":
+                out = export_knowledge(knowledge, alias_map)
+                safe_print(f"Exported to: {out}")
+                continue
+
+            if cmd == "/queue":
+                pending = [q for q in research_queue if q.get("status") == "pending"]
+                done = [q for q in research_queue if q.get("status") == "done"]
+                safe_print(f"Queue: pending={len(pending)} done={len(done)} total={len(research_queue)}")
+                if pending:
+                    safe_print("Pending:")
+                    for item in pending[:20]:
+                        safe_print(f"  - {item.get('topic')} (conf {item.get('current_confidence', 0):.2f}) reason: {item.get('reason')}")
+                continue
+
+            if cmd.startswith("/promote"):
+                parts = cmd.split(" ", 1)
+                if len(parts) < 2:
+                    safe_print("Usage: /promote <topic>")
+                    continue
+                topic = parts[1].strip()
+                ok, msg = promote_research_note(knowledge, research_queue, topic)
+                if ok:
+                    save_json(KNOWLEDGE_PATH, knowledge)
+                    save_json(RESEARCH_QUEUE_PATH, research_queue)
+                safe_print(msg)
+                continue
+
+            if cmd.startswith("/confidence"):
+                payload = cmd[len("/confidence"):].strip()
+                parsed = parse_teach_payload(payload)
+                if not parsed:
+                    safe_print("Usage: /confidence <topic> | <0.0-1.0>")
+                    continue
+                topic, conf_str = parsed
+                try:
+                    conf_val = float(conf_str)
+                except Exception:
+                    safe_print("Confidence must be a number 0.0 to 1.0")
+                    continue
+                conf_val = max(0.0, min(1.0, conf_val))
+                if not set_confidence(knowledge, topic, conf_val):
+                    safe_print("No entry yet for that topic. Teach it first.")
+                    continue
+                save_json(KNOWLEDGE_PATH, knowledge)
+                safe_print(f"Updated confidence: {normalize_topic(topic)} -> {conf_val:.2f}")
+                continue
+
+            if cmd.startswith("/lowest"):
+                parts = cmd.split(" ", 1)
+                n = 10
+                if len(parts) == 2 and parts[1].strip():
                     try:
-                        with open(fpath, "r", encoding="utf-8") as f:
-                            content = f.read().strip()
-                    except Exception:
-                        print("Could not read that file.")
-                        continue
-                    if not content:
-                        print("That file is empty.")
-                        continue
-                    knowledge[topic] = ensure_entry_schema(knowledge.get(topic, {}))
-                    knowledge[topic]["answer"] = content
-                    knowledge[topic]["confidence"] = 0.80
-                    knowledge[topic]["last_updated"] = datetime.date.today().isoformat()
-                    knowledge[topic]["notes"] = "Updated by user re teachfile"
-                    save_knowledge(knowledge)
-                    research_queue = load_research_queue()
-                    research_queue = mark_queue_done(research_queue, topic, note="Taught by user via teachfile")
-                    save_research_queue(research_queue)
-                    print(f"Taught from file: {topic}")
-                    continue
-
-                if cmd == "/alias":
-                    left, right = split_pipe_args(rest)
-                    if not left or not right:
-                        print("Usage: /alias <alias> | <topic>")
-                        continue
-                    alias_key = normalize_topic(left)
-                    canonical = resolve_topic(right, aliases)
-                    if not alias_key or not canonical:
-                        print("Usage: /alias <alias> | <topic>")
-                        continue
-                    if alias_key == canonical:
-                        print("Alias and topic resolve to the same value.")
-                        continue
-                    aliases[alias_key] = canonical
-                    save_aliases(aliases)
-                    print(f"Alias saved: '{alias_key}' -> '{canonical}'")
-                    continue
-
-                if cmd == "/promote":
-                    left, right = split_pipe_args(rest)
-                    topic_text = left.strip()
-                    amount_text = right.strip()
-                    if not topic_text or not amount_text:
-                        print("Usage: /promote <topic> | <amount>")
-                        continue
-                    try:
-                        amount = float(amount_text)
-                    except Exception:
-                        print("Amount must be a number (example: 0.10).")
-                        continue
-                    topic = resolve_topic(topic_text, aliases)
-                    if topic not in knowledge:
-                        print("No entry yet for that topic. Teach it first.")
-                        continue
-                    knowledge[topic] = apply_confidence_decay(knowledge[topic])
-                    knowledge[topic] = promote_confidence(knowledge[topic], amount)
-                    save_knowledge(knowledge)
-                    print(f"Promoted: {topic}  new_conf={knowledge[topic].get('confidence')}")
-                    continue
-
-                if cmd == "/confidence":
-                    topic = resolve_topic(rest, aliases)
-                    if not topic:
-                        print("Usage: /confidence <topic>")
-                        continue
-                    if topic not in knowledge:
-                        print("No entry yet for that topic.")
-                        continue
-                    entry = apply_confidence_decay(knowledge[topic])
-                    knowledge[topic] = entry
-                    save_knowledge(knowledge)
-                    print(f"{topic} confidence: {entry.get('confidence')}")
-                    continue
-
-                if cmd == "/lowest":
-                    try:
-                        n = int(rest.strip() or "10")
+                        n = int(parts[1].strip())
                     except Exception:
                         n = 10
-                    items = []
-                    for k, v in knowledge.items():
-                        if not isinstance(v, dict):
-                            continue
-                        vv = apply_confidence_decay(v)
-                        knowledge[k] = vv
-                        items.append((k, float(vv.get("confidence", 0.0))))
-                    save_knowledge(knowledge)
-                    items.sort(key=lambda x: x[1])
-                    print(f"Lowest confidence topics (top {n}):")
-                    for k, c in items[:max(1, n)]:
-                        print(f"- {k}: {c}")
+                items = []
+                for t in knowledge.keys():
+                    items.append((t, get_confidence(knowledge, t)))
+                items.sort(key=lambda x: x[1])
+                safe_print(f"Lowest confidence topics (top {n}):")
+                for t, c in items[:n]:
+                    safe_print(f"  {t}  (confidence {c:.2f})")
+                continue
+
+            if cmd.startswith("/alias"):
+                payload = cmd[len("/alias"):].strip()
+                parsed = parse_teach_payload(payload)
+                if not parsed:
+                    safe_print("Usage: /alias <alias> | <topic>")
+                    continue
+                alias_key, target = parsed
+                if normalize_topic(target) not in knowledge:
+                    safe_print("Target topic does not exist in knowledge. Teach it first.")
+                    continue
+                alias_map[normalize_topic(alias_key)] = normalize_topic(target)
+                save_json(ALIAS_PATH, alias_map)
+                safe_print(f"Saved alias: {normalize_topic(alias_key)} -> {normalize_topic(target)}")
+                continue
+
+            safe_print("Unknown command. Type /help")
+            continue
+
+        # Normal question flow
+        resolved, reason = resolve_topic(user, knowledge, alias_map)
+        if resolved and resolved in knowledge:
+            safe_print(format_answer(knowledge[resolved]))
+            continue
+
+        topics = list_topics(knowledge)
+        if topics:
+            top2 = top_two_matches(user, topics)
+            best = top2[0][0] if len(top2) >= 1 else None
+            best_score = top2[0][1] if len(top2) >= 1 else 0.0
+            second_score = top2[1][1] if len(top2) >= 2 else 0.0
+
+            if best:
+                did_accept, accept_msg = auto_accept_alias_if_obvious(
+                    user,
+                    best,
+                    best_score,
+                    second_score,
+                    knowledge,
+                    alias_map
+                )
+                if did_accept:
+                    save_json(ALIAS_PATH, alias_map)
+                    safe_print(accept_msg)
+                    safe_print(format_answer(knowledge[best]))
                     continue
 
-                print("Unknown command. Type /help")
+                last_suggested_alias = {
+                    "alias": user,
+                    "target": best,
+                    "score": float(best_score)
+                }
+                safe_print(f"Suggestion: /alias {user} | {best}")
+                safe_print("Tip: use /accept to save that alias, or /suggest <text> to see more.")
+                add_to_research_queue(research_queue, user, reason="No taught answer yet", current_confidence=0.30)
+                save_json(RESEARCH_QUEUE_PATH, research_queue)
                 continue
 
-            resolved = resolve_topic(user_input, aliases)
+        safe_print("Machine Spirit: I do not have a taught answer for that yet.")
+        add_to_research_queue(research_queue, user, reason="No taught answer yet", current_confidence=0.30)
+        save_json(RESEARCH_QUEUE_PATH, research_queue)
 
-            if resolved in knowledge:
-                knowledge[resolved] = apply_confidence_decay(knowledge[resolved])
-                knowledge[resolved] = reinforce_confidence(knowledge[resolved])
-                save_knowledge(knowledge)
-                entry = knowledge[resolved]
-                answer = str(entry.get("answer", "")).strip()
-                conf = float(entry.get("confidence", CONF_DEFAULT_IF_MISSING))
-                if not answer:
-                    print("Machine Spirit: I have an entry for that, but it has no answer stored yet.")
-                else:
-                    if conf < CONF_LOW_THRESHOLD:
-                        print("Machine Spirit:", answer)
-                        print(f"(Note: confidence is low: {conf}. If this is weak, teach me with /teach.)")
-                    else:
-                        print("Machine Spirit:", answer)
-                base = resolved
-                if normalize_topic(user_input) != base:
-                    suggestion = alias_suggestion_for(user_input, base, aliases)
-                    if suggestion:
-                        last_suggestion = suggestion
-                        print(suggestion)
-                continue
-
-            # Unknown topic: fuzzy match
-            m = fuzzy_alias_match(user_input, knowledge, aliases)
-            if m:
-                suggestion = f"Suggestion: /alias {m['alias']} | {m['topic']}"
-                last_suggestion = suggestion
-
-                # Auto-accept when match is strong and canonical topic is confident
-                if AUTO_ACCEPT_ALIASES:
-                    entry = knowledge.get(m["topic"], {})
-                    entry = ensure_entry_schema(entry)
-                    conf = float(entry.get("confidence", CONF_DEFAULT_IF_MISSING))
-
-                    if m["score"] >= AUTO_ACCEPT_SCORE_THRESHOLD and conf >= AUTO_ACCEPT_CONF_THRESHOLD:
-                        aliases[m["alias"]] = m["topic"]
-                        save_aliases(aliases)
-                        print(f"Auto-saved alias: '{m['alias']}' -> '{m['topic']}' (score={round(m['score'],3)} conf={conf})")
-                    else:
-                        print(suggestion)
-                else:
-                    print(suggestion)
-
-            reason = "No taught answer yet"
-            current_confidence = 0.30
-            research_queue = load_research_queue()
-            research_queue = enqueue_research(research_queue, resolved, reason, current_confidence)
-            save_research_queue(research_queue)
-
-            print(
-                "Machine Spirit: I do not have a taught answer for that yet. "
-                "If my reply is wrong or weak, correct me in your own words and I will remember it. "
-                "My analysis may be incomplete. If this seems wrong, correct me and I will update my understanding. "
-                "I have also marked this topic for deeper research so I can improve my answer over time."
-            )
-
-        except KeyboardInterrupt:
-            print("\nShutting down.")
-            break
 
 if __name__ == "__main__":
     main()
