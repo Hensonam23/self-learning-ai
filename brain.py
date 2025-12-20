@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# Machine Spirit Brain (local-first, self-learning helper)
-# RULE: This file is meant to be replaced as a whole (rm -> nano -> paste).
-# No partial patching.
 
 import os
 import re
@@ -9,7 +6,7 @@ import json
 import time
 import shutil
 import datetime
-from typing import Dict, Any, List, Tuple
+from typing import Tuple
 
 # ----------------------------
 # Paths / folders
@@ -26,11 +23,9 @@ RESEARCH_NOTES_DIR = os.path.join(DATA_DIR, "research_notes")
 EXPORTS_DIR = os.path.join(DATA_DIR, "exports")
 BACKUP_DIR = os.path.join(DATA_DIR, "backups")
 
-# Auto import folder + state
 IMPORTS_DIR = os.path.join(DATA_DIR, "imports")
 AUTO_IMPORT_STATE_PATH = os.path.join(DATA_DIR, "auto_import_state.json")
 
-# Optional state file (for research note ingest)
 AUTO_INGEST_STATE_PATH = os.path.join(DATA_DIR, "auto_ingest_state.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -55,9 +50,6 @@ FILES_TO_BACKUP = [
 ]
 
 def backup_files_if_needed():
-    """
-    Every BACKUP_INTERVAL seconds, copy key JSON files to data/backups with timestamp.
-    """
     global LAST_BACKUP_TIME
     now = time.time()
     if now - LAST_BACKUP_TIME < BACKUP_INTERVAL:
@@ -68,11 +60,9 @@ def backup_files_if_needed():
     for fp in FILES_TO_BACKUP:
         if not os.path.exists(fp):
             continue
-
         base = os.path.basename(fp)
         backup_name = f"{base}_{timestamp}"
         backup_path = os.path.join(BACKUP_DIR, backup_name)
-
         try:
             shutil.copy2(fp, backup_path)
         except Exception:
@@ -93,6 +83,10 @@ CONF_LOW_THRESHOLD = 0.50
 CONF_GOOD_THRESHOLD = 0.75
 
 QUEUE_DONE_STATUSES = {"done", "resolved", "complete"}
+
+# Fuzzy alias thresholds
+FUZZY_ALIAS_SCORE_THRESHOLD = 0.62  # token Jaccard similarity
+FUZZY_ALIAS_MIN_TOPIC_LEN = 3
 
 # ----------------------------
 # JSON helpers
@@ -155,6 +149,81 @@ def alias_suggestion_for(user_text: str, base: str, aliases: dict) -> str:
     if raw in aliases:
         return ""
     return f"Suggestion: /alias {raw} | {base}"
+
+# ----------------------------
+# Fuzzy alias suggestions (UPGRADED)
+# ----------------------------
+
+def _stem_word(w: str) -> str:
+    w = (w or "").lower().strip()
+    if len(w) <= 4:
+        return w
+    # super simple stem rules (just enough for subnet/subnetting, plural, etc.)
+    for suf in ("ing", "ed", "es", "s"):
+        if w.endswith(suf) and len(w) - len(suf) >= 3:
+            return w[:-len(suf)]
+    return w
+
+def _tokens(s: str):
+    # tokenize then stem
+    toks = re.findall(r"[a-z0-9]+", (s or "").lower())
+    return set(_stem_word(t) for t in toks if t)
+
+def _jaccard(a: str, b: str) -> float:
+    ta = _tokens(a)
+    tb = _tokens(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / max(1, len(ta | tb))
+
+def fuzzy_alias_suggestion(user_text: str, knowledge: dict, aliases: dict) -> str:
+    raw = normalize_topic(user_text)
+    if not raw or len(raw) < FUZZY_ALIAS_MIN_TOPIC_LEN:
+        return ""
+    if raw in aliases:
+        return ""
+    if raw in knowledge:
+        return ""
+
+    # 1) Fast win: prefix/substring match (THIS fixes subnet -> subnetting)
+    raw_comp = re.sub(r"\s+", " ", raw).strip()
+    for t in knowledge.keys():
+        if not isinstance(t, str) or not t:
+            continue
+        t_comp = re.sub(r"\s+", " ", t).strip()
+
+        if t_comp == raw_comp:
+            return ""
+        # prefix match
+        if t_comp.startswith(raw_comp) or raw_comp.startswith(t_comp):
+            return f"Suggestion: /alias {raw} | {t}"
+        # substring match (only if meaningful)
+        if len(raw_comp) >= 4 and raw_comp in t_comp:
+            return f"Suggestion: /alias {raw} | {t}"
+
+    # 2) Token similarity fallback (handles stuff like "tcp ip" vs "tcp/ip model")
+    best_topic = ""
+    best_score = 0.0
+
+    raw_tokens = _tokens(raw)
+    if not raw_tokens:
+        return ""
+
+    for t in knowledge.keys():
+        if not isinstance(t, str) or not t:
+            continue
+        # speed filter: only compare if they share at least one token
+        if _tokens(t).isdisjoint(raw_tokens):
+            continue
+        score = _jaccard(raw, t)
+        if score > best_score:
+            best_score = score
+            best_topic = t
+
+    if best_topic and best_score >= FUZZY_ALIAS_SCORE_THRESHOLD and best_topic != raw:
+        return f"Suggestion: /alias {raw} | {best_topic}"
+
+    return ""
 
 # ----------------------------
 # Knowledge + confidence helpers
@@ -400,12 +469,6 @@ def export_knowledge_markdown(knowledge: dict, aliases: dict, out_path: str) -> 
 # ----------------------------
 
 def parse_topic_blocks(text: str):
-    """
-    Topic:
-    answer...
-    Next Topic:
-    answer...
-    """
     lines = text.splitlines()
     current_topic = None
     buf = []
@@ -437,10 +500,6 @@ def parse_topic_blocks(text: str):
             yield (current_topic.strip(), ans)
 
 def import_file_into_knowledge(filepath: str, knowledge: dict, overwrite: bool = False, note: str = "Imported from file") -> Tuple[int, int]:
-    """
-    filepath: absolute path
-    returns (imported, skipped)
-    """
     with open(filepath, "r", encoding="utf-8") as f:
         text = f.read()
 
@@ -477,10 +536,6 @@ def save_auto_import_state(state: dict) -> None:
     save_json_dict(AUTO_IMPORT_STATE_PATH, state)
 
 def auto_import_folder(knowledge: dict, overwrite: bool = False):
-    """
-    Scans data/imports for .txt/.md files. Imports when file mtime changes.
-    Returns: (did_change, report_lines[])
-    """
     state = load_auto_import_state()
     report = []
     did_change = False
@@ -559,8 +614,6 @@ def print_help():
     print("  /confidence <topic>")
     print("  /lowest <n>")
     print("")
-    print("Auto-import watches: data/imports/*.txt or *.md")
-    print("")
 
 # ----------------------------
 # Main loop
@@ -585,7 +638,6 @@ def main():
 
             now = time.time()
 
-            # Auto ingest research notes
             if now - last_auto_ingest > AUTO_INGEST_INTERVAL:
                 last_auto_ingest = now
                 knowledge, research_queue, report = ingest_notes_into_knowledge(knowledge, research_queue)
@@ -593,10 +645,9 @@ def main():
                     save_knowledge(knowledge)
                     save_research_queue(research_queue)
 
-            # Auto import folder
             if now - last_auto_import > AUTO_IMPORT_INTERVAL:
                 last_auto_import = now
-                changed, rep = auto_import_folder(knowledge, overwrite=False)
+                changed, _ = auto_import_folder(knowledge, overwrite=False)
                 if changed:
                     save_knowledge(knowledge)
 
@@ -850,7 +901,6 @@ def main():
                 print("Unknown command. Type /help")
                 continue
 
-            # Normal question mode
             resolved = resolve_topic(user_input, aliases)
 
             if resolved in knowledge:
@@ -879,7 +929,11 @@ def main():
 
                 continue
 
-            # Unknown topic: queue it for research
+            # Unknown topic: fuzzy suggestion first
+            fuzzy = fuzzy_alias_suggestion(user_input, knowledge, aliases)
+            if fuzzy:
+                print(fuzzy)
+
             reason = "No taught answer yet"
             current_confidence = 0.30
 
