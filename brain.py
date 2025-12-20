@@ -6,10 +6,6 @@ import time
 import shutil
 from datetime import datetime, date
 
-# =========================
-# Paths
-# =========================
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 BACKUP_DIR = os.path.join(DATA_DIR, "backups")
@@ -18,16 +14,11 @@ KNOWLEDGE_PATH = os.path.join(DATA_DIR, "local_knowledge.json")
 ALIASES_PATH = os.path.join(DATA_DIR, "topic_aliases.json")
 RESEARCH_QUEUE_PATH = os.path.join(DATA_DIR, "research_queue.json")
 RESEARCH_NOTES_DIR = os.path.join(DATA_DIR, "research_notes")
-
 AUTO_INGEST_STATE_PATH = os.path.join(DATA_DIR, "auto_ingest_state.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(BACKUP_DIR, exist_ok=True)
 os.makedirs(RESEARCH_NOTES_DIR, exist_ok=True)
-
-# =========================
-# Tuning (Confidence)
-# =========================
 
 CONF_DECAY_PER_DAY = 0.02
 CONF_REINFORCE_ON_USE = 0.01
@@ -41,19 +32,13 @@ CONF_PROMOTE_DEFAULT = 0.10
 IMPROVED_MARKER = "My improved answer (paste below):"
 CONF_INGEST_BOOST = 0.20
 
-# Auto ingest frequency (daily)
 AUTO_INGEST_DAYS = 1
 
-# =========================
-# Backup system (timer-based)
-# =========================
-
 LAST_BACKUP_TIME = 0
-BACKUP_INTERVAL = 300  # seconds (5 minutes)
+BACKUP_INTERVAL = 300  # seconds
 
 def backup_files_if_needed():
     global LAST_BACKUP_TIME
-
     now = time.time()
     if now - LAST_BACKUP_TIME < BACKUP_INTERVAL:
         return
@@ -66,16 +51,14 @@ def backup_files_if_needed():
     ]
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
     backed_any = False
+
     for fp in files_to_backup:
         if not os.path.exists(fp):
             continue
-
         base = os.path.basename(fp).replace(".json", "")
         backup_name = f"{base}_{timestamp}.json"
         backup_path = os.path.join(BACKUP_DIR, backup_name)
-
         try:
             shutil.copy2(fp, backup_path)
             backed_any = True
@@ -84,10 +67,6 @@ def backup_files_if_needed():
 
     if backed_any:
         LAST_BACKUP_TIME = now
-
-# =========================
-# Utility
-# =========================
 
 def now_iso() -> str:
     return datetime.now().isoformat()
@@ -110,14 +89,11 @@ def parse_iso_dt(s: str):
 def read_text_file(filepath: str) -> str:
     if not filepath:
         return ""
-
     fp = filepath.strip()
     if not os.path.isabs(fp):
         fp = os.path.join(BASE_DIR, fp)
-
     if not os.path.exists(fp):
         return ""
-
     try:
         with open(fp, "r", encoding="utf-8") as f:
             return f.read()
@@ -127,18 +103,12 @@ def read_text_file(filepath: str) -> str:
 def extract_improved_answer(text: str) -> str:
     if not text:
         return ""
-
     if IMPROVED_MARKER in text:
         improved = text.split(IMPROVED_MARKER, 1)[1].strip()
         if improved.startswith("-"):
             improved = improved.lstrip("-").strip()
         return improved.strip()
-
     return text.strip()
-
-# =========================
-# JSON Load/Save
-# =========================
 
 def load_json_dict(path: str) -> dict:
     if not os.path.exists(path):
@@ -168,10 +138,6 @@ def save_json_list(path: str, data: list) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-# =========================
-# Knowledge
-# =========================
-
 def load_knowledge() -> dict:
     return load_json_dict(KNOWLEDGE_PATH)
 
@@ -193,19 +159,15 @@ def ensure_knowledge_shape(entry: dict) -> dict:
 
 def apply_confidence_decay(entry: dict) -> dict:
     entry = ensure_knowledge_shape(entry)
-
     lu = parse_iso_dt(entry.get("last_used", "")) or parse_iso_dt(entry.get("last_updated", ""))
     if not lu:
         return entry
-
     days_old = (datetime.now() - lu).total_seconds() / 86400.0
     if days_old <= 0:
         return entry
-
     decayed = entry["confidence"] - (days_old * CONF_DECAY_PER_DAY)
     if decayed < CONF_MIN:
         decayed = CONF_MIN
-
     entry["confidence"] = round(float(decayed), 4)
     return entry
 
@@ -229,10 +191,6 @@ def promote_confidence(entry: dict, amount: float) -> dict:
     entry["last_used"] = now_iso()
     return entry
 
-# =========================
-# Aliases
-# =========================
-
 def load_aliases() -> dict:
     raw = load_json_dict(ALIASES_PATH)
     cleaned = {}
@@ -254,10 +212,6 @@ def resolve_topic(topic: str, aliases: dict) -> str:
         t = normalize_topic(aliases.get(t, t))
     return t
 
-# =========================
-# Research Queue
-# =========================
-
 def load_research_queue() -> list:
     return load_json_list(RESEARCH_QUEUE_PATH)
 
@@ -269,7 +223,6 @@ def enqueue_research(queue: list, topic: str, reason: str, current_confidence: f
     for item in queue:
         if normalize_topic(str(item.get("topic", ""))) == t and item.get("status") in ("pending", "in_progress"):
             return queue
-
     queue.append({
         "topic": t,
         "reason": reason,
@@ -283,13 +236,8 @@ def enqueue_research(queue: list, topic: str, reason: str, current_confidence: f
 def pending_queue(queue: list) -> list:
     return [q for q in queue if q.get("status") in ("pending", "in_progress")]
 
-# =========================
-# Ingest research notes
-# =========================
-
 def ingest_notes_into_knowledge(knowledge: dict, queue: list):
     report = {"ingested": 0, "skipped": 0, "errors": 0, "details": []}
-
     try:
         files = [f for f in os.listdir(RESEARCH_NOTES_DIR) if f.endswith(".txt")]
     except Exception:
@@ -310,7 +258,6 @@ def ingest_notes_into_knowledge(knowledge: dict, queue: list):
 
     for fname in files:
         path = os.path.join(RESEARCH_NOTES_DIR, fname)
-
         try:
             with open(path, "r", encoding="utf-8") as f:
                 text = f.read()
@@ -364,10 +311,6 @@ def ingest_notes_into_knowledge(knowledge: dict, queue: list):
 
     return knowledge, queue, report
 
-# =========================
-# Auto ingest state
-# =========================
-
 def load_auto_ingest_state() -> dict:
     state = load_json_dict(AUTO_INGEST_STATE_PATH)
     if "last_ingest_date" not in state:
@@ -392,9 +335,43 @@ def mark_auto_ingest(state: dict) -> dict:
     state["last_ingest_date"] = datetime.now().date().isoformat()
     return state
 
-# =========================
-# Commands
-# =========================
+def try_fuzzy_existing_topic(user_text: str, knowledge: dict):
+    """
+    If user asks 'what is X' and X exists, return X.
+    Otherwise return "".
+    """
+    raw = normalize_topic(user_text)
+    if not raw:
+        return ""
+
+    patterns = [
+        "what is ",
+        "what's ",
+        "whats ",
+        "explain ",
+        "define ",
+        "meaning of ",
+        "tell me about "
+    ]
+
+    for p in patterns:
+        if raw.startswith(p):
+            base = raw[len(p):].strip().rstrip(" .!?")
+            if base and base in knowledge:
+                return base
+            return ""
+
+    return ""
+
+def alias_suggestion_for(user_text: str, base: str, aliases: dict) -> str:
+    raw = normalize_topic(user_text)
+    if not raw or not base:
+        return ""
+    if raw in aliases:
+        return ""
+    if raw == base:
+        return ""
+    return f"Suggestion: /alias {raw} | {base}"
 
 HELP_TEXT = """
 Commands:
@@ -410,10 +387,6 @@ Commands:
   /exit
 """.strip()
 
-# =========================
-# Main Brain Loop
-# =========================
-
 def main():
     print("Machine Spirit brain online. Type a message, Ctrl+C to exit.")
     print("Type /help for commands.")
@@ -427,7 +400,6 @@ def main():
         while True:
             backup_files_if_needed()
 
-            # Daily auto ingest (silent unless it ingests something)
             if should_auto_ingest(ingest_state):
                 knowledge, research_queue, report = ingest_notes_into_knowledge(knowledge, research_queue)
                 if report.get("ingested", 0) > 0:
@@ -460,7 +432,6 @@ def main():
                     knowledge, research_queue, report = ingest_notes_into_knowledge(knowledge, research_queue)
                     save_knowledge(knowledge)
                     save_research_queue(research_queue)
-
                     print(f"Ingest complete. ingested={report['ingested']} skipped={report['skipped']} errors={report['errors']}")
                     for line in report["details"][:15]:
                         print("  " + line)
@@ -472,15 +443,12 @@ def main():
                     if "|" not in rest:
                         print("Usage: /teach <topic> | <answer>")
                         continue
-
                     left, right = rest.split("|", 1)
                     topic = resolve_topic(left, aliases)
                     answer = right.strip()
-
                     if not topic or not answer:
                         print("Usage: /teach <topic> | <answer>")
                         continue
-
                     knowledge[topic] = {
                         "answer": answer,
                         "confidence": 0.75,
@@ -488,7 +456,6 @@ def main():
                         "last_used": now_iso(),
                         "notes": "Taught by user"
                     }
-
                     save_knowledge(knowledge)
                     print(f"Taught: {topic}")
                     continue
@@ -497,25 +464,20 @@ def main():
                     if "|" not in rest:
                         print("Usage: /teachfile <topic> | <path_to_txt>")
                         continue
-
                     left, right = rest.split("|", 1)
                     topic = resolve_topic(left, aliases)
                     path = right.strip()
-
                     if not topic or not path:
                         print("Usage: /teachfile <topic> | <path_to_txt>")
                         continue
-
                     text = read_text_file(path)
                     if not text.strip():
                         print("Could not read file, or file is empty.")
                         continue
-
                     improved = extract_improved_answer(text)
                     if not improved.strip():
                         print("File was read, but improved answer section looks empty.")
                         continue
-
                     knowledge[topic] = {
                         "answer": improved.strip(),
                         "confidence": 0.80,
@@ -523,7 +485,6 @@ def main():
                         "last_used": now_iso(),
                         "notes": f"Taught from file: {path}"
                     }
-
                     save_knowledge(knowledge)
                     print(f"Taught from file: {topic}")
                     continue
@@ -532,19 +493,15 @@ def main():
                     if "|" not in rest:
                         print("Usage: /alias <alias> | <topic>")
                         continue
-
                     left, right = rest.split("|", 1)
                     alias_key = normalize_topic(left)
                     canonical = resolve_topic(right, aliases)
-
                     if not alias_key or not canonical:
                         print("Usage: /alias <alias> | <topic>")
                         continue
-
                     if alias_key == canonical:
                         print("Alias and topic resolve to the same value.")
                         continue
-
                     aliases[alias_key] = canonical
                     save_aliases(aliases)
                     print(f"Alias saved: '{alias_key}' -> '{canonical}'")
@@ -554,16 +511,13 @@ def main():
                     if not rest.strip():
                         print("Usage: /show <topic>")
                         continue
-
                     topic = resolve_topic(rest, aliases)
                     if topic not in knowledge:
                         print("No taught answer for that topic.")
                         continue
-
                     entry = apply_confidence_decay(knowledge[topic])
                     knowledge[topic] = entry
                     save_knowledge(knowledge)
-
                     print(f"Topic: {topic}")
                     print(f"Confidence: {entry.get('confidence')}")
                     print(f"Last updated: {entry.get('last_updated')}")
@@ -578,18 +532,14 @@ def main():
                             n = int(rest.strip())
                         except Exception:
                             n = 10
-
                     for k in list(knowledge.keys()):
                         knowledge[k] = apply_confidence_decay(knowledge[k])
-
                     items = []
                     for k, v in knowledge.items():
                         v = ensure_knowledge_shape(v)
                         items.append((k, float(v.get("confidence", 0.0))))
-
                     items.sort(key=lambda x: x[1])
                     save_knowledge(knowledge)
-
                     print(f"Lowest confidence topics (top {n}):")
                     for t, c in items[:n]:
                         print(f"  {t}  (conf={c})")
@@ -602,14 +552,11 @@ def main():
                             n = int(rest.strip())
                         except Exception:
                             n = 10
-
                     research_queue = load_research_queue()
                     pend = pending_queue(research_queue)
-
                     if not pend:
                         print("No pending research tasks. Queue is clear.")
                         continue
-
                     print(f"Pending research tasks (top {n}):")
                     for item in pend[:n]:
                         t = item.get("topic", "")
@@ -622,10 +569,8 @@ def main():
                     if not rest.strip():
                         print("Usage: /promote <topic> [amount]")
                         continue
-
                     bits = rest.strip().split()
                     amount = CONF_PROMOTE_DEFAULT
-
                     if len(bits) >= 2:
                         try:
                             amount = float(bits[-1])
@@ -634,20 +579,15 @@ def main():
                             topic_text = rest.strip()
                     else:
                         topic_text = rest.strip()
-
                     topic = resolve_topic(topic_text, aliases)
-
                     if topic not in knowledge:
                         print("No taught answer for that topic yet. Teach it first.")
                         continue
-
                     knowledge[topic] = apply_confidence_decay(knowledge[topic])
                     knowledge[topic] = promote_confidence(knowledge[topic], amount)
-
                     old_notes = str(knowledge[topic].get("notes", "")).strip()
                     stamp = f"Promoted by user (+{amount})"
                     knowledge[topic]["notes"] = (old_notes + " | " + stamp).strip(" |")
-
                     save_knowledge(knowledge)
                     print(f"Promoted: {topic}  new_conf={knowledge[topic].get('confidence')}")
                     continue
@@ -659,39 +599,45 @@ def main():
             # Normal questions
             # =====================
 
-            topic = resolve_topic(user_input, aliases)
+            resolved = resolve_topic(user_input, aliases)
 
-            if topic in knowledge:
-                knowledge[topic] = apply_confidence_decay(knowledge[topic])
-                knowledge[topic] = reinforce_on_use(knowledge[topic])
+            if resolved in knowledge:
+                knowledge[resolved] = apply_confidence_decay(knowledge[resolved])
+                knowledge[resolved] = reinforce_on_use(knowledge[resolved])
                 save_knowledge(knowledge)
-                print(knowledge[topic]["answer"])
+                print(knowledge[resolved]["answer"])
+                continue
 
-                conf = float(knowledge[topic].get("confidence", 0.0))
-                if conf < CONF_LOW_THRESHOLD:
-                    research_queue = enqueue_research(
-                        research_queue,
-                        topic,
-                        reason="Answer exists but confidence is low",
-                        current_confidence=conf
-                    )
-                    save_research_queue(research_queue)
+            # If not found, try fuzzy match to an existing base topic and answer it
+            base = try_fuzzy_existing_topic(user_input, knowledge)
+            if base:
+                # Answer using base topic
+                knowledge[base] = apply_confidence_decay(knowledge[base])
+                knowledge[base] = reinforce_on_use(knowledge[base])
+                save_knowledge(knowledge)
+                print(knowledge[base]["answer"])
 
-            else:
-                research_queue = enqueue_research(
-                    research_queue,
-                    topic,
-                    reason="No taught answer yet",
-                    current_confidence=0.30
-                )
-                save_research_queue(research_queue)
+                # Suggest alias to make it permanent next time
+                suggestion = alias_suggestion_for(user_input, base, aliases)
+                if suggestion:
+                    print(suggestion)
+                continue
 
-                print(
-                    "I do not have a taught answer for that yet. "
-                    "If my reply is wrong or weak, correct me in your own words "
-                    "and I will remember it. "
-                    "I also marked this topic for deeper research so I can improve over time."
-                )
+            # Otherwise unknown -> queue it
+            research_queue = enqueue_research(
+                research_queue,
+                resolved,
+                reason="No taught answer yet",
+                current_confidence=0.30
+            )
+            save_research_queue(research_queue)
+
+            print(
+                "I do not have a taught answer for that yet. "
+                "If my reply is wrong or weak, correct me in your own words "
+                "and I will remember it. "
+                "I also marked this topic for deeper research so I can improve over time."
+            )
 
     except KeyboardInterrupt:
         print("\nShutting down.")
