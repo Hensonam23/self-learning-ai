@@ -31,6 +31,11 @@ AUTO_ALIAS_PREFIX_MIN_LEN = 4
 AUTO_ALIAS_PREFIX_MAX_EXTRA_CHARS = 8
 AUTO_ALIAS_MARGIN_THRESHOLD = 0.15  # best must beat runner-up by this margin
 
+# Suggest and queue hygiene
+SUGGEST_MIN_SCORE = 0.58
+QUEUE_MIN_SCORE = 0.42
+QUEUE_MIN_LEN = 4
+
 # Backup timer (seconds)
 BACKUP_INTERVAL_SECONDS = 10 * 60  # 10 minutes
 
@@ -184,6 +189,15 @@ def add_to_research_queue(queue: List[Dict[str, Any]], topic: str, reason: str, 
         "current_confidence": float(current_confidence),
         "worker_note": f"Missing research note file: {os.path.join(RESEARCH_NOTES_DIR, topic_n.replace(' ', '_') + '.txt')}"
     })
+
+
+def should_auto_queue(raw_input: str, best_score: float) -> Tuple[bool, str]:
+    text = normalize_topic(raw_input)
+    if len(text) < QUEUE_MIN_LEN:
+        return False, f"Too short to auto queue (len {len(text)} < {QUEUE_MIN_LEN})."
+    if best_score < QUEUE_MIN_SCORE:
+        return False, f"Match too weak to auto queue (score {best_score:.2f} < {QUEUE_MIN_SCORE:.2f})."
+    return True, "OK"
 
 
 def promote_research_note(knowledge: Dict[str, Any], queue: List[Dict[str, Any]], topic: str) -> Tuple[bool, str]:
@@ -503,11 +517,7 @@ def format_answer(entry: Dict[str, Any]) -> str:
     return f"{ans}\n\n(confidence: {float(conf):.2f})"
 
 
-def cmd_why(
-    text: str,
-    knowledge: Dict[str, Any],
-    alias_map: Dict[str, str]
-) -> None:
+def cmd_why(text: str, knowledge: Dict[str, Any], alias_map: Dict[str, str]) -> None:
     q = text.strip()
     if not q:
         safe_print("Usage: /why <text>")
@@ -557,11 +567,7 @@ def cmd_why(
     safe_print(f"detail: {reason_text}")
 
 
-def cmd_aliases(
-    arg: str,
-    knowledge: Dict[str, Any],
-    alias_map: Dict[str, str]
-) -> None:
+def cmd_aliases(arg: str, knowledge: Dict[str, Any], alias_map: Dict[str, str]) -> None:
     n = 25
     if arg.strip():
         try:
@@ -584,10 +590,7 @@ def cmd_aliases(
             break
 
 
-def cmd_unalias(
-    arg: str,
-    alias_map: Dict[str, str]
-) -> None:
+def cmd_unalias(arg: str, alias_map: Dict[str, str]) -> None:
     akey = normalize_topic(arg)
     if not akey:
         safe_print("Usage: /unalias <alias>")
@@ -886,18 +889,37 @@ def main() -> None:
                     safe_print(format_answer(knowledge[best]))
                     continue
 
-                last_suggested_alias = {
-                    "alias": user,
-                    "target": best,
-                    "score": float(best_score)
-                }
-                safe_print(f"Suggestion: /alias {user} | {best}")
-                safe_print("Tip: use /accept to save that alias, or /suggest <text> to see more.")
-                add_to_research_queue(research_queue, user, reason="No taught answer yet", current_confidence=0.30)
-                save_json(RESEARCH_QUEUE_PATH, research_queue)
+                # Only suggest if match is decent
+                if best_score >= SUGGEST_MIN_SCORE:
+                    last_suggested_alias = {
+                        "alias": user,
+                        "target": best,
+                        "score": float(best_score)
+                    }
+                    safe_print(f"Suggestion: /alias {user} | {best}")
+                    safe_print("Tip: use /accept to save that alias, or /suggest <text> to see more.")
+
+                    do_queue, why_not = should_auto_queue(user, best_score)
+                    if do_queue:
+                        add_to_research_queue(research_queue, user, reason="No taught answer yet", current_confidence=0.30)
+                        save_json(RESEARCH_QUEUE_PATH, research_queue)
+                    else:
+                        safe_print(f"Note: not added to research queue. {why_not}")
+                        safe_print("Tip: use /teach or /ingest if you want to store this on purpose.")
+                    continue
+
+                safe_print("Machine Spirit: I do not have a taught answer for that yet.")
+                do_queue, why_not = should_auto_queue(user, best_score)
+                if do_queue:
+                    add_to_research_queue(research_queue, user, reason="No taught answer yet", current_confidence=0.30)
+                    save_json(RESEARCH_QUEUE_PATH, research_queue)
+                else:
+                    safe_print(f"Note: not added to research queue. {why_not}")
+                    safe_print("Tip: use /teach or /ingest if you want to store this on purpose.")
                 continue
 
         safe_print("Machine Spirit: I do not have a taught answer for that yet.")
+        # No topics at all, queueing is fine
         add_to_research_queue(research_queue, user, reason="No taught answer yet", current_confidence=0.30)
         save_json(RESEARCH_QUEUE_PATH, research_queue)
 
