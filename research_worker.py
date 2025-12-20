@@ -55,7 +55,6 @@ def load_knowledge() -> Dict[str, Dict[str, Any]]:
     data = safe_read_json(KNOWLEDGE_PATH, {})
     if not isinstance(data, dict):
         data = {}
-    # normalize keys
     normalized = {}
     for k, v in data.items():
         if isinstance(v, dict):
@@ -79,7 +78,6 @@ def save_queue(queue: List[Dict[str, Any]]) -> None:
 
 
 def topic_to_filename(topic: str) -> str:
-    # safe filename
     t = normalize_topic(topic)
     t = re.sub(r"[^a-z0-9 _-]", "", t)
     t = t.replace(" ", "_")
@@ -87,12 +85,9 @@ def topic_to_filename(topic: str) -> str:
 
 
 def summarize_note(note: str, topic: str) -> str:
-    # Simple offline summarizer
-    # It picks key sentences and trims it into a clean explanation.
     cleaned = re.sub(r"\s+", " ", note).strip()
     sentences = re.split(r"(?<=[.!?])\s+", cleaned)
 
-    # prioritize sentences that contain the topic words
     words = [w for w in re.split(r"\W+", normalize_topic(topic)) if w]
     scored = []
     for s in sentences:
@@ -101,16 +96,14 @@ def summarize_note(note: str, topic: str) -> str:
         for w in words:
             if w in ls:
                 score += 2
-        # prefer medium length
         if 60 <= len(s) <= 220:
             score += 1
         scored.append((score, s))
 
     scored.sort(reverse=True)
-    picked = [s for score, s in scored[:6] if score > 0] or sentences[:4]
+    picked = [s for score, s in scored[:7] if score > 0] or sentences[:5]
     picked = [p.strip() for p in picked if p.strip()]
 
-    # ensure not crazy long
     summary = " ".join(picked)
     if len(summary) > 1200:
         summary = summary[:1200].rsplit(" ", 1)[0] + "..."
@@ -123,7 +116,6 @@ def update_knowledge_from_research(knowledge: Dict[str, Dict[str, Any]], topic: 
 
     if existing:
         old_conf = float(existing.get("confidence", 0.0))
-        # Research boosts confidence, but not instantly perfect
         new_conf = clamp_conf(max(old_conf, 0.65) + 0.10)
         existing["answer"] = summary.strip()
         existing["confidence"] = new_conf
@@ -141,6 +133,41 @@ def update_knowledge_from_research(knowledge: Dict[str, Dict[str, Any]], topic: 
         }
 
 
+# ---------- READY-TO-PASTE NOTE TEMPLATES (OFFLINE) ----------
+
+def note_template(topic: str) -> Optional[str]:
+    t = normalize_topic(topic)
+
+    templates: Dict[str, str] = {
+        "osi model": """OSI Model (Open Systems Interconnection) – Research Note
+
+The OSI model is a 7-layer framework used to describe how network communication works. It is not a specific protocol you “run,” but a way to organize and explain how data moves from an application on one device to an application on another device. Each layer has a specific job and passes data up or down to the next layer.
+
+Layer 7 – Application: This is what the user interacts with (web browsing, email, file transfer). Examples often associated here include HTTP, HTTPS, SMTP, DNS, and FTP, but the key idea is “services used by applications.”
+
+Layer 6 – Presentation: This layer focuses on how data is formatted so both sides can understand it. It deals with things like encoding, compression, and encryption. Example concepts include TLS/SSL encryption and data formats.
+
+Layer 5 – Session: This layer manages the “conversation” between two devices. It helps start, maintain, and end sessions. It also helps with checkpointing and recovery in long communications.
+
+Layer 4 – Transport: This is where reliability and delivery rules live. TCP provides reliable delivery with sequencing and retransmissions. UDP is faster and simpler but does not guarantee delivery. This layer uses ports (like 80, 443, 53) so the right app receives the data.
+
+Layer 3 – Network: This is about routing between networks. IP addressing and routers operate here. The main goal is to move packets from one network to another using logical addresses (IP).
+
+Layer 2 – Data Link: This is local network delivery on the same network segment. It uses MAC addresses and frames. Switches typically operate here. It also includes error detection like CRC.
+
+Layer 1 – Physical: This is the raw transmission layer. It includes cables, radio signals (Wi-Fi), connectors, voltages, and physical bit transmission.
+
+A simple way to remember it is: the top layers deal with user data and formatting, the middle layers deal with moving and controlling the conversation, and the bottom layers deal with local delivery and physical signals.
+
+The OSI model helps with troubleshooting by letting you isolate problems: cable issues at layer 1, switching/MAC issues at layer 2, routing/IP issues at layer 3, TCP/UDP and port issues at layer 4, and so on.
+""",
+    }
+
+    return templates.get(t)
+
+
+# -----------------------------------------------------------
+
 def main() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(RESEARCH_NOTES_DIR, exist_ok=True)
@@ -148,12 +175,13 @@ def main() -> None:
     knowledge = load_knowledge()
     queue = load_queue()
 
-    pending = [x for x in queue if x.get("status") in ("pending", "in_progress")]
-    if not pending:
+    pending_items = [x for x in queue if x.get("status") in ("pending", "in_progress")]
+    if not pending_items:
         print("No pending research tasks. Queue is clear.")
         return
 
     updated_any = False
+    missing_notes: List[Dict[str, str]] = []
 
     for item in queue:
         if item.get("status") not in ("pending", "in_progress"):
@@ -169,6 +197,7 @@ def main() -> None:
         if not os.path.exists(note_file):
             item["status"] = "pending"
             item["worker_note"] = f"Missing research note file: {note_file}"
+            missing_notes.append({"topic": topic, "file": note_file})
             continue
 
         with open(note_file, "r", encoding="utf-8") as f:
@@ -187,25 +216,36 @@ def main() -> None:
         item["completed_on"] = now_utc_iso()
         item["worker_note"] = "Upgraded knowledge using local research note"
         updated_any = True
-        updated_any = True
 
     save_queue(queue)
     if updated_any:
         save_knowledge(knowledge)
 
-    # Print results
-    still_pending = [x for x in queue if x.get("status") in ("pending", "in_progress")]
     done = [x for x in queue if x.get("status") == "done"]
+    still_pending = [x for x in queue if x.get("status") in ("pending", "in_progress")]
 
     print(f"Completed: {len(done)}")
     print(f"Still pending: {len(still_pending)}")
 
-    if still_pending:
-        print("\nTo complete pending topics, add a note file for each topic in:")
-        print(f"  {RESEARCH_NOTES_DIR}")
-        print("File name example:")
-        print("  osi_model.txt")
-        print("\nThen run:")
+    # If missing notes exist, show instructions + template if available
+    if missing_notes:
+        print("\nMissing note files detected. Create these files and paste the note content:\n")
+        for m in missing_notes[:10]:
+            topic = m["topic"]
+            file_path = m["file"]
+            print(f"- Topic: {topic}")
+            print(f"  File:  {file_path}")
+
+            tmpl = note_template(topic)
+            if tmpl:
+                print("\n  READY-TO-PASTE NOTE BELOW:\n")
+                print("  ---------- COPY FROM HERE ----------")
+                print(tmpl.strip())
+                print("  ----------- COPY TO HERE -----------\n")
+            else:
+                print("  No template available yet. Ask me and I will generate a paste-ready note.\n")
+
+        print("After creating the notes, run:")
         print("  python3 research_worker.py")
 
 
