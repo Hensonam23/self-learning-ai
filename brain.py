@@ -25,18 +25,15 @@ os.makedirs(BACKUP_DIR, exist_ok=True)
 # Tuning (Confidence)
 # =========================
 
-# How fast confidence slowly drops if you don't use/update a topic.
-# Example: 0.02 means ~2% per day.
 CONF_DECAY_PER_DAY = 0.02
-
-# How much confidence increases when a topic is successfully used (answered).
 CONF_REINFORCE_ON_USE = 0.01
 
 CONF_MIN = 0.10
 CONF_MAX = 0.95
-
-# If confidence is below this, we consider it "low" and worth improving.
 CONF_LOW_THRESHOLD = 0.50
+
+# For manual promote command
+CONF_PROMOTE_DEFAULT = 0.10
 
 # =========================
 # Backup system (timer-based)
@@ -143,7 +140,6 @@ def save_knowledge(knowledge: dict) -> None:
     save_json_dict(KNOWLEDGE_PATH, knowledge)
 
 def ensure_knowledge_shape(entry: dict) -> dict:
-    # Keep older entries from breaking things.
     if "answer" not in entry:
         entry["answer"] = ""
     if "confidence" not in entry or not isinstance(entry["confidence"], (int, float)):
@@ -159,7 +155,6 @@ def ensure_knowledge_shape(entry: dict) -> dict:
 def apply_confidence_decay(entry: dict) -> dict:
     entry = ensure_knowledge_shape(entry)
 
-    # Decay based on "last_used" first (because if you use it, it stays fresh)
     lu = parse_iso_dt(entry.get("last_used", "")) or parse_iso_dt(entry.get("last_updated", ""))
     if not lu:
         return entry
@@ -180,6 +175,17 @@ def reinforce_on_use(entry: dict) -> dict:
     boosted = entry["confidence"] + CONF_REINFORCE_ON_USE
     if boosted > CONF_MAX:
         boosted = CONF_MAX
+    entry["confidence"] = round(float(boosted), 4)
+    entry["last_used"] = now_iso()
+    return entry
+
+def promote_confidence(entry: dict, amount: float) -> dict:
+    entry = ensure_knowledge_shape(entry)
+    boosted = float(entry.get("confidence", 0.40)) + float(amount)
+    if boosted > CONF_MAX:
+        boosted = CONF_MAX
+    if boosted < CONF_MIN:
+        boosted = CONF_MIN
     entry["confidence"] = round(float(boosted), 4)
     entry["last_used"] = now_iso()
     return entry
@@ -220,7 +226,6 @@ def save_research_queue(queue: list) -> None:
     save_json_list(RESEARCH_QUEUE_PATH, queue)
 
 def enqueue_research(queue: list, topic: str, reason: str, current_confidence: float) -> list:
-    # Avoid duplicates for same canonical topic
     t = normalize_topic(topic)
     for item in queue:
         if normalize_topic(str(item.get("topic", ""))) == t and item.get("status") in ("pending", "in_progress"):
@@ -236,8 +241,11 @@ def enqueue_research(queue: list, topic: str, reason: str, current_confidence: f
     })
     return queue
 
+def pending_queue(queue: list) -> list:
+    return [q for q in queue if q.get("status") in ("pending", "in_progress")]
+
 # =========================
-# Commands (help text)
+# Commands
 # =========================
 
 HELP_TEXT = """
@@ -246,6 +254,8 @@ Commands:
   /alias <alias> | <topic>
   /show <topic>
   /low [n]
+  /queue [n]
+  /promote <topic> [amount]
   /help
   /exit
 """.strip()
@@ -363,7 +373,6 @@ def main():
                         except Exception:
                             n = 10
 
-                    # Apply decay first, then rank
                     for k in list(knowledge.keys()):
                         knowledge[k] = apply_confidence_decay(knowledge[k])
 
@@ -372,12 +381,69 @@ def main():
                         v = ensure_knowledge_shape(v)
                         items.append((k, float(v.get("confidence", 0.0))))
 
-                    items.sort(key=lambda x: x[1])  # lowest first
+                    items.sort(key=lambda x: x[1])
                     save_knowledge(knowledge)
 
                     print(f"Lowest confidence topics (top {n}):")
                     for t, c in items[:n]:
                         print(f"  {t}  (conf={c})")
+                    continue
+
+                if cmd == "/queue":
+                    n = 10
+                    if rest.strip():
+                        try:
+                            n = int(rest.strip())
+                        except Exception:
+                            n = 10
+
+                    research_queue = load_research_queue()
+                    pend = pending_queue(research_queue)
+
+                    if not pend:
+                        print("No pending research tasks. Queue is clear.")
+                        continue
+
+                    print(f"Pending research tasks (top {n}):")
+                    for item in pend[:n]:
+                        t = item.get("topic", "")
+                        r = item.get("reason", "")
+                        c = item.get("current_confidence", "")
+                        print(f"  {t}  (conf={c})  reason={r}")
+                    continue
+
+                if cmd == "/promote":
+                    if not rest.strip():
+                        print("Usage: /promote <topic> [amount]")
+                        continue
+
+                    bits = rest.strip().split()
+                    amount = CONF_PROMOTE_DEFAULT
+
+                    if len(bits) >= 2:
+                        try:
+                            amount = float(bits[-1])
+                            topic_text = " ".join(bits[:-1])
+                        except Exception:
+                            topic_text = rest.strip()
+                    else:
+                        topic_text = rest.strip()
+
+                    topic = resolve_topic(topic_text, aliases)
+
+                    if topic not in knowledge:
+                        print("No taught answer for that topic yet. Teach it first.")
+                        continue
+
+                    knowledge[topic] = apply_confidence_decay(knowledge[topic])
+                    knowledge[topic] = promote_confidence(knowledge[topic], amount)
+
+                    old_notes = str(knowledge[topic].get("notes", "")).strip()
+                    stamp = f"Promoted by user (+{amount})"
+                    knowledge[topic]["notes"] = (old_notes + " | " + stamp).strip(" |")
+
+                    save_knowledge(knowledge)
+                    print(f"Promoted: {topic}  new_conf={knowledge[topic].get('confidence')}")
                     continue
 
                 print("Unknown command. Type /help.")
@@ -390,13 +456,11 @@ def main():
             topic = resolve_topic(user_input, aliases)
 
             if topic in knowledge:
-                # decay + reinforce
                 knowledge[topic] = apply_confidence_decay(knowledge[topic])
                 knowledge[topic] = reinforce_on_use(knowledge[topic])
                 save_knowledge(knowledge)
                 print(knowledge[topic]["answer"])
 
-                # If it’s low, queue it for research improvement
                 conf = float(knowledge[topic].get("confidence", 0.0))
                 if conf < CONF_LOW_THRESHOLD:
                     research_queue = enqueue_research(
@@ -408,7 +472,6 @@ def main():
                     save_research_queue(research_queue)
 
             else:
-                # unknown topic -> add to research queue
                 research_queue = enqueue_research(
                     research_queue,
                     topic,
