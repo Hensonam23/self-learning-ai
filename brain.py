@@ -4,7 +4,7 @@ import json
 import os
 import time
 import shutil
-from datetime import datetime
+from datetime import datetime, date
 
 # =========================
 # Paths
@@ -16,13 +16,74 @@ BACKUP_DIR = os.path.join(DATA_DIR, "backups")
 
 KNOWLEDGE_PATH = os.path.join(DATA_DIR, "local_knowledge.json")
 ALIASES_PATH = os.path.join(DATA_DIR, "topic_aliases.json")
+RESEARCH_QUEUE_PATH = os.path.join(DATA_DIR, "research_queue.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
 # =========================
+# Tuning (Confidence)
+# =========================
+
+# How fast confidence slowly drops if you don't use/update a topic.
+# Example: 0.02 means ~2% per day.
+CONF_DECAY_PER_DAY = 0.02
+
+# How much confidence increases when a topic is successfully used (answered).
+CONF_REINFORCE_ON_USE = 0.01
+
+CONF_MIN = 0.10
+CONF_MAX = 0.95
+
+# If confidence is below this, we consider it "low" and worth improving.
+CONF_LOW_THRESHOLD = 0.50
+
+# =========================
+# Backup system (timer-based)
+# =========================
+
+LAST_BACKUP_TIME = 0
+BACKUP_INTERVAL = 300  # seconds (5 minutes)
+
+def backup_files_if_needed():
+    global LAST_BACKUP_TIME
+
+    now = time.time()
+    if now - LAST_BACKUP_TIME < BACKUP_INTERVAL:
+        return
+
+    files_to_backup = [
+        KNOWLEDGE_PATH,
+        ALIASES_PATH,
+        RESEARCH_QUEUE_PATH
+    ]
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    backed_any = False
+    for fp in files_to_backup:
+        if not os.path.exists(fp):
+            continue
+
+        base = os.path.basename(fp).replace(".json", "")
+        backup_name = f"{base}_{timestamp}.json"
+        backup_path = os.path.join(BACKUP_DIR, backup_name)
+
+        try:
+            shutil.copy2(fp, backup_path)
+            backed_any = True
+        except Exception:
+            pass
+
+    if backed_any:
+        LAST_BACKUP_TIME = now
+
+# =========================
 # Utility
 # =========================
+
+def now_iso() -> str:
+    return datetime.now().isoformat()
 
 def normalize_topic(topic: str) -> str:
     if not topic:
@@ -33,51 +94,112 @@ def normalize_topic(topic: str) -> str:
     t = t.rstrip(" .!?")
     return t
 
+def parse_iso_dt(s: str):
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+# =========================
+# JSON Load/Save
+# =========================
+
+def load_json_dict(path: str) -> dict:
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def save_json_dict(path: str, data: dict) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+def load_json_list(path: str) -> list:
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+def save_json_list(path: str, data: list) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
 # =========================
 # Knowledge
 # =========================
 
 def load_knowledge() -> dict:
-    if not os.path.exists(KNOWLEDGE_PATH):
-        return {}
-    try:
-        with open(KNOWLEDGE_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        pass
-    return {}
+    return load_json_dict(KNOWLEDGE_PATH)
 
 def save_knowledge(knowledge: dict) -> None:
-    with open(KNOWLEDGE_PATH, "w", encoding="utf-8") as f:
-        json.dump(knowledge, f, indent=2, ensure_ascii=False)
+    save_json_dict(KNOWLEDGE_PATH, knowledge)
+
+def ensure_knowledge_shape(entry: dict) -> dict:
+    # Keep older entries from breaking things.
+    if "answer" not in entry:
+        entry["answer"] = ""
+    if "confidence" not in entry or not isinstance(entry["confidence"], (int, float)):
+        entry["confidence"] = 0.40
+    if "last_updated" not in entry:
+        entry["last_updated"] = now_iso()
+    if "last_used" not in entry:
+        entry["last_used"] = entry["last_updated"]
+    if "notes" not in entry:
+        entry["notes"] = ""
+    return entry
+
+def apply_confidence_decay(entry: dict) -> dict:
+    entry = ensure_knowledge_shape(entry)
+
+    # Decay based on "last_used" first (because if you use it, it stays fresh)
+    lu = parse_iso_dt(entry.get("last_used", "")) or parse_iso_dt(entry.get("last_updated", ""))
+    if not lu:
+        return entry
+
+    days_old = (datetime.now() - lu).total_seconds() / 86400.0
+    if days_old <= 0:
+        return entry
+
+    decayed = entry["confidence"] - (days_old * CONF_DECAY_PER_DAY)
+    if decayed < CONF_MIN:
+        decayed = CONF_MIN
+
+    entry["confidence"] = round(float(decayed), 4)
+    return entry
+
+def reinforce_on_use(entry: dict) -> dict:
+    entry = ensure_knowledge_shape(entry)
+    boosted = entry["confidence"] + CONF_REINFORCE_ON_USE
+    if boosted > CONF_MAX:
+        boosted = CONF_MAX
+    entry["confidence"] = round(float(boosted), 4)
+    entry["last_used"] = now_iso()
+    return entry
 
 # =========================
 # Aliases
 # =========================
 
 def load_aliases() -> dict:
-    if not os.path.exists(ALIASES_PATH):
-        return {}
-    try:
-        with open(ALIASES_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            cleaned = {}
-            for k, v in data.items():
-                nk = normalize_topic(str(k))
-                nv = normalize_topic(str(v))
-                if nk and nv:
-                    cleaned[nk] = nv
-            return cleaned
-    except Exception:
-        pass
-    return {}
+    raw = load_json_dict(ALIASES_PATH)
+    cleaned = {}
+    for k, v in raw.items():
+        nk = normalize_topic(str(k))
+        nv = normalize_topic(str(v))
+        if nk and nv:
+            cleaned[nk] = nv
+    return cleaned
 
 def save_aliases(aliases: dict) -> None:
-    with open(ALIASES_PATH, "w", encoding="utf-8") as f:
-        json.dump(aliases, f, indent=2, ensure_ascii=False)
+    save_json_dict(ALIASES_PATH, aliases)
 
 def resolve_topic(topic: str, aliases: dict) -> str:
     t = normalize_topic(topic)
@@ -88,30 +210,45 @@ def resolve_topic(topic: str, aliases: dict) -> str:
     return t
 
 # =========================
-# Backup system (timer-based)
+# Research Queue
 # =========================
 
-LAST_BACKUP_TIME = 0
-BACKUP_INTERVAL = 300  # seconds (5 minutes)
+def load_research_queue() -> list:
+    return load_json_list(RESEARCH_QUEUE_PATH)
 
-def backup_knowledge_if_needed():
-    global LAST_BACKUP_TIME
-    now = time.time()
-    if now - LAST_BACKUP_TIME < BACKUP_INTERVAL:
-        return
+def save_research_queue(queue: list) -> None:
+    save_json_list(RESEARCH_QUEUE_PATH, queue)
 
-    if not os.path.exists(KNOWLEDGE_PATH):
-        return
+def enqueue_research(queue: list, topic: str, reason: str, current_confidence: float) -> list:
+    # Avoid duplicates for same canonical topic
+    t = normalize_topic(topic)
+    for item in queue:
+        if normalize_topic(str(item.get("topic", ""))) == t and item.get("status") in ("pending", "in_progress"):
+            return queue
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_name = f"local_knowledge_{timestamp}.json"
-    backup_path = os.path.join(BACKUP_DIR, backup_name)
+    queue.append({
+        "topic": t,
+        "reason": reason,
+        "requested_on": str(date.today()),
+        "status": "pending",
+        "current_confidence": round(float(current_confidence), 4),
+        "worker_note": ""
+    })
+    return queue
 
-    try:
-        shutil.copy2(KNOWLEDGE_PATH, backup_path)
-        LAST_BACKUP_TIME = now
-    except Exception:
-        pass
+# =========================
+# Commands (help text)
+# =========================
+
+HELP_TEXT = """
+Commands:
+  /teach <topic> | <answer>
+  /alias <alias> | <topic>
+  /show <topic>
+  /low [n]
+  /help
+  /exit
+""".strip()
 
 # =========================
 # Main Brain Loop
@@ -119,13 +256,15 @@ def backup_knowledge_if_needed():
 
 def main():
     print("Machine Spirit brain online. Type a message, Ctrl+C to exit.")
+    print("Type /help for commands.")
 
     knowledge = load_knowledge()
     aliases = load_aliases()
+    research_queue = load_research_queue()
 
     try:
         while True:
-            backup_knowledge_if_needed()
+            backup_files_if_needed()
 
             user_input = input("> ").strip()
             if not user_input:
@@ -137,8 +276,16 @@ def main():
 
             if user_input.startswith("/"):
                 parts = user_input.split(" ", 1)
-                cmd = parts[0]
+                cmd = parts[0].strip()
                 rest = parts[1] if len(parts) > 1 else ""
+
+                if cmd == "/help":
+                    print(HELP_TEXT)
+                    continue
+
+                if cmd == "/exit":
+                    print("Shutting down.")
+                    break
 
                 if cmd == "/teach":
                     if "|" not in rest:
@@ -155,8 +302,9 @@ def main():
 
                     knowledge[topic] = {
                         "answer": answer,
-                        "confidence": 0.7,
-                        "last_updated": datetime.now().isoformat(),
+                        "confidence": 0.75,
+                        "last_updated": now_iso(),
+                        "last_used": now_iso(),
                         "notes": "Taught by user"
                     }
 
@@ -186,11 +334,53 @@ def main():
                     print(f"Alias saved: '{alias_key}' -> '{canonical}'")
                     continue
 
-                if cmd == "/exit":
-                    print("Shutting down.")
-                    break
+                if cmd == "/show":
+                    if not rest.strip():
+                        print("Usage: /show <topic>")
+                        continue
 
-                print("Unknown command.")
+                    topic = resolve_topic(rest, aliases)
+                    if topic not in knowledge:
+                        print("No taught answer for that topic.")
+                        continue
+
+                    entry = apply_confidence_decay(knowledge[topic])
+                    knowledge[topic] = entry
+                    save_knowledge(knowledge)
+
+                    print(f"Topic: {topic}")
+                    print(f"Confidence: {entry.get('confidence')}")
+                    print(f"Last updated: {entry.get('last_updated')}")
+                    print(f"Last used: {entry.get('last_used')}")
+                    print(f"Notes: {entry.get('notes')}")
+                    continue
+
+                if cmd == "/low":
+                    n = 10
+                    if rest.strip():
+                        try:
+                            n = int(rest.strip())
+                        except Exception:
+                            n = 10
+
+                    # Apply decay first, then rank
+                    for k in list(knowledge.keys()):
+                        knowledge[k] = apply_confidence_decay(knowledge[k])
+
+                    items = []
+                    for k, v in knowledge.items():
+                        v = ensure_knowledge_shape(v)
+                        items.append((k, float(v.get("confidence", 0.0))))
+
+                    items.sort(key=lambda x: x[1])  # lowest first
+                    save_knowledge(knowledge)
+
+                    print(f"Lowest confidence topics (top {n}):")
+                    for t, c in items[:n]:
+                        print(f"  {t}  (conf={c})")
+                    continue
+
+                print("Unknown command. Type /help.")
                 continue
 
             # =====================
@@ -200,18 +390,42 @@ def main():
             topic = resolve_topic(user_input, aliases)
 
             if topic in knowledge:
+                # decay + reinforce
+                knowledge[topic] = apply_confidence_decay(knowledge[topic])
+                knowledge[topic] = reinforce_on_use(knowledge[topic])
+                save_knowledge(knowledge)
                 print(knowledge[topic]["answer"])
+
+                # If it’s low, queue it for research improvement
+                conf = float(knowledge[topic].get("confidence", 0.0))
+                if conf < CONF_LOW_THRESHOLD:
+                    research_queue = enqueue_research(
+                        research_queue,
+                        topic,
+                        reason="Answer exists but confidence is low",
+                        current_confidence=conf
+                    )
+                    save_research_queue(research_queue)
+
             else:
+                # unknown topic -> add to research queue
+                research_queue = enqueue_research(
+                    research_queue,
+                    topic,
+                    reason="No taught answer yet",
+                    current_confidence=0.30
+                )
+                save_research_queue(research_queue)
+
                 print(
                     "I do not have a taught answer for that yet. "
                     "If my reply is wrong or weak, correct me in your own words "
-                    "and I will remember it."
+                    "and I will remember it. "
+                    "I also marked this topic for deeper research so I can improve over time."
                 )
 
     except KeyboardInterrupt:
         print("\nShutting down.")
-
-# =========================
 
 if __name__ == "__main__":
     main()
