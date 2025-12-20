@@ -9,8 +9,8 @@ mkdir -p logs
 TS="$(date +%Y-%m-%d_%H-%M-%S)"
 OUT="backups/machine_spirit_backup_${TS}.tgz"
 
-# What we want backed up (even if git ignores it)
-# IMPORTANT: do NOT include venv or huge folders
+# Stuff we want backed up (even if git ignores it)
+# Do NOT include venv or huge folders
 INCLUDE=(
   "data/aliases.json"
   "data/local_knowledge.json"
@@ -24,7 +24,6 @@ INCLUDE=(
 
 echo "Creating backup: $OUT" | tee -a logs/backup.log
 
-# tar will fail if a listed file is missing, so we filter to existing paths
 EXISTING=()
 for p in "${INCLUDE[@]}"; do
   if [ -e "$p" ]; then
@@ -42,7 +41,7 @@ tar -czf "$OUT" "${EXISTING[@]}"
 echo "Backup complete." | tee -a logs/backup.log
 echo "  Saved: $OUT" | tee -a logs/backup.log
 
-# Keep only the newest 20 backups
+# Keep only newest 20 backups
 COUNT=$(ls -1 backups/machine_spirit_backup_*.tgz 2>/dev/null | wc -l || true)
 if [ "$COUNT" -gt 20 ]; then
   REMOVE=$((COUNT - 20))
