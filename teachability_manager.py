@@ -9,17 +9,22 @@ to data/local_knowledge.json.
 Responsibilities:
 - Normalize questions.
 - Record user corrections ("No, that's wrong...")
-- Look up canonical explanations for questions.
+- Look up canonical explanations for questions, including fuzzy
+  matching when there is no exact match.
 """
 
 from typing import Dict, Optional
 
-from memory_manager import MemoryManager, normalize_question, _strip_leading_markers  # type: ignore
+from memory_manager import (
+    MemoryManager,
+    normalize_question,
+    _strip_leading_markers,  # type: ignore
+)
 
 
 class TeachabilityManager:
     def __init__(self) -> None:
-        # MemoryManager handles file IO and categories
+        # MemoryManager handles file IO, categories, and fuzzy search
         self.mem = MemoryManager()
 
     # ------------------------------------------------------------------ #
@@ -29,16 +34,42 @@ class TeachabilityManager:
     def lookup(self, user_text: str) -> Optional[Dict[str, str]]:
         """
         Try to find a canonical explanation for this question.
+
+        Strategy:
+        - First, try exact match via MemoryManager.get().
+        - If not found, try fuzzy search via MemoryManager.search_similar().
         """
+        # 1) Exact match
         cat, canon = self.mem.get(user_text)
-        if not canon:
+        if canon:
+            norm = normalize_question(user_text)
+            return {
+                "question": norm,
+                "canonical_explanation": canon,
+                "category": cat,
+                "from_fuzzy": "false",
+            }
+
+        # 2) Fuzzy match
+        matches = self.mem.search_similar(user_text, limit=3)
+        if not matches:
             return None
 
-        norm = normalize_question(user_text)
+        best = matches[0]
+        score = float(best.get("score", 0.0))
+
+        # With the new overlap-based score, 0.5 means at least half of
+        # the shorter question's tokens overlap with a stored one.
+        if score < 0.5:
+            return None
+
         return {
-            "question": norm,
-            "canonical_explanation": canon,
-            "category": cat,
+            "question": normalize_question(user_text),
+            "canonical_explanation": best["explanation"],
+            "category": best.get("category"),
+            "matched_question": best.get("question"),
+            "match_score": str(score),
+            "from_fuzzy": "true",
         }
 
     def record_correction(

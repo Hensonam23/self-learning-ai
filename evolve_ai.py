@@ -3,19 +3,21 @@
 """
 Evolution loop for the Machine Spirit.
 
-What this does:
+What this does each pass:
 
 1. Reads data/chatlog.json and looks for entries where needs_research == True.
-2. Ensures each such question is queued in data/research_queue.json (as a topic).
-3. Runs the research worker to process all pending research tasks:
+   - Queues those questions as research topics (if not already queued).
+
+2. Adds built-in self-study topics (IT, English, Warhammer, AI, humor)
+   into the research queue (once each), so the Machine Spirit can learn
+   even if you are not actively chatting.
+
+3. Runs the research worker to process ALL pending research tasks:
       - research_worker.py will:
           * call the web answer engine for topics/URLs
           * store summaries in data/research_notes.json
-          * store topic summaries in structured memory (which also updates
-            data/local_knowledge.json).
-4. Because TeachabilityManager and MemoryManager normalize and structure
-   knowledge on load, the next time the brain runs it can answer more
-   questions from its new knowledge.
+          * store topic summaries in structured memory
+            (which also updates data/local_knowledge.json)
 
 Usage:
 
@@ -39,6 +41,70 @@ from research_worker import run_worker as run_research_worker
 
 CHATLOG_PATH = "data/chatlog.json"
 
+# ---------------------------------------------------------------------------
+# Built-in self-study topics.
+#
+# These are questions/topics the Machine Spirit will research on its own,
+# even if you never asked them directly. They are intentionally broad and
+# cover IT, English, Warhammer, AI, and humor.
+# ---------------------------------------------------------------------------
+
+SELF_STUDY_TOPICS: List[str] = [
+    # --- IT / networking / systems ---
+    "Explain the OSI model in simple words.",
+    "What is the difference between TCP and UDP, and when would you use each?",
+    "Explain what an IP address and subnet mask are, in simple terms.",
+    "How does DNS work and why is it important on a network?",
+    "What is the difference between a switch and a router?",
+    "Explain VLANs in simple words.",
+    "What is a VPN and what is it used for?",
+    "Explain the basics of firewalls and how they protect a network.",
+    "What is virtualization and how is it different from containers?",
+    "Compare virtual machines and Docker containers in simple words.",
+    "What are common ways to optimize a Windows PC for gaming performance?",
+    "Explain CPU, GPU, and RAM roles in gaming performance.",
+    "What is RAID and what are the common RAID levels used for?",
+    "Explain what a load balancer does in a web application setup.",
+
+    # --- English / writing / grammar ---
+    "Explain the difference between their, there, and they're with examples.",
+    "What is a run-on sentence and how can you fix it?",
+    "Explain subject-verb agreement in simple words.",
+    "When should I use a comma in English sentences?",
+    "Explain the difference between active voice and passive voice.",
+    "How can I make my writing clearer and easier to read?",
+    "What are some common grammar mistakes English learners make?",
+    "How can I improve my vocabulary effectively?",
+
+    # --- AI / machine learning ---
+    "Explain the difference between artificial intelligence, machine learning, and deep learning.",
+    "What is a neural network in simple terms?",
+    "What are large language models and how do they work at a high level?",
+    "What is overfitting in machine learning and how can it be reduced?",
+    "What are some ethical concerns around AI systems?",
+    "Explain supervised, unsupervised, and reinforcement learning in simple words.",
+    "What is a training dataset and why does its quality matter?",
+
+    # --- Warhammer 40k / lore ---
+    "Give an overview of the Imperium of Man in Warhammer 40k.",
+    "Explain who the Adeptus Mechanicus are and what they believe.",
+    "Who are the Space Marines in Warhammer 40k and what is their role?",
+    "Summarize the Horus Heresy in simple terms.",
+    "Explain the relationship between the Machine Spirit and technology in Warhammer 40k.",
+    "What is life like for an ordinary human citizen in the Imperium of Man?",
+
+    # --- Humor / interaction style ---
+    "Explain what makes a joke funny in simple psychological terms.",
+    "What is the difference between sarcasm and playful teasing?",
+    "How can someone be funny without being mean to other people?",
+    "What is self-deprecating humor and when is it useful?",
+    "Explain comedic timing in simple words.",
+]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _load_chatlog(path: str) -> List[Dict[str, Any]]:
     if not os.path.exists(path):
@@ -74,24 +140,16 @@ def _collect_existing_topic_keys(queue: List[Dict[str, Any]]) -> List[str]:
     return keys
 
 
-def evolution_pass() -> None:
+def _enqueue_chatlog_topics(
+    mgr: ResearchManager,
+    chatlog: List[Dict[str, Any]],
+    existing_topic_keys: List[str],
+) -> int:
     """
-    Run a single evolution cycle:
-
-    - Scan chatlog for entries that need research.
-    - Queue missing topics into research_queue.json.
-    - Run the research worker to process all pending tasks.
+    From the chatlog, enqueue topics where needs_research == True.
+    Returns how many were added.
     """
-    print("[evolve] Starting evolution pass...")
-
-    mgr = ResearchManager()
-    queue = mgr.get_queue()
-    chatlog = _load_chatlog(CHATLOG_PATH)
-
-    existing_topic_keys = _collect_existing_topic_keys(queue)
-
-    # Step 1: enqueue missing research topics from chatlog
-    added_topics = 0
+    added = 0
     for entry in chatlog:
         try:
             needs_research = bool(entry.get("needs_research"))
@@ -117,17 +175,77 @@ def evolution_pass() -> None:
                 channel=channel,
             )
             existing_topic_keys.append(norm_q)
-            added_topics += 1
+            added += 1
 
         except Exception as e:
             print(f"[evolve] Skipping one chatlog entry due to error: {e!r}")
 
-    if added_topics:
-        print(f"[evolve] Queued {added_topics} new research topic(s) from chatlog.")
+    return added
+
+
+def _enqueue_self_study_topics(
+    mgr: ResearchManager,
+    existing_topic_keys: List[str],
+) -> int:
+    """
+    Enqueue built-in self-study topics if they are not already in the queue.
+    Returns how many were added.
+    """
+    added = 0
+    for topic in SELF_STUDY_TOPICS:
+        norm_q = normalize_question(topic)
+        if not norm_q:
+            continue
+        if norm_q in existing_topic_keys:
+            continue
+
+        mgr.queue_topic(
+            user_text=topic,
+            reason="self_study",
+            channel="self",
+        )
+        existing_topic_keys.append(norm_q)
+        added += 1
+
+    return added
+
+
+# ---------------------------------------------------------------------------
+# Evolution pass
+# ---------------------------------------------------------------------------
+
+def evolution_pass() -> None:
+    """
+    Run a single evolution cycle:
+
+    - Scan chatlog for entries that need research.
+    - Add built-in self-study topics.
+    - Queue missing topics into research_queue.json.
+    - Run the research worker to process all pending tasks.
+    """
+    print("[evolve] Starting evolution pass...")
+
+    mgr = ResearchManager()
+    queue = mgr.get_queue()
+    chatlog = _load_chatlog(CHATLOG_PATH)
+
+    existing_topic_keys = _collect_existing_topic_keys(queue)
+
+    # Step 1: enqueue missing research topics from chatlog
+    added_from_chat = _enqueue_chatlog_topics(mgr, chatlog, existing_topic_keys)
+    if added_from_chat:
+        print(f"[evolve] Queued {added_from_chat} new research topic(s) from chatlog.")
     else:
         print("[evolve] No new research topics to queue from chatlog.")
 
-    # Step 2: run the research worker to process all pending tasks
+    # Step 2: enqueue built-in self-study topics
+    added_self = _enqueue_self_study_topics(mgr, existing_topic_keys)
+    if added_self:
+        print(f"[evolve] Queued {added_self} self-study topic(s).")
+    else:
+        print("[evolve] No new self-study topics to queue (all already queued).")
+
+    # Step 3: run the research worker to process all pending tasks
     print("[evolve] Running research worker...")
     run_research_worker()
     print("[evolve] Evolution pass complete.")

@@ -1,490 +1,414 @@
+#!/usr/bin/env python3
 import json
+import os
 import re
-import subprocess
-from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
-APP_ROOT = Path(__file__).resolve().parent
-DATA_DIR = APP_ROOT / "data"
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 
-RESEARCH_QUEUE_PATH = DATA_DIR / "research_queue.json"
-RESEARCH_NOTES_PATH = DATA_DIR / "research_notes.json"
+KNOWLEDGE_PATH = os.path.join(DATA_DIR, "local_knowledge.json")
+RESEARCH_QUEUE_PATH = os.path.join(DATA_DIR, "research_queue.json")
 
-# Taught knowledge (promoted "approved" answers)
-TAUGHT_PATH = DATA_DIR / "taught_knowledge.json"
+LOW_CONF_THRESHOLD = 0.60
+DEFAULT_UNKNOWN_CONFIDENCE = 0.30
 
-CONFIDENCE_DIRECT_ANSWER = 0.8
-CONFIDENCE_APPROVE_GAIN = 0.3
-CONFIDENCE_CORRECT_PENALTY = 0.4
-
-# Auto-promotion rules
-PROMOTE_MIN_CONFIDENCE = 0.8
-PROMOTE_MIN_APPROVALS = 2
-
-LAST_DRAFT_KEY = None
+# Decay settings
+DECAY_ENABLED = True
+DECAY_START_DAYS = 180            # after this many days without updates, start decaying
+DECAY_PER_30_DAYS = 0.03          # confidence drops by this amount per 30 days beyond DECAY_START_DAYS
 
 
-# --------------------
-# File helpers
-# --------------------
-def load_json(path, default):
-    if not path.exists():
-        return default
+def now_utc_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def safe_read_json(path: str, default: Any) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return default
+    except json.JSONDecodeError:
+        print(f"Warning: JSON file is broken: {path}")
+        print("Tip: Restore from backup or fix the JSON formatting.")
         return default
 
 
-def save_json(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+def safe_write_json(path: str, obj: Any) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
 
 
-def now_iso():
-    return datetime.utcnow().isoformat(timespec="seconds")
+def normalize_topic(text: str) -> str:
+    text = text.strip().lower()
+    text = re.sub(r"\s+", " ", text)
+    return text
 
 
-def normalize_key(text: str) -> str:
-    t = (text or "").lower().strip()
-    t = re.sub(r"[?!.]+$", "", t)
-    t = re.sub(r"\s+", " ", t)
-    return t
+def clamp_conf(x: float) -> float:
+    if x < 0.0:
+        return 0.0
+    if x > 1.0:
+        return 1.0
+    return x
 
 
-def normalize_confidence(value):
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        v = value.lower().strip()
-        if v == "low":
-            return 0.2
-        if v == "medium":
-            return 0.5
-        if v == "high":
-            return 0.8
-        try:
-            return float(v)
-        except Exception:
-            return 0.2
-    return 0.2
+def confidence_tone(conf: float) -> str:
+    # Keep it simple and honest
+    if conf >= 0.90:
+        return "I am very confident about this."
+    if conf >= 0.75:
+        return "I am fairly confident about this."
+    if conf >= 0.60:
+        return "I am somewhat confident, but it may be missing details."
+    if conf >= 0.40:
+        return "Low confidence. This is my current understanding and it may be incomplete."
+    return "Very low confidence. Treat this as a rough draft and correct me."
 
 
-# --------------------
-# Stores
-# --------------------
-def get_notes():
-    return load_json(RESEARCH_NOTES_PATH, {"drafts": {}})
+def apply_confidence_decay(entry: Dict[str, Any]) -> Dict[str, Any]:
+    if not DECAY_ENABLED:
+        return entry
+
+    last_updated = entry.get("last_updated")
+    if not last_updated:
+        return entry
+
+    try:
+        last_dt = datetime.strptime(last_updated, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except Exception:
+        return entry
+
+    days_old = (datetime.now(timezone.utc) - last_dt).days
+    if days_old <= DECAY_START_DAYS:
+        return entry
+
+    extra_days = days_old - DECAY_START_DAYS
+    steps = extra_days / 30.0
+    decay_amount = steps * DECAY_PER_30_DAYS
+
+    conf = float(entry.get("confidence", 0.0))
+    new_conf = clamp_conf(conf - decay_amount)
+    if new_conf != conf:
+        entry["confidence"] = new_conf
+        entry["decayed"] = True
+    return entry
 
 
-def save_notes(notes):
-    save_json(RESEARCH_NOTES_PATH, notes)
+def load_knowledge() -> Dict[str, Dict[str, Any]]:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    data = safe_read_json(KNOWLEDGE_PATH, {})
+    if not isinstance(data, dict):
+        data = {}
+
+    # Normalize keys and apply decay
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for k, v in data.items():
+        if not isinstance(v, dict):
+            continue
+        nk = normalize_topic(k)
+        v = apply_confidence_decay(v)
+        normalized[nk] = v
+
+    # Write back if keys changed (keeps file clean)
+    safe_write_json(KNOWLEDGE_PATH, normalized)
+    return normalized
 
 
-def get_taught():
-    return load_json(TAUGHT_PATH, {"topics": {}})
+def save_knowledge(knowledge: Dict[str, Dict[str, Any]]) -> None:
+    safe_write_json(KNOWLEDGE_PATH, knowledge)
 
 
-def save_taught(taught):
-    save_json(TAUGHT_PATH, taught)
+def load_queue() -> List[Dict[str, Any]]:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    q = safe_read_json(RESEARCH_QUEUE_PATH, [])
+    if not isinstance(q, list):
+        q = []
+    return q
 
 
-def find_draft_key_by_topic(notes, topic: str):
-    key_topic = normalize_key(topic)
-    drafts = notes.get("drafts", {})
-    if key_topic in drafts:
-        return key_topic
-    for k, d in drafts.items():
-        if normalize_key(d.get("topic", "")) == key_topic:
-            return k
-    return None
+def save_queue(queue: List[Dict[str, Any]]) -> None:
+    safe_write_json(RESEARCH_QUEUE_PATH, queue)
 
 
-def question_to_candidate_keys(question: str):
-    q = normalize_key(question)
-    keys = [q]
-
-    q2 = re.sub(r"^(what is|what are|define|explain|tell me about)\s+", "", q).strip()
-    if q2 and q2 != q:
-        keys.append(q2)
-
-    q3 = re.sub(r"^(a|an|the)\s+", "", q2).strip()
-    if q3 and q3 != q2:
-        keys.append(q3)
-
-    parts = q3.split()
-    if parts:
-        keys.append(parts[-1])
-
-    out = []
-    for k in keys:
-        if k and k not in out:
-            out.append(k)
-    return out
-
-
-# --------------------
-# Taught lookup (answers first)
-# --------------------
-def try_taught_answer(question: str) -> bool:
-    taught = get_taught().get("topics", {})
-    for key in question_to_candidate_keys(question):
-        if key in taught:
-            item = taught[key]
-            text = (item.get("detailed") or item.get("short") or "").strip()
-            if text:
-                print("Machine Spirit (answer): " + text)
-                return True
+def queue_contains(queue: List[Dict[str, Any]], topic: str) -> bool:
+    nt = normalize_topic(topic)
+    for item in queue:
+        if normalize_topic(str(item.get("topic", ""))) == nt and item.get("status") in ("pending", "in_progress"):
+            return True
     return False
 
 
-# --------------------
-# Draft selection
-# --------------------
-def choose_output_for_draft(draft):
-    conf = normalize_confidence(draft.get("confidence"))
-    detailed = (draft.get("detailed") or "").strip()
-    short = (draft.get("short") or "").strip()
-
-    if conf >= CONFIDENCE_DIRECT_ANSWER and detailed:
-        return "answer", detailed
-    return "draft", (detailed or short)
-
-
-def show_draft_by_key(notes, key):
-    global LAST_DRAFT_KEY
-    drafts = notes.get("drafts", {})
-    if key not in drafts:
+def enqueue_research(queue: List[Dict[str, Any]], topic: str, reason: str, confidence: float) -> bool:
+    if queue_contains(queue, topic):
         return False
 
-    draft = drafts[key]
-    label, text = choose_output_for_draft(draft)
-    LAST_DRAFT_KEY = key
-
-    print("Machine Spirit (" + label + "): " + (text or "[empty]"))
-
-    if label != "answer":
-        print("Machine Spirit: If you like this, approve it with:")
-        print("  approve: " + str(draft.get("topic", "")))
-        print("Or view/edit it with:")
-        print("  draft: " + str(draft.get("topic", "")))
+    queue.append({
+        "topic": normalize_topic(topic),
+        "reason": reason,
+        "requested_on": now_utc_iso(),
+        "status": "pending",
+        "current_confidence": round(float(confidence), 4),
+    })
     return True
 
 
-def show_best_for_question(question: str):
-    notes = get_notes()
-    drafts = notes.get("drafts", {})
-    if not drafts:
-        return False
-
-    is_comparison_question = any(
-        w in question.lower() for w in [" vs ", "versus", "difference", "compare"]
-    )
-
-    for k in question_to_candidate_keys(question):
-        if k in drafts:
-            d = drafts[k]
-            if d.get("type") == "comparison" and not is_comparison_question:
-                continue
-            return show_draft_by_key(notes, k)
-
-    core = question_to_candidate_keys(question)[-1]
-    matches = []
-    for k, d in drafts.items():
-        if d.get("type") == "comparison" and not is_comparison_question:
-            continue
-        topic = (d.get("topic") or "").lower()
-        if core and core in topic:
-            matches.append((k, d))
-
-    if not matches:
-        return False
-
-    if len(matches) == 1:
-        return show_draft_by_key(notes, matches[0][0])
-
-    print("Machine Spirit: Multiple drafts might match. Pick one:")
-    for i, (k, d) in enumerate(matches, 1):
-        print("  " + str(i) + ") " + str(d.get("topic")))
-    print("Use: draft: <topic> or approve: <topic>")
-    return True
+def format_answer(answer: str, conf: float) -> str:
+    tone = confidence_tone(conf)
+    return f"{answer}\n\n{tone} (confidence: {conf:.2f})"
 
 
-# --------------------
-# Research
-# --------------------
-def queue_research(topic):
-    queue = load_json(RESEARCH_QUEUE_PATH, {"queue": []})
-    queue["queue"].append({"topic": topic, "queued_at": now_iso()})
-    save_json(RESEARCH_QUEUE_PATH, queue)
-
-    subprocess.run(["python3", "research_worker.py"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def get_entry(knowledge: Dict[str, Dict[str, Any]], topic: str) -> Optional[Dict[str, Any]]:
+    return knowledge.get(normalize_topic(topic))
 
 
-# --------------------
-# Promotion
-# --------------------
-def promote_if_ready(draft):
-    topic = draft.get("topic", "")
-    key = normalize_key(topic)
-    conf = normalize_confidence(draft.get("confidence"))
-    approvals = int(draft.get("approvals", 0))
-
-    if conf < PROMOTE_MIN_CONFIDENCE:
-        return False
-    if approvals < PROMOTE_MIN_APPROVALS:
-        return False
-
-    detailed = (draft.get("detailed") or "").strip()
-    short = (draft.get("short") or "").strip()
-    if not (detailed or short):
-        return False
-
-    taught = get_taught()
-    taught_topics = taught.get("topics", {})
-
-    taught_topics[key] = {
-        "topic": topic,
-        "short": short,
-        "detailed": detailed,
-        "promoted_at": now_iso(),
-        "from": "drafts",
-        "confidence_at_promotion": conf,
-        "approvals_at_promotion": approvals,
+def set_entry(
+    knowledge: Dict[str, Dict[str, Any]],
+    topic: str,
+    answer: str,
+    confidence: float,
+    source: str,
+    notes: str = ""
+) -> None:
+    nt = normalize_topic(topic)
+    knowledge[nt] = {
+        "answer": answer.strip(),
+        "confidence": clamp_conf(float(confidence)),
+        "source": source,
+        "last_updated": now_utc_iso(),
+        "notes": notes.strip()
     }
 
-    taught["topics"] = taught_topics
-    save_taught(taught)
-    print("Machine Spirit: Auto-promoted to taught knowledge: " + topic)
-    return True
+
+def bump_confidence(old_conf: float, bump: float) -> float:
+    return clamp_conf(old_conf + bump)
 
 
-# --------------------
-# Commands
-# --------------------
-def cmd_reject(topic):
-    notes = get_notes()
-    k = find_draft_key_by_topic(notes, topic)
-    if not k:
-        print("Machine Spirit: No draft found for that topic.")
-        return
-    del notes["drafts"][k]
-    save_notes(notes)
-    print("Machine Spirit: Draft rejected (deleted).")
+HELP_TEXT = """
+Commands you can use:
+
+/help
+/show <topic>
+/list                (shows top topics by confidence)
+/teach <topic> | <answer>
+/rate <topic> | <0.0-1.0>
+/forget <topic>
+/queue               (shows pending research topics)
+/exit
+
+Normal usage:
+Just ask a question like usual. If the answer is missing or low confidence,
+the topic will be added to research_queue.json automatically.
+""".strip()
 
 
-def cmd_set_text(topic, field, text):
-    notes = get_notes()
-    drafts = notes.get("drafts", {})
+def parse_pipe_command(line: str) -> Tuple[str, Optional[str], Optional[str]]:
+    # returns (cmd, left, right)
+    # Example: "/teach osi model | <answer>"
+    parts = line.strip().split(" ", 1)
+    cmd = parts[0].lower()
+    rest = parts[1].strip() if len(parts) > 1 else ""
 
-    k = find_draft_key_by_topic(notes, topic)
-    if not k:
-        k = normalize_key(topic)
-        drafts[k] = {
-            "topic": topic,
-            "type": "object",
-            "short": "",
-            "detailed": "",
-            "confidence": 0.2,
-            "approvals": 0,
-            "created_at": now_iso(),
-            "source": "manual_override",
-        }
-
-    draft = drafts[k]
-    draft[field] = text.strip()
-    draft["confidence"] = max(normalize_confidence(draft.get("confidence")), 0.6)
-    draft["source"] = "manual_override"
-    drafts[k] = draft
-    notes["drafts"] = drafts
-    save_notes(notes)
-
-    print("Machine Spirit: Saved " + field + " for " + topic + ".")
+    if "|" in rest:
+        left, right = rest.split("|", 1)
+        return cmd, left.strip(), right.strip()
+    return cmd, rest.strip() if rest else None, None
 
 
-def cmd_approve(topic):
-    notes = get_notes()
-    k = find_draft_key_by_topic(notes, topic)
+def show_queue(queue: List[Dict[str, Any]]) -> str:
+    pending = [x for x in queue if x.get("status") in ("pending", "in_progress")]
+    if not pending:
+        return "Research queue is clear."
 
-    global LAST_DRAFT_KEY
-    if not k:
-        if LAST_DRAFT_KEY and LAST_DRAFT_KEY in notes.get("drafts", {}):
-            k = LAST_DRAFT_KEY
-        else:
-            print("Machine Spirit: No draft found to approve.")
-            return
-
-    d = notes["drafts"][k]
-    conf = normalize_confidence(d.get("confidence"))
-    d["confidence"] = max(0.0, min(1.0, conf + CONFIDENCE_APPROVE_GAIN))
-    d["approvals"] = int(d.get("approvals", 0)) + 1
-    d["approved_at"] = now_iso()
-    notes["drafts"][k] = d
-    save_notes(notes)
-
-    print("Machine Spirit: Approved and confidence increased.")
-    promote_if_ready(d)
+    lines = ["Pending research topics:"]
+    for i, item in enumerate(pending, 1):
+        t = item.get("topic", "")
+        r = item.get("reason", "")
+        c = item.get("current_confidence", "")
+        lines.append(f"{i}. {t} (confidence: {c}) reason: {r}")
+    return "\n".join(lines)
 
 
-def cmd_correct():
-    global LAST_DRAFT_KEY
-    notes = get_notes()
-    if not LAST_DRAFT_KEY or LAST_DRAFT_KEY not in notes.get("drafts", {}):
-        print("Machine Spirit: No recent draft to correct.")
-        return
-    d = notes["drafts"][LAST_DRAFT_KEY]
-    conf = normalize_confidence(d.get("confidence"))
-    d["confidence"] = max(0.0, min(1.0, conf - CONFIDENCE_CORRECT_PENALTY))
-    d["corrected_at"] = now_iso()
-    notes["drafts"][LAST_DRAFT_KEY] = d
-    save_notes(notes)
-    print("Machine Spirit: Correction noted. Confidence reduced.")
+def list_topics(knowledge: Dict[str, Dict[str, Any]]) -> str:
+    if not knowledge:
+        return "No taught topics yet."
+    items = []
+    for topic, entry in knowledge.items():
+        conf = float(entry.get("confidence", 0.0))
+        items.append((conf, topic))
+    items.sort(reverse=True)
+
+    lines = ["Top topics by confidence:"]
+    for conf, topic in items[:25]:
+        lines.append(f"- {topic} ({conf:.2f})")
+    return "\n".join(lines)
 
 
-def cmd_drafts():
-    notes = get_notes()
-    drafts = notes.get("drafts", {})
-    if not drafts:
-        print("Machine Spirit: No drafts saved.")
-        return
-    print("Machine Spirit: Draft topics:")
-    for d in drafts.values():
-        print("- " + str(d.get("topic")))
+def main() -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
 
+    knowledge = load_knowledge()
+    queue = load_queue()
 
-def cmd_draft(topic):
-    notes = get_notes()
-    k = find_draft_key_by_topic(notes, topic)
-    if not k:
-        print("Machine Spirit: No draft found for that topic.")
-        return
-    d = notes["drafts"][k]
-    print("Topic: " + str(d.get("topic")))
-    print("Type: " + str(d.get("type")))
-    print("Confidence: " + str(normalize_confidence(d.get("confidence"))))
-    print("Approvals: " + str(int(d.get("approvals", 0))))
-    print("")
-    print("Short:")
-    print(str(d.get("short", "")))
-    print("")
-    print("Detailed:")
-    print(str(d.get("detailed", "")))
-
-
-def cmd_taught():
-    taught = get_taught().get("topics", {})
-    if not taught:
-        print("Machine Spirit: No taught topics yet.")
-        return
-    print("Machine Spirit: Taught topics:")
-    for t in taught.values():
-        print("- " + str(t.get("topic")))
-
-
-def cmd_unteach(topic):
-    taught = get_taught()
-    topics = taught.get("topics", {})
-    k = normalize_key(topic)
-    if k in topics:
-        del topics[k]
-        taught["topics"] = topics
-        save_taught(taught)
-        print("Machine Spirit: Removed from taught knowledge: " + topic)
-    else:
-        print("Machine Spirit: Not found in taught knowledge.")
-
-
-# --------------------
-# Main loop
-# --------------------
-def main():
-    print("Machine Spirit brain online. Type a message, Ctrl+C to exit.")
-    print("Safe autonomous: instant research is ON.")
-    print("Commands:")
-    print("  taught")
-    print("  unteach: <topic>")
-    print("  drafts")
-    print("  draft: <topic>")
-    print("  reject: <topic>")
-    print("  setshort: <topic> = <text>")
-    print("  setdetail: <topic> = <text>")
-    print("  approve: <topic>")
-    print("  correct:")
-    print("")
+    print("Machine Spirit brain online. Type /help for commands. Ctrl+C to exit.")
 
     while True:
         try:
-            msg = input("> ").strip()
+            user = input("> ").strip()
         except KeyboardInterrupt:
             print("\nShutting down.")
             break
 
-        if not msg:
+        if not user:
             continue
 
-        low = msg.lower().strip()
+        # Commands
+        if user.startswith("/"):
+            cmd, left, right = parse_pipe_command(user)
 
-        if low == "taught":
-            cmd_taught()
-            continue
-
-        if low.startswith("unteach:"):
-            cmd_unteach(msg.split(":", 1)[1].strip())
-            continue
-
-        if low == "drafts":
-            cmd_drafts()
-            continue
-
-        if low.startswith("draft:"):
-            cmd_draft(msg.split(":", 1)[1].strip())
-            continue
-
-        if low.startswith("reject:"):
-            cmd_reject(msg.split(":", 1)[1].strip())
-            continue
-
-        if low.startswith("approve:"):
-            cmd_approve(msg.split(":", 1)[1].strip())
-            continue
-
-        if low.startswith("correct:"):
-            cmd_correct()
-            continue
-
-        if low.startswith("setshort:"):
-            rest = msg.split(":", 1)[1].strip()
-            if "=" not in rest:
-                print("Machine Spirit: Use setshort: <topic> = <text>")
+            if cmd in ("/help",):
+                print(HELP_TEXT)
                 continue
-            topic, text = rest.split("=", 1)
-            cmd_set_text(topic.strip(), "short", text.strip())
-            continue
 
-        if low.startswith("setdetail:"):
-            rest = msg.split(":", 1)[1].strip()
-            if "=" not in rest:
-                print("Machine Spirit: Use setdetail: <topic> = <text>")
+            if cmd in ("/exit",):
+                print("Shutting down.")
+                break
+
+            if cmd == "/show":
+                if not left:
+                    print("Usage: /show <topic>")
+                    continue
+                entry = get_entry(knowledge, left)
+                if not entry:
+                    print("No entry for that topic yet.")
+                    continue
+                print(json.dumps({normalize_topic(left): entry}, indent=2, ensure_ascii=False))
                 continue
-            topic, text = rest.split("=", 1)
-            cmd_set_text(topic.strip(), "detailed", text.strip())
+
+            if cmd == "/list":
+                print(list_topics(knowledge))
+                continue
+
+            if cmd == "/queue":
+                print(show_queue(queue))
+                continue
+
+            if cmd == "/forget":
+                if not left:
+                    print("Usage: /forget <topic>")
+                    continue
+                nt = normalize_topic(left)
+                if nt in knowledge:
+                    del knowledge[nt]
+                    save_knowledge(knowledge)
+                    print(f"Deleted topic: {nt}")
+                else:
+                    print("Topic not found.")
+                continue
+
+            if cmd == "/rate":
+                if not left or right is None:
+                    print("Usage: /rate <topic> | <0.0-1.0>")
+                    continue
+                try:
+                    val = float(right)
+                except ValueError:
+                    print("Rating must be a number like 0.75")
+                    continue
+
+                entry = get_entry(knowledge, left)
+                if not entry:
+                    print("No entry yet for that topic. Teach it first.")
+                    continue
+
+                entry["confidence"] = clamp_conf(val)
+                entry["last_updated"] = now_utc_iso()
+                entry["source"] = entry.get("source", "user_taught")
+                knowledge[normalize_topic(left)] = entry
+                save_knowledge(knowledge)
+                print(f"Updated confidence for '{normalize_topic(left)}' to {entry['confidence']:.2f}")
+                continue
+
+            if cmd == "/teach":
+                if not left or right is None:
+                    print("Usage: /teach <topic> | <answer>")
+                    continue
+
+                # If already exists, we treat it as an improvement
+                existing = get_entry(knowledge, left)
+                if existing:
+                    old_conf = float(existing.get("confidence", 0.0))
+                    # If user is re-teaching, bump slightly
+                    new_conf = bump_confidence(old_conf, 0.05)
+                    set_entry(
+                        knowledge,
+                        left,
+                        right,
+                        new_conf,
+                        source="user_taught",
+                        notes="Updated by user re-teach"
+                    )
+                    save_knowledge(knowledge)
+                    print(f"Updated taught answer for '{normalize_topic(left)}' (confidence now {new_conf:.2f})")
+                else:
+                    set_entry(
+                        knowledge,
+                        left,
+                        right,
+                        0.75,
+                        source="user_taught",
+                        notes="Initial user taught answer"
+                    )
+                    save_knowledge(knowledge)
+                    print(f"Saved taught answer for '{normalize_topic(left)}' (confidence 0.75)")
+                continue
+
+            print("Unknown command. Type /help")
             continue
 
-        # 1) Answer from taught knowledge first
-        if try_taught_answer(msg):
+        # Normal question flow
+        topic = normalize_topic(user)
+        entry = get_entry(knowledge, topic)
+
+        if entry:
+            answer = str(entry.get("answer", "")).strip()
+            conf = float(entry.get("confidence", 0.0))
+            print(format_answer(answer, conf))
+
+            # Auto queue research if confidence is low
+            if conf < LOW_CONF_THRESHOLD:
+                added = enqueue_research(
+                    queue,
+                    topic,
+                    reason="Answer exists but confidence is low",
+                    confidence=conf
+                )
+                if added:
+                    save_queue(queue)
             continue
 
-        # 2) Otherwise, show drafts
-        if show_best_for_question(msg):
-            continue
+        # Unknown topic
+        unknown_text = (
+            "I do not have a taught answer for that yet.\n"
+            "If you want to teach me, use:\n"
+            "/teach <topic> | <your answer>\n"
+            "If I should research it later, I will queue it."
+        )
+        conf = DEFAULT_UNKNOWN_CONFIDENCE
+        print(format_answer(unknown_text, conf))
 
-        # 3) Otherwise research
-        print("Machine Spirit: I do not know this yet. Researching now...")
-        queue_research(msg)
-
-        # 4) Try drafts again
-        if not show_best_for_question(msg):
-            print("Machine Spirit: Research finished but no draft matched yet. Try: drafts")
+        added = enqueue_research(
+            queue,
+            topic,
+            reason="No taught answer yet",
+            confidence=conf
+        )
+        if added:
+            save_queue(queue)
 
 
 if __name__ == "__main__":

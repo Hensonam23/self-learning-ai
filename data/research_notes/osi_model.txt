@@ -1,0 +1,9 @@
+The OSI (Open Systems Interconnection) Model is a conceptual framework that standardizes network communication into seven distinct layers, each with specific functions, allowing different systems to communicate seamlessly, acting as a universal language for data exchange, and making troubleshooting easier by isolating problems to a specific layer. Created by ISO, it details the journey of data from user applications down through physical hardware and back up, even though the modern internet uses the simpler TCP/IP model, it remains crucial for understanding networking principles. 
+The Seven Layers of the OSI Model (Top to Bottom)
+Application Layer (Layer 7): User-facing, provides network services to applications (e.g., web browsers, email clients).
+Presentation Layer (Layer 6): Data formatting, encryption, and compression (e.g., converting data to a standard format like ASCII).
+Session Layer (Layer 5): Manages communication sessions between applications, establishing, coordinating, and terminating connections.
+Transport Layer (Layer 4): Ensures reliable end-to-end data delivery, segmentation, and flow control (e.g., TCP, UDP).
+Network Layer (Layer 3): Handles logical addressing (IP addresses) and routing packets between different networks.
+Data Link Layer (Layer 2): Manages error-free transfer of data frames across a physical link, using physical addresses (MAC addresses).
+Physical Layer (Layer 1): Defines physical connections, cables, and electrical signals for transmitting raw bits over media. 

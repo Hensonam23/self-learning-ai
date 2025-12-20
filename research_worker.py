@@ -1,204 +1,212 @@
-from __future__ import annotations
-
+#!/usr/bin/env python3
 import json
+import os
 import re
-import sys
-from pathlib import Path
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
-APP_ROOT = Path(__file__).resolve().parent
-QUEUE_PATH = APP_ROOT / "data" / "research_queue.json"
-NOTES_PATH = APP_ROOT / "data" / "research_notes.json"
-BASE_PATH = APP_ROOT / "data" / "knowledge" / "base_knowledge.json"
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 
+KNOWLEDGE_PATH = os.path.join(DATA_DIR, "local_knowledge.json")
+RESEARCH_QUEUE_PATH = os.path.join(DATA_DIR, "research_queue.json")
+RESEARCH_NOTES_DIR = os.path.join(DATA_DIR, "research_notes")
 
-# --------------------
-# Helpers
-# --------------------
-def now():
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+MIN_NOTE_CHARS = 300
 
 
-def load(path, default):
-    if not path.exists():
-        return default
+def now_utc_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def safe_read_json(path: str, default: Any) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return default
+    except json.JSONDecodeError:
+        print(f"Warning: JSON file is broken: {path}")
         return default
 
 
-def save(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+def safe_write_json(path: str, obj: Any) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
 
 
-def normalize(text):
-    t = text.lower().strip()
-    t = re.sub(r"[?!.]+$", "", t)
-    return t
+def normalize_topic(text: str) -> str:
+    text = text.strip().lower()
+    text = re.sub(r"\s+", " ", text)
+    return text
 
 
-# --------------------
-# Weak draft detection
-# --------------------
-def is_weak(text: str) -> bool:
-    t = (text or "").lower()
-    if len(t) < 40:
-        return True
-    weak_markers = [
-        "write a clean",
-        "main point",
-        "basic draft",
-        "might be rough",
-        "(one sentence)",
-        "( )",
-    ]
-    return any(m in t for m in weak_markers)
+def clamp_conf(x: float) -> float:
+    if x < 0.0:
+        return 0.0
+    if x > 1.0:
+        return 1.0
+    return x
 
 
-def draft_is_weak(draft: dict) -> bool:
-    if not isinstance(draft, dict):
-        return True
-    short = draft.get("short", "")
-    detailed = draft.get("detailed", "")
-    return is_weak(short) or is_weak(detailed)
+def load_knowledge() -> Dict[str, Dict[str, Any]]:
+    data = safe_read_json(KNOWLEDGE_PATH, {})
+    if not isinstance(data, dict):
+        data = {}
+    # normalize keys
+    normalized = {}
+    for k, v in data.items():
+        if isinstance(v, dict):
+            normalized[normalize_topic(k)] = v
+    return normalized
 
 
-# --------------------
-# Concept classification
-# --------------------
-def classify(topic: str) -> str:
-    t = topic.lower()
-    if " vs " in t or "difference between" in t:
-        return "comparison"
-    if any(k in t for k in ["protocol", "icmp", "tcp", "udp", "arp", "http"]):
-        return "protocol"
-    if any(k in t for k in ["process", "authentication", "boot", "transmission"]):
-        return "process"
-    if any(k in t for k in ["os", "system", "application", "software", "database"]):
-        return "software"
-    return "object"
+def save_knowledge(knowledge: Dict[str, Dict[str, Any]]) -> None:
+    safe_write_json(KNOWLEDGE_PATH, knowledge)
 
 
-# --------------------
-# Learn style from taught knowledge
-# --------------------
-def load_style():
-    base = load(BASE_PATH, {"items": {}})
-    items = base.get("items", {})
-    lengths = []
-
-    for v in items.values():
-        ans = v.get("answer", "")
-        for s in re.split(r"[.!?]", ans):
-            words = s.strip().split()
-            if 5 <= len(words) <= 25:
-                lengths.append(len(words))
-
-    avg = int(sum(lengths) / len(lengths)) if lengths else 14
-    return max(10, min(avg, 20))
+def load_queue() -> List[Dict[str, Any]]:
+    q = safe_read_json(RESEARCH_QUEUE_PATH, [])
+    if not isinstance(q, list):
+        q = []
+    return q
 
 
-# --------------------
-# Synthesis engine
-# --------------------
-def synthesize(topic: str, kind: str, max_words: int):
-    name = topic.strip()
+def save_queue(queue: List[Dict[str, Any]]) -> None:
+    safe_write_json(RESEARCH_QUEUE_PATH, queue)
 
-    short = f"{name} is a {kind} related to computing or networking."
 
-    if kind == "object":
-        detailed = (
-            f"{name} is an object used in computing systems.\n\n"
-            f"It is designed to perform a specific role and is made up of components that work together.\n"
-            f"In real systems, {name.lower()} helps process data, communicate, or store information."
-        )
-    elif kind == "software":
-        detailed = (
-            f"{name} is software used in computer systems.\n\n"
-            f"It controls hardware or allows users to perform tasks.\n"
-            f"Most systems rely on {name.lower()} to function correctly."
-        )
-    elif kind == "process":
-        detailed = (
-            f"{name} is a process that occurs in computer systems.\n\n"
-            f"It involves a series of steps that allow systems or users to complete an action.\n"
-            f"This process is important for normal operation or security."
-        )
-    elif kind == "protocol":
-        detailed = (
-            f"{name} is a networking protocol.\n\n"
-            f"It defines rules for communication between devices.\n"
-            f"Protocols like {name.lower()} ensure data is sent and understood correctly."
-        )
+def topic_to_filename(topic: str) -> str:
+    # safe filename
+    t = normalize_topic(topic)
+    t = re.sub(r"[^a-z0-9 _-]", "", t)
+    t = t.replace(" ", "_")
+    return t + ".txt"
+
+
+def summarize_note(note: str, topic: str) -> str:
+    # Simple offline summarizer
+    # It picks key sentences and trims it into a clean explanation.
+    cleaned = re.sub(r"\s+", " ", note).strip()
+    sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+
+    # prioritize sentences that contain the topic words
+    words = [w for w in re.split(r"\W+", normalize_topic(topic)) if w]
+    scored = []
+    for s in sentences:
+        ls = s.lower()
+        score = 0
+        for w in words:
+            if w in ls:
+                score += 2
+        # prefer medium length
+        if 60 <= len(s) <= 220:
+            score += 1
+        scored.append((score, s))
+
+    scored.sort(reverse=True)
+    picked = [s for score, s in scored[:6] if score > 0] or sentences[:4]
+    picked = [p.strip() for p in picked if p.strip()]
+
+    # ensure not crazy long
+    summary = " ".join(picked)
+    if len(summary) > 1200:
+        summary = summary[:1200].rsplit(" ", 1)[0] + "..."
+    return summary
+
+
+def update_knowledge_from_research(knowledge: Dict[str, Dict[str, Any]], topic: str, summary: str) -> None:
+    nt = normalize_topic(topic)
+    existing = knowledge.get(nt)
+
+    if existing:
+        old_conf = float(existing.get("confidence", 0.0))
+        # Research boosts confidence, but not instantly perfect
+        new_conf = clamp_conf(max(old_conf, 0.65) + 0.10)
+        existing["answer"] = summary.strip()
+        existing["confidence"] = new_conf
+        existing["source"] = "research_note"
+        existing["last_updated"] = now_utc_iso()
+        existing["notes"] = "Updated by research_worker from local research note"
+        knowledge[nt] = existing
     else:
-        detailed = (
-            f"{name} compares two related technologies.\n\n"
-            f"It explains how each one works and when one is preferred over the other."
-        )
-
-    def trim(text):
-        out = []
-        for line in text.splitlines():
-            words = line.split()
-            if len(words) > max_words:
-                out.append(" ".join(words[:max_words]) + ".")
-            else:
-                out.append(line)
-        return "\n".join(out)
-
-    return trim(short), trim(detailed)
-
-
-# --------------------
-# Main worker
-# --------------------
-def main():
-    queue = load(QUEUE_PATH, {"queue": []})
-    notes = load(NOTES_PATH, {"drafts": {}})
-    style_words = load_style()
-
-    tasks = queue.get("queue", [])
-    if not tasks:
-        print("No pending research tasks.")
-        return
-
-    limit = int(sys.argv[1]) if len(sys.argv) > 1 else 1
-    wrote = 0
-
-    while tasks and wrote < limit:
-        item = tasks.pop(0)
-        topic = item.get("topic", "")
-        key = normalize(topic)
-
-        existing = notes["drafts"].get(key)
-        if existing and not draft_is_weak(existing):
-            # Keep good drafts
-            continue
-
-        kind = classify(topic)
-        short, detailed = synthesize(topic, kind, style_words)
-
-        notes["drafts"][key] = {
-            "topic": topic,
-            "key": key,
-            "type": kind,
-            "short": short,
-            "detailed": detailed,
-            "confidence": "low",
-            "created_at": now(),
-            "source": "synthesized_auto_regen_v2",
+        knowledge[nt] = {
+            "answer": summary.strip(),
+            "confidence": 0.70,
+            "source": "research_note",
+            "last_updated": now_utc_iso(),
+            "notes": "Created by research_worker from local research note",
         }
 
-        print(f"Generated draft: {topic}")
-        wrote += 1
 
-    queue["queue"] = tasks
-    save(QUEUE_PATH, queue)
-    save(NOTES_PATH, notes)
+def main() -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(RESEARCH_NOTES_DIR, exist_ok=True)
 
-    print(f"Done. Generated {wrote} draft(s).")
+    knowledge = load_knowledge()
+    queue = load_queue()
+
+    pending = [x for x in queue if x.get("status") in ("pending", "in_progress")]
+    if not pending:
+        print("No pending research tasks. Queue is clear.")
+        return
+
+    updated_any = False
+
+    for item in queue:
+        if item.get("status") not in ("pending", "in_progress"):
+            continue
+
+        topic = str(item.get("topic", "")).strip()
+        if not topic:
+            item["status"] = "skipped"
+            continue
+
+        note_file = os.path.join(RESEARCH_NOTES_DIR, topic_to_filename(topic))
+
+        if not os.path.exists(note_file):
+            item["status"] = "pending"
+            item["worker_note"] = f"Missing research note file: {note_file}"
+            continue
+
+        with open(note_file, "r", encoding="utf-8") as f:
+            note = f.read()
+
+        if len(note.strip()) < MIN_NOTE_CHARS:
+            item["status"] = "pending"
+            item["worker_note"] = f"Research note too short ({len(note.strip())} chars). Add more detail."
+            continue
+
+        item["status"] = "in_progress"
+        summary = summarize_note(note, topic)
+        update_knowledge_from_research(knowledge, topic, summary)
+
+        item["status"] = "done"
+        item["completed_on"] = now_utc_iso()
+        item["worker_note"] = "Upgraded knowledge using local research note"
+        updated_any = True
+        updated_any = True
+
+    save_queue(queue)
+    if updated_any:
+        save_knowledge(knowledge)
+
+    # Print results
+    still_pending = [x for x in queue if x.get("status") in ("pending", "in_progress")]
+    done = [x for x in queue if x.get("status") == "done"]
+
+    print(f"Completed: {len(done)}")
+    print(f"Still pending: {len(still_pending)}")
+
+    if still_pending:
+        print("\nTo complete pending topics, add a note file for each topic in:")
+        print(f"  {RESEARCH_NOTES_DIR}")
+        print("File name example:")
+        print("  osi_model.txt")
+        print("\nThen run:")
+        print("  python3 research_worker.py")
 
 
 if __name__ == "__main__":
