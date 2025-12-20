@@ -19,6 +19,8 @@ ALIASES_PATH = os.path.join(DATA_DIR, "topic_aliases.json")
 RESEARCH_QUEUE_PATH = os.path.join(DATA_DIR, "research_queue.json")
 RESEARCH_NOTES_DIR = os.path.join(DATA_DIR, "research_notes")
 
+AUTO_INGEST_STATE_PATH = os.path.join(DATA_DIR, "auto_ingest_state.json")
+
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(BACKUP_DIR, exist_ok=True)
 os.makedirs(RESEARCH_NOTES_DIR, exist_ok=True)
@@ -34,14 +36,13 @@ CONF_MIN = 0.10
 CONF_MAX = 0.95
 CONF_LOW_THRESHOLD = 0.50
 
-# For manual promote command
 CONF_PROMOTE_DEFAULT = 0.10
 
-# teachfile + ingest marker
 IMPROVED_MARKER = "My improved answer (paste below):"
-
-# ingest tuning
 CONF_INGEST_BOOST = 0.20
+
+# Auto ingest frequency (daily)
+AUTO_INGEST_DAYS = 1
 
 # =========================
 # Backup system (timer-based)
@@ -60,7 +61,8 @@ def backup_files_if_needed():
     files_to_backup = [
         KNOWLEDGE_PATH,
         ALIASES_PATH,
-        RESEARCH_QUEUE_PATH
+        RESEARCH_QUEUE_PATH,
+        AUTO_INGEST_STATE_PATH
     ]
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -104,16 +106,6 @@ def parse_iso_dt(s: str):
         return datetime.fromisoformat(s)
     except Exception:
         return None
-
-def safe_slug(topic: str) -> str:
-    t = normalize_topic(topic)
-    out = []
-    for ch in t:
-        out.append(ch if ch.isalnum() else "_")
-    slug = "".join(out)
-    while "__" in slug:
-        slug = slug.replace("__", "_")
-    return slug.strip("_") or "topic"
 
 def read_text_file(filepath: str) -> str:
     if not filepath:
@@ -295,11 +287,7 @@ def pending_queue(queue: list) -> list:
 # Ingest research notes
 # =========================
 
-def ingest_notes_into_knowledge(knowledge: dict, queue: list) -> tuple[dict, list, dict]:
-    """
-    Returns: (knowledge, queue, report)
-    report = { "ingested": int, "skipped": int, "errors": int, "details": [str] }
-    """
+def ingest_notes_into_knowledge(knowledge: dict, queue: list):
     report = {"ingested": 0, "skipped": 0, "errors": 0, "details": []}
 
     try:
@@ -314,7 +302,6 @@ def ingest_notes_into_knowledge(knowledge: dict, queue: list) -> tuple[dict, lis
         report["details"].append("No .txt files found in data/research_notes/")
         return knowledge, queue, report
 
-    # For quick queue matching
     queue_topics = {}
     for item in queue:
         t = normalize_topic(str(item.get("topic", "")))
@@ -349,7 +336,6 @@ def ingest_notes_into_knowledge(knowledge: dict, queue: list) -> tuple[dict, lis
             report["details"].append(f"SKIP: {fname} (improved answer empty)")
             continue
 
-        # Write into knowledge (canonical key is normalized topic)
         tkey = normalize_topic(topic)
 
         entry = knowledge.get(tkey, {})
@@ -360,16 +346,13 @@ def ingest_notes_into_knowledge(knowledge: dict, queue: list) -> tuple[dict, lis
         entry["answer"] = improved.strip()
         entry["last_updated"] = now_iso()
         entry["last_used"] = now_iso()
-
-        # Boost confidence
         entry = promote_confidence(entry, CONF_INGEST_BOOST)
 
         old_notes = str(entry.get("notes", "")).strip()
-        entry["notes"] = (old_notes + " | Ingested from research notes").strip(" |")
+        entry["notes"] = (old_notes + " | Auto-ingested from research notes").strip(" |")
 
         knowledge[tkey] = entry
 
-        # Mark queue item done if it exists
         if tkey in queue_topics:
             q = queue_topics[tkey]
             q["status"] = "done"
@@ -380,6 +363,34 @@ def ingest_notes_into_knowledge(knowledge: dict, queue: list) -> tuple[dict, lis
         report["details"].append(f"INGEST: {tkey} (from {fname})")
 
     return knowledge, queue, report
+
+# =========================
+# Auto ingest state
+# =========================
+
+def load_auto_ingest_state() -> dict:
+    state = load_json_dict(AUTO_INGEST_STATE_PATH)
+    if "last_ingest_date" not in state:
+        state["last_ingest_date"] = ""
+    return state
+
+def save_auto_ingest_state(state: dict) -> None:
+    save_json_dict(AUTO_INGEST_STATE_PATH, state)
+
+def should_auto_ingest(state: dict) -> bool:
+    last = str(state.get("last_ingest_date", "")).strip()
+    if not last:
+        return True
+    try:
+        last_d = datetime.fromisoformat(last).date()
+    except Exception:
+        return True
+    delta = (date.today() - last_d).days
+    return delta >= AUTO_INGEST_DAYS
+
+def mark_auto_ingest(state: dict) -> dict:
+    state["last_ingest_date"] = datetime.now().date().isoformat()
+    return state
 
 # =========================
 # Commands
@@ -410,18 +421,25 @@ def main():
     knowledge = load_knowledge()
     aliases = load_aliases()
     research_queue = load_research_queue()
+    ingest_state = load_auto_ingest_state()
 
     try:
         while True:
             backup_files_if_needed()
 
+            # Daily auto ingest (silent unless it ingests something)
+            if should_auto_ingest(ingest_state):
+                knowledge, research_queue, report = ingest_notes_into_knowledge(knowledge, research_queue)
+                if report.get("ingested", 0) > 0:
+                    save_knowledge(knowledge)
+                    save_research_queue(research_queue)
+                    print(f"[auto-ingest] ingested={report['ingested']} skipped={report['skipped']} errors={report['errors']}")
+                ingest_state = mark_auto_ingest(ingest_state)
+                save_auto_ingest_state(ingest_state)
+
             user_input = input("> ").strip()
             if not user_input:
                 continue
-
-            # =====================
-            # Commands
-            # =====================
 
             if user_input.startswith("/"):
                 parts = user_input.split(" ", 1)
@@ -437,12 +455,9 @@ def main():
                     break
 
                 if cmd == "/ingest":
-                    # reload fresh copies (in case files changed)
                     knowledge = load_knowledge()
                     research_queue = load_research_queue()
-
                     knowledge, research_queue, report = ingest_notes_into_knowledge(knowledge, research_queue)
-
                     save_knowledge(knowledge)
                     save_research_queue(research_queue)
 
