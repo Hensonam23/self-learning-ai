@@ -16,9 +16,13 @@ RESEARCH_QUEUE_PATH = os.path.join(DATA_DIR, "research_queue.json")
 RESEARCH_NOTES_DIR = os.path.join(DATA_DIR, "research_notes")
 AUTO_INGEST_STATE_PATH = os.path.join(DATA_DIR, "auto_ingest_state.json")
 
+EXPORT_DIR = os.path.join(DATA_DIR, "exports")
+DEFAULT_EXPORT_PATH = os.path.join(EXPORT_DIR, "knowledge_book.md")
+
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(BACKUP_DIR, exist_ok=True)
 os.makedirs(RESEARCH_NOTES_DIR, exist_ok=True)
+os.makedirs(EXPORT_DIR, exist_ok=True)
 
 CONF_DECAY_PER_DAY = 0.02
 CONF_REINFORCE_ON_USE = 0.01
@@ -336,14 +340,9 @@ def mark_auto_ingest(state: dict) -> dict:
     return state
 
 def try_fuzzy_existing_topic(user_text: str, knowledge: dict):
-    """
-    If user asks 'what is X' and X exists, return X.
-    Otherwise return "".
-    """
     raw = normalize_topic(user_text)
     if not raw:
         return ""
-
     patterns = [
         "what is ",
         "what's ",
@@ -353,14 +352,12 @@ def try_fuzzy_existing_topic(user_text: str, knowledge: dict):
         "meaning of ",
         "tell me about "
     ]
-
     for p in patterns:
         if raw.startswith(p):
             base = raw[len(p):].strip().rstrip(" .!?")
             if base and base in knowledge:
                 return base
             return ""
-
     return ""
 
 def alias_suggestion_for(user_text: str, base: str, aliases: dict) -> str:
@@ -373,11 +370,74 @@ def alias_suggestion_for(user_text: str, base: str, aliases: dict) -> str:
         return ""
     return f"Suggestion: /alias {raw} | {base}"
 
+def export_knowledge_markdown(knowledge: dict, aliases: dict, out_path: str) -> str:
+    if not out_path:
+        out_path = DEFAULT_EXPORT_PATH
+
+    p = out_path.strip()
+    if not os.path.isabs(p):
+        p = os.path.join(BASE_DIR, p)
+
+    out_dir = os.path.dirname(p)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    lines = []
+    lines.append("# Machine Spirit Knowledge Book")
+    lines.append("")
+    lines.append(f"- Exported: {now_iso()}")
+    lines.append(f"- Topics: {len(knowledge)}")
+    lines.append(f"- Aliases: {len(aliases)}")
+    lines.append("")
+
+    # Aliases section
+    if aliases:
+        lines.append("## Aliases")
+        lines.append("")
+        for a in sorted(aliases.keys()):
+            lines.append(f"- `{a}` → `{aliases[a]}`")
+        lines.append("")
+
+    # Topics section
+    lines.append("## Topics")
+    lines.append("")
+
+    for topic in sorted(knowledge.keys()):
+        entry = knowledge.get(topic, {})
+        if not isinstance(entry, dict):
+            entry = {}
+        entry = ensure_knowledge_shape(entry)
+
+        conf = entry.get("confidence", "")
+        lu = entry.get("last_used", "")
+        upd = entry.get("last_updated", "")
+        notes = entry.get("notes", "")
+        ans = str(entry.get("answer", "")).strip()
+
+        lines.append(f"### {topic}")
+        lines.append("")
+        lines.append(f"- Confidence: `{conf}`")
+        lines.append(f"- Last updated: `{upd}`")
+        lines.append(f"- Last used: `{lu}`")
+        if notes:
+            lines.append(f"- Notes: `{notes}`")
+        lines.append("")
+        lines.append(ans if ans else "_(no answer saved)_")
+        lines.append("")
+
+    try:
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines).rstrip() + "\n")
+        return p
+    except Exception:
+        return ""
+
 HELP_TEXT = """
 Commands:
   /teach <topic> | <answer>
   /teachfile <topic> | <path_to_txt>
   /ingest
+  /export [path]
   /alias <alias> | <topic>
   /show <topic>
   /low [n]
@@ -425,6 +485,18 @@ def main():
                 if cmd == "/exit":
                     print("Shutting down.")
                     break
+
+                if cmd == "/export":
+                    out_path = rest.strip() if rest.strip() else DEFAULT_EXPORT_PATH
+                    # reload fresh to export latest
+                    knowledge = load_knowledge()
+                    aliases = load_aliases()
+                    saved = export_knowledge_markdown(knowledge, aliases, out_path)
+                    if saved:
+                        print(f"Exported: {saved}")
+                    else:
+                        print("Export failed.")
+                    continue
 
                 if cmd == "/ingest":
                     knowledge = load_knowledge()
@@ -595,10 +667,7 @@ def main():
                 print("Unknown command. Type /help.")
                 continue
 
-            # =====================
             # Normal questions
-            # =====================
-
             resolved = resolve_topic(user_input, aliases)
 
             if resolved in knowledge:
@@ -608,22 +677,17 @@ def main():
                 print(knowledge[resolved]["answer"])
                 continue
 
-            # If not found, try fuzzy match to an existing base topic and answer it
             base = try_fuzzy_existing_topic(user_input, knowledge)
             if base:
-                # Answer using base topic
                 knowledge[base] = apply_confidence_decay(knowledge[base])
                 knowledge[base] = reinforce_on_use(knowledge[base])
                 save_knowledge(knowledge)
                 print(knowledge[base]["answer"])
-
-                # Suggest alias to make it permanent next time
                 suggestion = alias_suggestion_for(user_input, base, aliases)
                 if suggestion:
                     print(suggestion)
                 continue
 
-            # Otherwise unknown -> queue it
             research_queue = enqueue_research(
                 research_queue,
                 resolved,
