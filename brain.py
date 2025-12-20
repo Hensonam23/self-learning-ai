@@ -16,8 +16,8 @@ DEFAULT_UNKNOWN_CONFIDENCE = 0.30
 
 # Decay settings
 DECAY_ENABLED = True
-DECAY_START_DAYS = 180            # after this many days without updates, start decaying
-DECAY_PER_30_DAYS = 0.03          # confidence drops by this amount per 30 days beyond DECAY_START_DAYS
+DECAY_START_DAYS = 180
+DECAY_PER_30_DAYS = 0.03
 
 
 def now_utc_iso() -> str:
@@ -32,7 +32,7 @@ def safe_read_json(path: str, default: Any) -> Any:
         return default
     except json.JSONDecodeError:
         print(f"Warning: JSON file is broken: {path}")
-        print("Tip: Restore from backup or fix the JSON formatting.")
+        print("Tip: Restore from backup or fix JSON formatting.")
         return default
 
 
@@ -58,7 +58,6 @@ def clamp_conf(x: float) -> float:
 
 
 def confidence_tone(conf: float) -> str:
-    # Keep it simple and honest
     if conf >= 0.90:
         return "I am very confident about this."
     if conf >= 0.75:
@@ -105,7 +104,6 @@ def load_knowledge() -> Dict[str, Dict[str, Any]]:
     if not isinstance(data, dict):
         data = {}
 
-    # Normalize keys and apply decay
     normalized: Dict[str, Dict[str, Any]] = {}
     for k, v in data.items():
         if not isinstance(v, dict):
@@ -114,7 +112,6 @@ def load_knowledge() -> Dict[str, Dict[str, Any]]:
         v = apply_confidence_decay(v)
         normalized[nk] = v
 
-    # Write back if keys changed (keeps file clean)
     safe_write_json(KNOWLEDGE_PATH, normalized)
     return normalized
 
@@ -189,26 +186,25 @@ def bump_confidence(old_conf: float, bump: float) -> float:
 
 
 HELP_TEXT = """
-Commands you can use:
+Commands:
 
 /help
 /show <topic>
-/list                (shows top topics by confidence)
+/list
 /teach <topic> | <answer>
 /rate <topic> | <0.0-1.0>
 /forget <topic>
-/queue               (shows pending research topics)
+/queue
 /exit
 
-Normal usage:
-Just ask a question like usual. If the answer is missing or low confidence,
-the topic will be added to research_queue.json automatically.
+Correction flow:
+After the brain answers, you can type:
+wrong
+Then it will ask you for the corrected answer and save it.
 """.strip()
 
 
 def parse_pipe_command(line: str) -> Tuple[str, Optional[str], Optional[str]]:
-    # returns (cmd, left, right)
-    # Example: "/teach osi model | <answer>"
     parts = line.strip().split(" ", 1)
     cmd = parts[0].lower()
     rest = parts[1].strip() if len(parts) > 1 else ""
@@ -244,8 +240,13 @@ def list_topics(knowledge: Dict[str, Dict[str, Any]]) -> str:
 
     lines = ["Top topics by confidence:"]
     for conf, topic in items[:25]:
-        lines.append(f"- {topic} ({conf:.2f})")
+        lines.append(f"{topic} ({conf:.2f})")
     return "\n".join(lines)
+
+
+def is_wrong_message(user: str) -> bool:
+    u = normalize_topic(user)
+    return u in ("wrong", "thats wrong", "that's wrong", "no", "nope", "incorrect")
 
 
 def main() -> None:
@@ -253,6 +254,10 @@ def main() -> None:
 
     knowledge = load_knowledge()
     queue = load_queue()
+
+    last_topic: Optional[str] = None
+    waiting_for_correction: bool = False
+    correction_topic: Optional[str] = None
 
     print("Machine Spirit brain online. Type /help for commands. Ctrl+C to exit.")
 
@@ -266,15 +271,60 @@ def main() -> None:
         if not user:
             continue
 
+        # If we are waiting for a correction answer, treat next input as the corrected answer text
+        if waiting_for_correction:
+            corrected_answer = user.strip()
+            if not corrected_answer:
+                print("No correction received. Type the corrected answer, or type /exit.")
+                continue
+
+            topic = correction_topic or last_topic
+            if not topic:
+                print("No topic to attach this correction to. Ask a question first.")
+                waiting_for_correction = False
+                correction_topic = None
+                continue
+
+            entry = get_entry(knowledge, topic)
+            if entry:
+                old_conf = float(entry.get("confidence", 0.0))
+                new_conf = bump_confidence(old_conf, 0.10)
+                set_entry(
+                    knowledge,
+                    topic,
+                    corrected_answer,
+                    new_conf,
+                    source="user_correction",
+                    notes="Updated using correction capture mode"
+                )
+                save_knowledge(knowledge)
+                print(f"Saved correction for '{normalize_topic(topic)}' (confidence now {new_conf:.2f})")
+            else:
+                # If it was unknown, create it at a solid starting confidence
+                set_entry(
+                    knowledge,
+                    topic,
+                    corrected_answer,
+                    0.75,
+                    source="user_correction",
+                    notes="Created using correction capture mode"
+                )
+                save_knowledge(knowledge)
+                print(f"Saved new taught answer for '{normalize_topic(topic)}' (confidence 0.75)")
+
+            waiting_for_correction = False
+            correction_topic = None
+            continue
+
         # Commands
         if user.startswith("/"):
             cmd, left, right = parse_pipe_command(user)
 
-            if cmd in ("/help",):
+            if cmd == "/help":
                 print(HELP_TEXT)
                 continue
 
-            if cmd in ("/exit",):
+            if cmd == "/exit":
                 print("Shutting down.")
                 break
 
@@ -338,11 +388,9 @@ def main() -> None:
                     print("Usage: /teach <topic> | <answer>")
                     continue
 
-                # If already exists, we treat it as an improvement
                 existing = get_entry(knowledge, left)
                 if existing:
                     old_conf = float(existing.get("confidence", 0.0))
-                    # If user is re-teaching, bump slightly
                     new_conf = bump_confidence(old_conf, 0.05)
                     set_entry(
                         knowledge,
@@ -350,7 +398,7 @@ def main() -> None:
                         right,
                         new_conf,
                         source="user_taught",
-                        notes="Updated by user re-teach"
+                        notes="Updated by user re teach"
                     )
                     save_knowledge(knowledge)
                     print(f"Updated taught answer for '{normalize_topic(left)}' (confidence now {new_conf:.2f})")
@@ -370,8 +418,20 @@ def main() -> None:
             print("Unknown command. Type /help")
             continue
 
+        # If user says "wrong" right after an answer, start correction mode
+        if is_wrong_message(user):
+            if not last_topic:
+                print("Wrong about what topic? Ask a question first, then type: wrong")
+                continue
+            waiting_for_correction = True
+            correction_topic = last_topic
+            print(f"Ok. What is the correct answer for '{normalize_topic(last_topic)}'? Paste it as your next message.")
+            continue
+
         # Normal question flow
         topic = normalize_topic(user)
+        last_topic = topic
+
         entry = get_entry(knowledge, topic)
 
         if entry:
@@ -379,7 +439,6 @@ def main() -> None:
             conf = float(entry.get("confidence", 0.0))
             print(format_answer(answer, conf))
 
-            # Auto queue research if confidence is low
             if conf < LOW_CONF_THRESHOLD:
                 added = enqueue_research(
                     queue,
@@ -391,12 +450,12 @@ def main() -> None:
                     save_queue(queue)
             continue
 
-        # Unknown topic
         unknown_text = (
             "I do not have a taught answer for that yet.\n"
             "If you want to teach me, use:\n"
             "/teach <topic> | <your answer>\n"
-            "If I should research it later, I will queue it."
+            "Or type: wrong (after an answer) to enter correction mode.\n"
+            "I will also queue this topic for research."
         )
         conf = DEFAULT_UNKNOWN_CONFIDENCE
         print(format_answer(unknown_text, conf))
