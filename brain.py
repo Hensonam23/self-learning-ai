@@ -55,6 +55,35 @@ WEBLEARN_PER_SOURCE_CHAR_LIMIT = 14000
 WEBLEARN_SLEEP_BETWEEN_FETCH_SEC = 1.0
 
 
+def configure_stdio() -> None:
+    # Try to force utf-8 output so printing never crashes on Unicode characters.
+    # If not supported, safe_print below will still prevent crashes.
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    try:
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
+def safe_print(*args, sep=" ", end="\n") -> None:
+    msg = sep.join(str(a) for a in args)
+    try:
+        print(msg, end=end)
+        return
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        try:
+            clean = msg.encode(enc, errors="replace").decode(enc, errors="replace")
+        except Exception:
+            clean = msg.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+        print(clean, end=end)
+
+
 def now_date() -> str:
     return datetime.date.today().isoformat()
 
@@ -207,15 +236,6 @@ def best_fuzzy_match(query: str, candidates: List[str]) -> Tuple[Optional[str], 
     return best, best_ratio
 
 
-def tokenize_words(text: str) -> List[str]:
-    text = text.lower()
-    text = re.sub(r"[^a-z0-9\s\-]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    if not text:
-        return []
-    return [w for w in text.split(" ") if w]
-
-
 STOPWORDS = {
     "the", "a", "an", "and", "or", "but", "if", "then", "else", "for", "to", "of",
     "in", "on", "at", "by", "with", "as", "is", "are", "was", "were", "be", "been",
@@ -227,7 +247,16 @@ STOPWORDS = {
 }
 
 
-def top_keywords(text: str, n: int = 16) -> List[str]:
+def tokenize_words(text: str) -> List[str]:
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9\s\-]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return []
+    return [w for w in text.split(" ") if w]
+
+
+def top_keywords(text: str, n: int = 18) -> List[str]:
     words = tokenize_words(text)
     freq: Dict[str, int] = {}
     for w in words:
@@ -262,6 +291,28 @@ def looks_disallowed_for_weblearn(topic: str) -> Tuple[bool, str]:
             return True, "I will not web learn requests for personal or private data."
 
     return False, ""
+
+
+def domain_from_url(url: str) -> str:
+    m = re.match(r"^https?://([^/]+)", url.strip().lower())
+    return m.group(1) if m else ""
+
+
+def source_quality_score(url: str) -> float:
+    d = domain_from_url(url)
+    if not d:
+        return 0.2
+    if d.endswith(".gov") or d.endswith(".edu"):
+        return 0.95
+    if "nist.gov" in d or "ietf.org" in d or "iso.org" in d:
+        return 0.95
+    if "wikipedia.org" in d:
+        return 0.80
+    if d.startswith("docs.") or "/docs" in url.lower():
+        return 0.75
+    if any(x in d for x in ["medium.com", "blogspot.", "wordpress."]):
+        return 0.35
+    return 0.55
 
 
 def ddg_lite_search(query: str, max_results: int = 8) -> List[str]:
@@ -384,41 +435,109 @@ def set_cached_url_text(url: str, text: str) -> None:
     save_json(p, payload)
 
 
-def synthesize_answer(topic: str, source_texts: List[str], source_urls: List[str]) -> str:
+def _pick_definition_lines(topic: str, combined_text: str, limit: int = 5) -> List[str]:
+    t = topic.lower().strip()
+    lines = [ln.strip() for ln in combined_text.splitlines() if ln.strip()]
+    candidates: List[str] = []
+
+    for ln in lines[:1200]:
+        low = ln.lower()
+        if len(ln) < 45 or len(ln) > 240:
+            continue
+        if t and t in low:
+            if " is " in low or " refers to " in low or " means " in low:
+                candidates.append(ln)
+                continue
+        if " is " in low and len(low.split()) <= 28:
+            candidates.append(ln)
+            continue
+
+    out = []
+    seen = set()
+    for c in candidates:
+        key = c.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _make_quick_check_questions(topic: str, keywords: List[str]) -> List[str]:
+    base = topic.strip()
+    k = [x for x in keywords if len(x) > 3][:6]
+    qs = []
+    qs.append(f"What problem does {base} solve?")
+    qs.append(f"What are the main parts or layers of {base}?")
+    if k:
+        qs.append(f"How does {base} relate to {k[0]} and {k[1] if len(k) > 1 else k[0]}?")
+    else:
+        qs.append(f"What is a real world example where {base} shows up?")
+    return qs[:3]
+
+
+def heuristic_structured_answer(topic: str, source_urls: List[str], source_texts: List[str]) -> str:
     combined = "\n\n".join(source_texts)
-    kws = top_keywords(combined, n=18)
+    keywords = top_keywords(combined, n=18)
+    defs = _pick_definition_lines(topic, combined, limit=4)
 
-    intro = (
-        f"{topic.strip()} in plain terms:\n"
-        f"This is a synthesized overview based on multiple sources. "
-        f"It is written in my own words and meant to be a clear working explanation.\n"
-    )
+    definition = defs[0] if defs else f"{topic.strip()} is a concept you will see referenced often in this area."
+    extras = defs[1:3] if len(defs) > 1 else []
 
-    bullets = []
-    if kws:
-        bullets.append("Key ideas you will usually see:")
-        for k in kws[:10]:
-            bullets.append(f"- {k}")
+    parts_guess = []
+    if keywords:
+        for w in keywords[:10]:
+            parts_guess.append(f"- {w}")
 
-    guide = []
-    guide.append("\nHow to think about it:")
-    guide.append("- Start with a simple definition in one sentence.")
-    guide.append("- Identify the main parts or layers involved.")
-    guide.append("- Explain what problem it solves and where it is used.")
-    guide.append("- Mention common examples and common misunderstandings.")
+    quick_check = _make_quick_check_questions(topic, keywords)
 
-    practical = []
-    practical.append("\nPractical notes:")
-    practical.append("- If you are learning this for networking or IT work, focus on how it connects to real troubleshooting.")
-    practical.append("- If something seems inconsistent across sources, trust primary docs or standards first.")
+    out = []
+    out.append(f"{topic.strip()} (synthesized)")
+    out.append("")
+    out.append("Definition:")
+    out.append(f"- {definition}")
+    for x in extras:
+        out.append(f"- {x}")
 
-    sources_block = "\nSources used:\n" + "\n".join([f"- {u}" for u in source_urls[:WEBLEARN_MAX_SOURCES]])
+    out.append("")
+    out.append("How it works:")
+    out.append("- Break it into the main components or layers.")
+    out.append("- For each component, say what it is responsible for, and what it is not responsible for.")
+    out.append("- When troubleshooting, map the symptom to the layer or component that most likely owns it.")
 
-    body = intro + "\n".join(bullets) + "\n" + "\n".join(guide) + "\n" + "\n".join(practical) + "\n\n" + sources_block
+    out.append("")
+    out.append("Examples:")
+    out.append("- Write one simple example first, then one realistic example you might see at work.")
+    out.append("- If it is a model or standard, explain what changes when you move between layers or parts.")
 
-    # Make sure we do not accidentally store very long exact snippets.
-    body = re.sub(r"\n{3,}", "\n\n", body).strip()
-    return body
+    out.append("")
+    out.append("Common mistakes:")
+    out.append("- Mixing up similar sounding terms.")
+    out.append("- Memorizing lists without understanding what actually changes in real systems.")
+    out.append("- Using the wrong layer or component when troubleshooting.")
+
+    if parts_guess:
+        out.append("")
+        out.append("Related keywords (from sources):")
+        out.extend(parts_guess)
+
+    out.append("")
+    out.append("Quick check (answer these to prove you understand it):")
+    for q in quick_check:
+        out.append(f"- {q}")
+
+    out.append("")
+    out.append("Sources used:")
+    for u in source_urls[:WEBLEARN_MAX_SOURCES]:
+        out.append(f"- {u}")
+
+    return "\n".join(out).strip()
+
+
+def synthesize_answer(topic: str, source_texts: List[str], source_urls: List[str]) -> str:
+    return heuristic_structured_answer(topic, source_urls, source_texts)
 
 
 class BrainState:
@@ -568,6 +687,7 @@ class BrainState:
                                 "confidence": clamp(conf, 0.0, 1.0),
                                 "updated_on": now_date(),
                                 "notes": v.get("notes", f"Auto imported from {name}"),
+                                "sources": v.get("sources", []),
                             }
                             changed = True
 
@@ -738,14 +858,21 @@ class BrainState:
         if urllib is None:
             return False, "Web learning is unavailable because urllib is not available in this Python environment."
 
-        urls = ddg_lite_search(topic, max_results=10)
+        urls = ddg_lite_search(topic, max_results=12)
         if not urls:
             return False, "Web search returned no results or could not be fetched."
 
-        picked: List[str] = []
+        filtered = []
         for u in urls:
-            if any(b in u.lower() for b in ["youtube.com", "facebook.com", "instagram.com", "tiktok.com"]):
+            lu = u.lower()
+            if any(b in lu for b in ["youtube.com", "facebook.com", "instagram.com", "tiktok.com"]):
                 continue
+            filtered.append(u)
+
+        filtered.sort(key=lambda x: source_quality_score(x), reverse=True)
+
+        picked: List[str] = []
+        for u in filtered:
             picked.append(u)
             if len(picked) >= WEBLEARN_MAX_SOURCES:
                 break
@@ -778,19 +905,23 @@ class BrainState:
 
         answer = synthesize_answer(topic, texts, used)
 
-        # Write research note file so the existing pipeline stays consistent
         note_file = os.path.join(RESEARCH_NOTES_DIR, topic_to_notes_filename(topic))
         write_text_file(note_file, answer)
 
+        q_scores = [source_quality_score(u) for u in used]
+        base_q = sum(q_scores) / max(1, len(q_scores))
+
         t = normalize_topic(topic)
         existing_conf = float(self.knowledge.get(t, {}).get("confidence", 0.0))
-        new_conf = max(existing_conf, 0.70)
+        new_conf = max(existing_conf, clamp(0.55 + (base_q * 0.35), 0.55, 0.88))
+
+        notes = f"Web learned on {now_date()} using local synthesis"
 
         self.set_entry(
             topic,
             answer,
             confidence=new_conf,
-            notes=f"Web learned on {now_date()}",
+            notes=notes,
             sources=used,
         )
 
@@ -917,10 +1048,8 @@ Commands:
   /why
 
 Notes:
+- /weblearn uses web search plus local synthesis only.
 - Terminal-like inputs are ignored by alias and queue logic.
-- /weblearn will search the web and generate an original answer, then store it locally.
-- /webqueue will web learn a few pending queue topics each run.
-- /sources shows sources used for the last web learned answer.
 """.strip()
 
 
@@ -931,7 +1060,7 @@ def parse_pipe_args(s: str) -> Tuple[str, str]:
     return left.strip(), right.strip()
 
 
-def import_json_file(state: BrainState, path: str) -> int:
+def import_json_file(state: "BrainState", path: str) -> int:
     payload = load_json(path, None)
     if not isinstance(payload, dict):
         return 0
@@ -959,7 +1088,7 @@ def import_json_file(state: BrainState, path: str) -> int:
     return count
 
 
-def import_folder(state: BrainState, folder: str) -> int:
+def import_folder(state: "BrainState", folder: str) -> int:
     if not os.path.isdir(folder):
         return 0
     total = 0
@@ -970,7 +1099,7 @@ def import_folder(state: BrainState, folder: str) -> int:
     return total
 
 
-def ingest_folder_as_notes(state: BrainState, folder: str) -> int:
+def ingest_folder_as_notes(state: "BrainState", folder: str) -> int:
     if not os.path.isdir(folder):
         return 0
     total = 0
@@ -990,14 +1119,14 @@ def ingest_folder_as_notes(state: BrainState, folder: str) -> int:
     return total
 
 
-def export_knowledge(state: BrainState, folder: str) -> str:
+def export_knowledge(state: "BrainState", folder: str) -> str:
     os.makedirs(folder, exist_ok=True)
     out_path = os.path.join(folder, f"export_{now_ts()}.json")
     save_json(out_path, state.knowledge)
     return out_path
 
 
-def show_queue(state: BrainState) -> str:
+def show_queue(state: "BrainState") -> str:
     if not state.queue:
         return "Queue is empty."
     lines = []
@@ -1013,7 +1142,7 @@ def show_queue(state: BrainState) -> str:
     return "\n".join(lines)
 
 
-def promote_topic(state: BrainState, topic: str) -> bool:
+def promote_topic(state: "BrainState", topic: str) -> bool:
     t = normalize_topic(topic)
     changed = False
     for item in state.queue:
@@ -1026,7 +1155,7 @@ def promote_topic(state: BrainState, topic: str) -> bool:
     return changed
 
 
-def set_confidence(state: BrainState, topic: str, conf: float) -> bool:
+def set_confidence(state: "BrainState", topic: str, conf: float) -> bool:
     t = normalize_topic(topic)
     if t not in state.knowledge:
         return False
@@ -1036,7 +1165,7 @@ def set_confidence(state: BrainState, topic: str, conf: float) -> bool:
     return True
 
 
-def lowest_confidence(state: BrainState, n: int = 10) -> str:
+def lowest_confidence(state: "BrainState", n: int = 10) -> str:
     rows = []
     for t, e in state.knowledge.items():
         rows.append((t, float(e.get("confidence", 0.0))))
@@ -1048,7 +1177,7 @@ def lowest_confidence(state: BrainState, n: int = 10) -> str:
     return "\n".join(out) if out else "No topics found."
 
 
-def list_aliases(state: BrainState) -> str:
+def list_aliases(state: "BrainState") -> str:
     if not state.aliases:
         return "No aliases saved."
     lines = []
@@ -1057,7 +1186,7 @@ def list_aliases(state: BrainState) -> str:
     return "\n".join(lines)
 
 
-def show_suggest(state: BrainState) -> str:
+def show_suggest(state: "BrainState") -> str:
     if state.last_input_was_terminal:
         return "Last input was detected as a terminal command. No alias suggestions."
     if not state.last_suggestions:
@@ -1069,7 +1198,7 @@ def show_suggest(state: BrainState) -> str:
     return "\n".join(lines) if lines else "No strong suggestions."
 
 
-def accept_suggestion(state: BrainState, num: int, last_raw_input: str) -> str:
+def accept_suggestion(state: "BrainState", num: int, last_raw_input: str) -> str:
     if state.last_input_was_terminal:
         return "Last input was a terminal command. Nothing to accept."
     if not state.last_suggestions:
@@ -1084,13 +1213,13 @@ def accept_suggestion(state: BrainState, num: int, last_raw_input: str) -> str:
     return f"Accepted alias: {normalize_topic(last_raw_input)} -> {target}"
 
 
-def show_why(state: BrainState) -> str:
+def show_why(state: "BrainState") -> str:
     if not state.last_why:
         return "No /why info yet."
     return json.dumps(state.last_why, indent=2)
 
 
-def show_sources(state: BrainState) -> str:
+def show_sources(state: "BrainState") -> str:
     if state.last_web_sources:
         return "Last web sources:\n" + "\n".join([f"- {u}" for u in state.last_web_sources])
     if state.last_why and state.last_why.get("type") == "exact":
@@ -1103,12 +1232,14 @@ def show_sources(state: BrainState) -> str:
 
 
 def main():
+    configure_stdio()
+
     state = BrainState()
     state.run_auto_import()
     state.run_auto_ingest()
     state.start_backup_timer()
 
-    print(f"{APP_NAME} brain online. Type a message, or /help for commands. Ctrl+C to exit.")
+    safe_print(f"{APP_NAME} brain online. Type a message, or /help for commands. Ctrl+C to exit.")
 
     last_user_input = ""
 
@@ -1116,7 +1247,7 @@ def main():
         state._shutdown = True
         state.stop_backup_timer()
         state.save_all()
-        print("\nShutting down.")
+        safe_print("\nShutting down.")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown)
@@ -1137,121 +1268,121 @@ def main():
             cmdline = raw.strip()
 
             if cmdline == "/help":
-                print(HELP_TEXT)
+                safe_print(HELP_TEXT)
                 continue
 
             if cmdline.startswith("/teach "):
                 rest = cmdline[len("/teach "):].strip()
                 topic, answer = parse_pipe_args(rest)
                 if not topic or not answer:
-                    print("Usage: /teach <topic> | <answer>")
+                    safe_print("Usage: /teach <topic> | <answer>")
                     continue
                 state.set_entry(topic, answer, confidence=0.55, notes="Updated by user re teach")
-                print("Saved.")
+                safe_print("Saved.")
                 continue
 
             if cmdline.startswith("/teachfile "):
                 rest = cmdline[len("/teachfile "):].strip()
                 topic, path = parse_pipe_args(rest)
                 if not topic or not path:
-                    print("Usage: /teachfile <topic> | <path_to_text_file>")
+                    safe_print("Usage: /teachfile <topic> | <path_to_text_file>")
                     continue
                 if not os.path.exists(path):
-                    print("File not found.")
+                    safe_print("File not found.")
                     continue
                 ans = read_text_file(path).strip()
                 if not ans:
-                    print("File was empty.")
+                    safe_print("File was empty.")
                     continue
                 state.set_entry(topic, ans, confidence=0.55, notes=f"Teachfile from {os.path.basename(path)}")
-                print("Saved.")
+                safe_print("Saved.")
                 continue
 
             if cmdline.startswith("/import "):
                 path = cmdline[len("/import "):].strip()
                 if not path:
-                    print("Usage: /import <path_to_json_file>")
+                    safe_print("Usage: /import <path_to_json_file>")
                     continue
                 if not os.path.exists(path):
-                    print("File not found.")
+                    safe_print("File not found.")
                     continue
                 count = import_json_file(state, path)
-                print(f"Imported {count} entries.")
+                safe_print(f"Imported {count} entries.")
                 continue
 
             if cmdline.startswith("/importfolder "):
                 folder = cmdline[len("/importfolder "):].strip()
                 if not folder:
-                    print("Usage: /importfolder <folder_path>")
+                    safe_print("Usage: /importfolder <folder_path>")
                     continue
                 count = import_folder(state, folder)
-                print(f"Imported {count} entries.")
+                safe_print(f"Imported {count} entries.")
                 continue
 
             if cmdline.startswith("/ingest "):
                 folder = cmdline[len("/ingest "):].strip()
                 if not folder:
-                    print("Usage: /ingest <folder_path>")
+                    safe_print("Usage: /ingest <folder_path>")
                     continue
                 count = ingest_folder_as_notes(state, folder)
-                print(f"Ingested {count} text files.")
+                safe_print(f"Ingested {count} text files.")
                 continue
 
             if cmdline.startswith("/export "):
                 folder = cmdline[len("/export "):].strip()
                 if not folder:
-                    print("Usage: /export <folder_path>")
+                    safe_print("Usage: /export <folder_path>")
                     continue
                 out = export_knowledge(state, folder)
-                print(f"Exported to {out}")
+                safe_print(f"Exported to {out}")
                 continue
 
             if cmdline == "/queue":
-                print(show_queue(state))
+                safe_print(show_queue(state))
                 continue
 
             if cmdline == "/clearpending":
                 removed = state.clear_pending()
-                print(f"Removed {removed} pending items.")
+                safe_print(f"Removed {removed} pending items.")
                 continue
 
             if cmdline.startswith("/promote "):
                 topic = cmdline[len("/promote "):].strip()
                 if not topic:
-                    print("Usage: /promote <topic>")
+                    safe_print("Usage: /promote <topic>")
                     continue
                 ok = promote_topic(state, topic)
-                print("Promoted." if ok else "Topic not found in queue.")
+                safe_print("Promoted." if ok else "Topic not found in queue.")
                 continue
 
             if cmdline == "/autoupgrade":
                 upgraded, checked = state.autoupgrade_from_notes()
-                print(f"Auto upgraded {upgraded} topics from notes. Checked {checked} pending items.")
+                safe_print(f"Auto upgraded {upgraded} topics from notes. Checked {checked} pending items.")
                 continue
 
             if cmdline.startswith("/weblearn "):
                 topic = cmdline[len("/weblearn "):].strip()
                 if not topic:
-                    print("Usage: /weblearn <topic>")
+                    safe_print("Usage: /weblearn <topic>")
                     continue
                 ok, msg = state.weblearn_topic(topic)
-                print(msg if msg else ("Done." if ok else "Failed."))
+                safe_print(msg if msg else ("Done." if ok else "Failed."))
                 continue
 
             if cmdline == "/webqueue":
                 done, attempted = state.webqueue(limit=WEBQUEUE_LIMIT_PER_RUN)
-                print(f"Web queue run complete. Learned {done} out of {attempted} attempted (limit {WEBQUEUE_LIMIT_PER_RUN}).")
+                safe_print(f"Web queue run complete. Learned {done} out of {attempted} attempted (limit {WEBQUEUE_LIMIT_PER_RUN}).")
                 continue
 
             if cmdline == "/sources":
-                print(show_sources(state))
+                safe_print(show_sources(state))
                 continue
 
             if cmdline.startswith("/confidence "):
                 rest = cmdline[len("/confidence "):].strip()
                 parts = rest.split()
                 if not parts:
-                    print("Usage: /confidence <topic> [new_value_0_to_1]")
+                    safe_print("Usage: /confidence <topic> [new_value_0_to_1]")
                     continue
 
                 topic = " ".join(parts[:-1]) if (len(parts) > 1 and re.match(r"^\d*\.?\d+$", parts[-1])) else rest
@@ -1260,13 +1391,13 @@ def main():
                 if len(parts) > 1 and re.match(r"^\d*\.?\d+$", last):
                     val = float(last)
                     ok = set_confidence(state, topic, val)
-                    print("Updated." if ok else "Topic not found.")
+                    safe_print("Updated." if ok else "Topic not found.")
                 else:
                     e = state.get_entry(topic)
                     if not e:
-                        print("Topic not found.")
+                        safe_print("Topic not found.")
                     else:
-                        print(f"{normalize_topic(topic)} confidence={e.get('confidence', 0.0)}")
+                        safe_print(f"{normalize_topic(topic)} confidence={e.get('confidence', 0.0)}")
                 continue
 
             if cmdline.startswith("/lowest"):
@@ -1277,34 +1408,34 @@ def main():
                         n = int(rest)
                     except Exception:
                         n = 10
-                print(lowest_confidence(state, n))
+                safe_print(lowest_confidence(state, n))
                 continue
 
             if cmdline.startswith("/alias "):
                 rest = cmdline[len("/alias "):].strip()
                 a, t = parse_pipe_args(rest)
                 if not a or not t:
-                    print("Usage: /alias <alias> | <target_topic>")
+                    safe_print("Usage: /alias <alias> | <target_topic>")
                     continue
                 state.add_alias(a, t)
-                print("Alias saved.")
+                safe_print("Alias saved.")
                 continue
 
             if cmdline == "/aliases":
-                print(list_aliases(state))
+                safe_print(list_aliases(state))
                 continue
 
             if cmdline.startswith("/unalias "):
                 a = cmdline[len("/unalias "):].strip()
                 if not a:
-                    print("Usage: /unalias <alias>")
+                    safe_print("Usage: /unalias <alias>")
                     continue
                 ok = state.remove_alias(a)
-                print("Removed." if ok else "Alias not found.")
+                safe_print("Removed." if ok else "Alias not found.")
                 continue
 
             if cmdline == "/suggest":
-                print(show_suggest(state))
+                safe_print(show_suggest(state))
                 continue
 
             if cmdline.startswith("/accept "):
@@ -1312,21 +1443,21 @@ def main():
                 try:
                     num = int(rest)
                 except Exception:
-                    print("Usage: /accept <number>")
+                    safe_print("Usage: /accept <number>")
                     continue
-                print(accept_suggestion(state, num, last_user_input))
+                safe_print(accept_suggestion(state, num, last_user_input))
                 continue
 
             if cmdline == "/why":
-                print(show_why(state))
+                safe_print(show_why(state))
                 continue
 
-            print("Unknown command. Type /help.")
+            safe_print("Unknown command. Type /help.")
             continue
 
         last_user_input = raw
         response = state.answer_query(raw)
-        print(f"{APP_NAME}: {response}")
+        safe_print(f"{APP_NAME}: {response}")
 
 
 if __name__ == "__main__":
