@@ -4,7 +4,6 @@ import os
 import re
 import sys
 import json
-import time
 import shutil
 import signal
 import difflib
@@ -38,6 +37,8 @@ FUZZY_SUGGEST_THRESHOLD = 0.72
 FUZZY_ACCEPT_THRESHOLD = 0.92
 QUEUE_THRESHOLD = 0.58
 MIN_CONFIDENCE_FOR_AUTO_ALIAS_TARGET = 0.55
+
+AUTO_NOTES_CONFIDENCE_FLOOR = 0.65
 
 
 def now_date() -> str:
@@ -78,6 +79,56 @@ def normalize_topic(s: str) -> str:
     s = s.strip().lower()
     s = re.sub(r"\s+", " ", s)
     return s
+
+
+def clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+def topic_to_notes_filename(topic: str) -> str:
+    """
+    Matches the existing convention you had in queue worker_note:
+      "what is the osi model" -> "what_is_the_osi_model.txt"
+    """
+    t = normalize_topic(topic)
+    t = t.replace(" ", "_")
+    t = re.sub(r"[^a-z0-9_]+", "", t)
+    t = re.sub(r"_+", "_", t).strip("_")
+    if not t:
+        t = "untitled"
+    return t + ".txt"
+
+
+def find_research_note_path(topic: str) -> Optional[str]:
+    """
+    Try common filenames for a topic.
+    Only returns a path if it exists.
+    """
+    os.makedirs(RESEARCH_NOTES_DIR, exist_ok=True)
+
+    candidates = []
+    # Primary convention
+    candidates.append(os.path.join(RESEARCH_NOTES_DIR, topic_to_notes_filename(topic)))
+
+    # Also try raw normalized name with .txt
+    norm = normalize_topic(topic)
+    norm_safe = re.sub(r"[^a-z0-9_ ]+", "", norm).strip()
+    if norm_safe:
+        candidates.append(os.path.join(RESEARCH_NOTES_DIR, norm_safe.replace(" ", "_") + ".txt"))
+
+    # Also try .md versions (optional, but helpful)
+    candidates.append(os.path.join(RESEARCH_NOTES_DIR, topic_to_notes_filename(topic)[:-4] + ".md"))
+
+    for p in candidates:
+        if os.path.exists(p) and os.path.isfile(p):
+            return p
+
+    return None
+
+
+def read_text_file(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
 
 
 def is_probably_terminal_command(text: str) -> bool:
@@ -142,10 +193,6 @@ def best_fuzzy_match(query: str, candidates: List[str]) -> Tuple[Optional[str], 
             best_ratio = r
             best = c
     return best, best_ratio
-
-
-def clamp(v: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, v))
 
 
 class BrainState:
@@ -224,15 +271,13 @@ class BrainState:
                 continue
 
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    raw = f.read().strip()
+                raw = read_text_file(path).strip()
                 if not raw:
                     seen[name] = mtime
                     changed = True
                     continue
 
                 lines = raw.splitlines()
-                topic = None
                 if lines and lines[0].lower().startswith("topic:"):
                     topic = lines[0].split(":", 1)[1].strip()
                     answer = "\n".join(lines[1:]).strip()
@@ -320,12 +365,82 @@ class BrainState:
         }
         self.save_all()
 
+    def upsert_from_notes(self, topic: str, note_path: str) -> bool:
+        """
+        Read a notes file, store into knowledge, bump confidence to at least AUTO_NOTES_CONFIDENCE_FLOOR,
+        and promote queue item if it exists.
+        """
+        try:
+            txt = read_text_file(note_path).strip()
+            if not txt:
+                return False
+        except Exception:
+            return False
+
+        t = normalize_topic(topic)
+        existing_conf = 0.0
+        if t in self.knowledge:
+            existing_conf = float(self.knowledge[t].get("confidence", 0.0))
+
+        new_conf = max(existing_conf, AUTO_NOTES_CONFIDENCE_FLOOR)
+
+        self.knowledge[t] = {
+            "answer": txt,
+            "confidence": clamp(new_conf, 0.0, 1.0),
+            "updated_on": now_date(),
+            "notes": f"Upgraded from research note: {os.path.basename(note_path)}",
+        }
+
+        # promote in queue if present
+        self.promote_if_present(t)
+
+        self.save_all()
+        return True
+
+    def promote_if_present(self, topic_norm: str) -> bool:
+        t = normalize_topic(topic_norm)
+        changed = False
+        for item in self.queue:
+            if normalize_topic(item.get("topic", "")) == t:
+                if item.get("status", "pending") != "done":
+                    item["status"] = "done"
+                    item["completed_on"] = now_date()
+                    changed = True
+        if changed:
+            self.save_all()
+        return changed
+
+    def autoupgrade_from_notes(self) -> Tuple[int, int]:
+        """
+        Scan pending queue. If notes exist, import them and promote to done.
+        Returns (upgraded_count, checked_count).
+        """
+        upgraded = 0
+        checked = 0
+        for item in self.queue:
+            if item.get("status", "pending") != "pending":
+                continue
+            topic = item.get("topic", "")
+            if not topic:
+                continue
+            checked += 1
+            p = find_research_note_path(topic)
+            if p:
+                ok = self.upsert_from_notes(topic, p)
+                if ok:
+                    upgraded += 1
+        return upgraded, checked
+
     def queue_topic(self, topic: str, reason: str, confidence: float) -> None:
         t = normalize_topic(topic)
-
         for item in self.queue:
             if normalize_topic(item.get("topic", "")) == t and item.get("status", "pending") == "pending":
                 return
+
+        note_path = find_research_note_path(t)
+        worker_note = ""
+        if note_path is None:
+            worker_note = f"Missing research note file: {os.path.join(RESEARCH_NOTES_DIR, topic_to_notes_filename(t))}"
 
         self.queue.append({
             "topic": t,
@@ -333,7 +448,7 @@ class BrainState:
             "requested_on": now_date(),
             "status": "pending",
             "current_confidence": float(confidence),
-            "worker_note": "",
+            "worker_note": worker_note,
         })
         self.save_all()
 
@@ -363,8 +478,7 @@ class BrainState:
         return self.aliases.get(normalize_topic(text))
 
     def build_candidate_topics(self) -> List[str]:
-        topics = list(self.knowledge.keys())
-        return sorted(set(topics))
+        return sorted(set(self.knowledge.keys()))
 
     def compute_suggestions(self, raw_query: str) -> List[Tuple[str, float]]:
         q = normalize_topic(raw_query)
@@ -413,26 +527,34 @@ class BrainState:
         if not q:
             return "Say something, or type /help."
 
+        # exact topic
         if q in self.knowledge:
             entry = self.knowledge[q]
-            self.last_why = {
-                "type": "exact",
-                "topic": q,
-                "confidence": float(entry.get("confidence", 0.0)),
-            }
+            self.last_why = {"type": "exact", "topic": q, "confidence": float(entry.get("confidence", 0.0))}
             return entry.get("answer", "")
 
+        # alias direct
         alias_target = self.resolve_alias(q)
         if alias_target and alias_target in self.knowledge:
             entry = self.knowledge[alias_target]
-            self.last_why = {
-                "type": "alias",
-                "alias": q,
-                "target": alias_target,
-                "confidence": float(entry.get("confidence", 0.0)),
-            }
+            self.last_why = {"type": "alias", "alias": q, "target": alias_target, "confidence": float(entry.get("confidence", 0.0))}
             return entry.get("answer", "")
 
+        # NEW: on-demand research note upgrade before fuzzy and queue
+        note_path = find_research_note_path(q)
+        if note_path:
+            ok = self.upsert_from_notes(q, note_path)
+            if ok and q in self.knowledge:
+                entry = self.knowledge[q]
+                self.last_why = {
+                    "type": "notes_autoupgrade",
+                    "topic": q,
+                    "note_file": os.path.basename(note_path),
+                    "confidence": float(entry.get("confidence", 0.0)),
+                }
+                return entry.get("answer", "")
+
+        # fuzzy topic match
         candidates = self.build_candidate_topics()
         best_topic, best_ratio = best_fuzzy_match(q, candidates)
 
@@ -456,15 +578,13 @@ class BrainState:
             if best_ratio >= 0.84 and "answer" in entry:
                 return entry.get("answer", "")
 
+        # queue hygiene
         if len(q) >= 3:
             top_sug = suggestions[0][1] if suggestions else 0.0
             if (top_sug < 0.84) and (top_sug >= QUEUE_THRESHOLD) and re.search(r"[a-z0-9]", q):
                 self.queue_topic(q, reason="No taught answer yet", confidence=0.3)
 
-        return (
-            "I do not have a taught answer for that yet. "
-            "If my reply is wrong or weak, correct me in your own words and I will remember it."
-        )
+        return "I do not have a taught answer for that yet. If my reply is wrong or weak, correct me in your own words and I will remember it."
 
 
 HELP_TEXT = f"""
@@ -481,6 +601,7 @@ Commands:
   /queue
   /clearpending
   /promote <topic>
+  /autoupgrade
   /confidence <topic> [new_value_0_to_1]
   /lowest [n]
   /alias <alias> | <target_topic>
@@ -491,7 +612,8 @@ Commands:
   /why
 
 Notes:
-- Terminal-like inputs (example: "git status", "cd ..") are ignored by alias and queue logic now.
+- Terminal-like inputs (example: "git status", "cd ..") are ignored by alias and queue logic.
+- If a notes file exists in data/research_notes/ for a topic, the brain can auto learn it.
 """.strip()
 
 
@@ -500,11 +622,6 @@ def parse_pipe_args(s: str) -> Tuple[str, str]:
         return s.strip(), ""
     left, right = s.split("|", 1)
     return left.strip(), right.strip()
-
-
-def read_text_file(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
 
 
 def import_json_file(state: BrainState, path: str) -> int:
@@ -582,19 +699,23 @@ def show_queue(state: BrainState) -> str:
         rs = item.get("reason", "")
         rd = item.get("requested_on", "")
         cc = item.get("current_confidence", "")
-        lines.append(f"{i}. [{st}] {t} (requested {rd}) conf={cc} reason={rs}")
+        wn = item.get("worker_note", "")
+        extra = f" | note={wn}" if wn else ""
+        lines.append(f"{i}. [{st}] {t} (requested {rd}) conf={cc} reason={rs}{extra}")
     return "\n".join(lines)
 
 
 def promote_topic(state: BrainState, topic: str) -> bool:
     t = normalize_topic(topic)
+    changed = False
     for item in state.queue:
         if normalize_topic(item.get("topic", "")) == t:
             item["status"] = "done"
             item["completed_on"] = now_date()
-            state.save_all()
-            return True
-    return False
+            changed = True
+    if changed:
+        state.save_all()
+    return changed
 
 
 def set_confidence(state: BrainState, topic: str, conf: float) -> bool:
@@ -781,6 +902,11 @@ def main():
                     continue
                 ok = promote_topic(state, topic)
                 print("Promoted." if ok else "Topic not found in queue.")
+                continue
+
+            if cmdline == "/autoupgrade":
+                upgraded, checked = state.autoupgrade_from_notes()
+                print(f"Auto upgraded {upgraded} topics from notes. Checked {checked} pending items.")
                 continue
 
             if cmdline.startswith("/confidence "):
