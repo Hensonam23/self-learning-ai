@@ -1,0 +1,10 @@
+[Unit]
+Description=MachineSpirit webqueue worker (auto web learning)
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/aaron/self-learning-ai
+ExecStart=/usr/bin/python3 /home/aaron/self-learning-ai/tools/run_webqueue.py
+StandardOutput=append:/home/aaron/self-learning-ai/data/logs/webqueue.log
+StandardError=append:/home/aaron/self-learning-ai/data/logs/webqueue.log
