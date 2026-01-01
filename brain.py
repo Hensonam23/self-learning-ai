@@ -4,12 +4,19 @@ import os
 import re
 import sys
 import json
+import time
 import shutil
 import signal
 import difflib
 import datetime
 import threading
 from typing import Dict, Any, List, Tuple, Optional
+
+try:
+    import urllib.parse
+    import urllib.request
+except Exception:
+    urllib = None
 
 APP_NAME = "Machine Spirit"
 
@@ -30,6 +37,7 @@ AUTO_IMPORT_DIR = os.path.join(DATA_DIR, "auto_import")
 AUTO_IMPORT_STATE_PATH = os.path.join(DATA_DIR, "auto_import_state.json")
 
 RESEARCH_NOTES_DIR = os.path.join(DATA_DIR, "research_notes")
+WEB_CACHE_DIR = os.path.join(DATA_DIR, "web_cache")
 
 BACKUP_EVERY_SECONDS = 20 * 60  # 20 minutes
 
@@ -39,6 +47,12 @@ QUEUE_THRESHOLD = 0.58
 MIN_CONFIDENCE_FOR_AUTO_ALIAS_TARGET = 0.55
 
 AUTO_NOTES_CONFIDENCE_FLOOR = 0.65
+
+WEBQUEUE_LIMIT_PER_RUN = 3
+WEBLEARN_MAX_SOURCES = 5
+WEBLEARN_TIMEOUT_SEC = 14
+WEBLEARN_PER_SOURCE_CHAR_LIMIT = 14000
+WEBLEARN_SLEEP_BETWEEN_FETCH_SEC = 1.0
 
 
 def now_date() -> str:
@@ -56,6 +70,7 @@ def ensure_dirs() -> None:
     os.makedirs(AUTO_INGEST_DIR, exist_ok=True)
     os.makedirs(AUTO_IMPORT_DIR, exist_ok=True)
     os.makedirs(RESEARCH_NOTES_DIR, exist_ok=True)
+    os.makedirs(WEB_CACHE_DIR, exist_ok=True)
 
 
 def load_json(path: str, default):
@@ -86,10 +101,6 @@ def clamp(v: float, lo: float, hi: float) -> float:
 
 
 def topic_to_notes_filename(topic: str) -> str:
-    """
-    Matches the existing convention you had in queue worker_note:
-      "what is the osi model" -> "what_is_the_osi_model.txt"
-    """
     t = normalize_topic(topic)
     t = t.replace(" ", "_")
     t = re.sub(r"[^a-z0-9_]+", "", t)
@@ -99,24 +110,30 @@ def topic_to_notes_filename(topic: str) -> str:
     return t + ".txt"
 
 
+def read_text_file(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def write_text_file(path: str, text: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
 def find_research_note_path(topic: str) -> Optional[str]:
-    """
-    Try common filenames for a topic.
-    Only returns a path if it exists.
-    """
     os.makedirs(RESEARCH_NOTES_DIR, exist_ok=True)
 
     candidates = []
-    # Primary convention
     candidates.append(os.path.join(RESEARCH_NOTES_DIR, topic_to_notes_filename(topic)))
 
-    # Also try raw normalized name with .txt
     norm = normalize_topic(topic)
     norm_safe = re.sub(r"[^a-z0-9_ ]+", "", norm).strip()
     if norm_safe:
         candidates.append(os.path.join(RESEARCH_NOTES_DIR, norm_safe.replace(" ", "_") + ".txt"))
 
-    # Also try .md versions (optional, but helpful)
     candidates.append(os.path.join(RESEARCH_NOTES_DIR, topic_to_notes_filename(topic)[:-4] + ".md"))
 
     for p in candidates:
@@ -124,11 +141,6 @@ def find_research_note_path(topic: str) -> Optional[str]:
             return p
 
     return None
-
-
-def read_text_file(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
 
 
 def is_probably_terminal_command(text: str) -> bool:
@@ -195,6 +207,220 @@ def best_fuzzy_match(query: str, candidates: List[str]) -> Tuple[Optional[str], 
     return best, best_ratio
 
 
+def tokenize_words(text: str) -> List[str]:
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9\s\-]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return []
+    return [w for w in text.split(" ") if w]
+
+
+STOPWORDS = {
+    "the", "a", "an", "and", "or", "but", "if", "then", "else", "for", "to", "of",
+    "in", "on", "at", "by", "with", "as", "is", "are", "was", "were", "be", "been",
+    "it", "this", "that", "these", "those", "from", "into", "over", "under",
+    "you", "your", "we", "our", "they", "their", "he", "she", "them", "his", "her",
+    "not", "no", "yes", "can", "could", "should", "would", "will", "may", "might",
+    "also", "more", "most", "some", "such", "than", "too", "very",
+    "about", "what", "why", "how", "when", "where",
+}
+
+
+def top_keywords(text: str, n: int = 16) -> List[str]:
+    words = tokenize_words(text)
+    freq: Dict[str, int] = {}
+    for w in words:
+        if w in STOPWORDS:
+            continue
+        if len(w) <= 2:
+            continue
+        freq[w] = freq.get(w, 0) + 1
+    items = sorted(freq.items(), key=lambda x: x[1], reverse=True)
+    return [k for k, _v in items[:n]]
+
+
+def looks_disallowed_for_weblearn(topic: str) -> Tuple[bool, str]:
+    t = normalize_topic(topic)
+
+    bad_markers = [
+        "hack", "exploit", "bypass", "crack", "keylogger", "phishing", "malware",
+        "ddos", "steal", "credential", "password dump", "ransomware",
+        "how to break into", "break into", "cheat code", "aimbot", "undetectable",
+        "make a bomb", "build a bomb", "pipe bomb",
+    ]
+    for m in bad_markers:
+        if m in t:
+            return True, "I will not web learn topics related to hacking, malware, or wrongdoing."
+
+    personal_markers = [
+        "address of", "phone number", "social security", "ssn", "dox", "doxx",
+        "private info", "home address", "credit card", "bank account",
+    ]
+    for m in personal_markers:
+        if m in t:
+            return True, "I will not web learn requests for personal or private data."
+
+    return False, ""
+
+
+def ddg_lite_search(query: str, max_results: int = 8) -> List[str]:
+    if urllib is None:
+        return []
+
+    q = urllib.parse.quote_plus(query)
+    url = f"https://lite.duckduckgo.com/lite/?q={q}"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) MachineSpirit/1.0",
+        "Accept": "text/html",
+    }
+
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=WEBLEARN_TIMEOUT_SEC) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return []
+
+    links = re.findall(r'href="(https?://[^"]+)"', html)
+    cleaned: List[str] = []
+    for u in links:
+        if "duckduckgo.com" in u:
+            continue
+        if "javascript:" in u.lower():
+            continue
+        if u not in cleaned:
+            cleaned.append(u)
+        if len(cleaned) >= max_results:
+            break
+    return cleaned
+
+
+def strip_html_to_text(html: str) -> str:
+    html = re.sub(r"(?is)<script.*?>.*?</script>", " ", html)
+    html = re.sub(r"(?is)<style.*?>.*?</style>", " ", html)
+    html = re.sub(r"(?is)<noscript.*?>.*?</noscript>", " ", html)
+
+    html = re.sub(r"(?is)<br\s*/?>", "\n", html)
+    html = re.sub(r"(?is)</p\s*>", "\n", html)
+    html = re.sub(r"(?is)</h[1-6]\s*>", "\n", html)
+    html = re.sub(r"(?is)</li\s*>", "\n", html)
+
+    text = re.sub(r"(?is)<.*?>", " ", html)
+    text = text.replace("&nbsp;", " ")
+    text = text.replace("&amp;", "&")
+    text = text.replace("&lt;", "<")
+    text = text.replace("&gt;", ">")
+    text = text.replace("&quot;", '"')
+    text = text.replace("&#39;", "'")
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    return text.strip()
+
+
+def fetch_url_text(url: str) -> str:
+    if urllib is None:
+        return ""
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) MachineSpirit/1.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=WEBLEARN_TIMEOUT_SEC) as resp:
+            raw = resp.read()
+            try:
+                html = raw.decode("utf-8", errors="ignore")
+            except Exception:
+                html = raw.decode(errors="ignore")
+    except Exception:
+        return ""
+
+    text = strip_html_to_text(html)
+    if len(text) > WEBLEARN_PER_SOURCE_CHAR_LIMIT:
+        text = text[:WEBLEARN_PER_SOURCE_CHAR_LIMIT]
+    return text
+
+
+def cache_path_for_url(url: str) -> str:
+    safe = re.sub(r"[^a-z0-9]+", "_", url.lower()).strip("_")
+    if len(safe) > 160:
+        safe = safe[:160]
+    if not safe:
+        safe = "url"
+    return os.path.join(WEB_CACHE_DIR, safe + ".json")
+
+
+def get_cached_url_text(url: str, max_age_hours: int = 72) -> Optional[str]:
+    p = cache_path_for_url(url)
+    if not os.path.exists(p):
+        return None
+    try:
+        payload = load_json(p, None)
+        if not isinstance(payload, dict):
+            return None
+        ts = payload.get("fetched_at", "")
+        txt = payload.get("text", "")
+        if not ts or not txt:
+            return None
+        fetched = datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S")
+        age = datetime.datetime.now() - fetched
+        if age.total_seconds() > max_age_hours * 3600:
+            return None
+        return str(txt)
+    except Exception:
+        return None
+
+
+def set_cached_url_text(url: str, text: str) -> None:
+    p = cache_path_for_url(url)
+    payload = {
+        "url": url,
+        "fetched_at": datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "text": text,
+    }
+    save_json(p, payload)
+
+
+def synthesize_answer(topic: str, source_texts: List[str], source_urls: List[str]) -> str:
+    combined = "\n\n".join(source_texts)
+    kws = top_keywords(combined, n=18)
+
+    intro = (
+        f"{topic.strip()} in plain terms:\n"
+        f"This is a synthesized overview based on multiple sources. "
+        f"It is written in my own words and meant to be a clear working explanation.\n"
+    )
+
+    bullets = []
+    if kws:
+        bullets.append("Key ideas you will usually see:")
+        for k in kws[:10]:
+            bullets.append(f"- {k}")
+
+    guide = []
+    guide.append("\nHow to think about it:")
+    guide.append("- Start with a simple definition in one sentence.")
+    guide.append("- Identify the main parts or layers involved.")
+    guide.append("- Explain what problem it solves and where it is used.")
+    guide.append("- Mention common examples and common misunderstandings.")
+
+    practical = []
+    practical.append("\nPractical notes:")
+    practical.append("- If you are learning this for networking or IT work, focus on how it connects to real troubleshooting.")
+    practical.append("- If something seems inconsistent across sources, trust primary docs or standards first.")
+
+    sources_block = "\nSources used:\n" + "\n".join([f"- {u}" for u in source_urls[:WEBLEARN_MAX_SOURCES]])
+
+    body = intro + "\n".join(bullets) + "\n" + "\n".join(guide) + "\n" + "\n".join(practical) + "\n\n" + sources_block
+
+    # Make sure we do not accidentally store very long exact snippets.
+    body = re.sub(r"\n{3,}", "\n\n", body).strip()
+    return body
+
+
 class BrainState:
     def __init__(self):
         ensure_dirs()
@@ -209,6 +435,8 @@ class BrainState:
         self.last_why: Dict[str, Any] = {}
         self.last_suggestions: List[Tuple[str, float]] = []
         self.last_input_was_terminal: bool = False
+
+        self.last_web_sources: List[str] = []
 
         self._backup_timer: Optional[threading.Timer] = None
         self._shutdown = False
@@ -355,47 +583,18 @@ class BrainState:
     def get_entry(self, topic: str) -> Optional[Dict[str, Any]]:
         return self.knowledge.get(normalize_topic(topic))
 
-    def set_entry(self, topic: str, answer: str, confidence: float = 0.55, notes: str = "") -> None:
+    def set_entry(self, topic: str, answer: str, confidence: float = 0.55, notes: str = "", sources: Optional[List[str]] = None) -> None:
         t = normalize_topic(topic)
-        self.knowledge[t] = {
+        entry = {
             "answer": answer.strip(),
             "confidence": clamp(float(confidence), 0.0, 1.0),
             "updated_on": now_date(),
             "notes": notes.strip(),
         }
+        if sources:
+            entry["sources"] = list(sources)
+        self.knowledge[t] = entry
         self.save_all()
-
-    def upsert_from_notes(self, topic: str, note_path: str) -> bool:
-        """
-        Read a notes file, store into knowledge, bump confidence to at least AUTO_NOTES_CONFIDENCE_FLOOR,
-        and promote queue item if it exists.
-        """
-        try:
-            txt = read_text_file(note_path).strip()
-            if not txt:
-                return False
-        except Exception:
-            return False
-
-        t = normalize_topic(topic)
-        existing_conf = 0.0
-        if t in self.knowledge:
-            existing_conf = float(self.knowledge[t].get("confidence", 0.0))
-
-        new_conf = max(existing_conf, AUTO_NOTES_CONFIDENCE_FLOOR)
-
-        self.knowledge[t] = {
-            "answer": txt,
-            "confidence": clamp(new_conf, 0.0, 1.0),
-            "updated_on": now_date(),
-            "notes": f"Upgraded from research note: {os.path.basename(note_path)}",
-        }
-
-        # promote in queue if present
-        self.promote_if_present(t)
-
-        self.save_all()
-        return True
 
     def promote_if_present(self, topic_norm: str) -> bool:
         t = normalize_topic(topic_norm)
@@ -409,27 +608,6 @@ class BrainState:
         if changed:
             self.save_all()
         return changed
-
-    def autoupgrade_from_notes(self) -> Tuple[int, int]:
-        """
-        Scan pending queue. If notes exist, import them and promote to done.
-        Returns (upgraded_count, checked_count).
-        """
-        upgraded = 0
-        checked = 0
-        for item in self.queue:
-            if item.get("status", "pending") != "pending":
-                continue
-            topic = item.get("topic", "")
-            if not topic:
-                continue
-            checked += 1
-            p = find_research_note_path(topic)
-            if p:
-                ok = self.upsert_from_notes(topic, p)
-                if ok:
-                    upgraded += 1
-        return upgraded, checked
 
     def queue_topic(self, topic: str, reason: str, confidence: float) -> None:
         t = normalize_topic(topic)
@@ -509,6 +687,135 @@ class BrainState:
         self.add_alias(q, match_topic)
         return True
 
+    def upsert_from_notes(self, topic: str, note_path: str) -> bool:
+        try:
+            txt = read_text_file(note_path).strip()
+            if not txt:
+                return False
+        except Exception:
+            return False
+
+        t = normalize_topic(topic)
+        existing_conf = 0.0
+        if t in self.knowledge:
+            existing_conf = float(self.knowledge[t].get("confidence", 0.0))
+
+        new_conf = max(existing_conf, AUTO_NOTES_CONFIDENCE_FLOOR)
+
+        self.knowledge[t] = {
+            "answer": txt,
+            "confidence": clamp(new_conf, 0.0, 1.0),
+            "updated_on": now_date(),
+            "notes": f"Upgraded from research note: {os.path.basename(note_path)}",
+        }
+
+        self.promote_if_present(t)
+        self.save_all()
+        return True
+
+    def autoupgrade_from_notes(self) -> Tuple[int, int]:
+        upgraded = 0
+        checked = 0
+        for item in self.queue:
+            if item.get("status", "pending") != "pending":
+                continue
+            topic = item.get("topic", "")
+            if not topic:
+                continue
+            checked += 1
+            p = find_research_note_path(topic)
+            if p:
+                ok = self.upsert_from_notes(topic, p)
+                if ok:
+                    upgraded += 1
+        return upgraded, checked
+
+    def weblearn_topic(self, topic: str) -> Tuple[bool, str]:
+        disallowed, reason = looks_disallowed_for_weblearn(topic)
+        if disallowed:
+            return False, reason
+
+        if urllib is None:
+            return False, "Web learning is unavailable because urllib is not available in this Python environment."
+
+        urls = ddg_lite_search(topic, max_results=10)
+        if not urls:
+            return False, "Web search returned no results or could not be fetched."
+
+        picked: List[str] = []
+        for u in urls:
+            if any(b in u.lower() for b in ["youtube.com", "facebook.com", "instagram.com", "tiktok.com"]):
+                continue
+            picked.append(u)
+            if len(picked) >= WEBLEARN_MAX_SOURCES:
+                break
+
+        if not picked:
+            return False, "Search results were filtered out. Try a more specific topic."
+
+        texts: List[str] = []
+        used: List[str] = []
+
+        for u in picked:
+            cached = get_cached_url_text(u)
+            if cached is None:
+                txt = fetch_url_text(u)
+                if txt:
+                    set_cached_url_text(u, txt)
+                time.sleep(WEBLEARN_SLEEP_BETWEEN_FETCH_SEC)
+            else:
+                txt = cached
+
+            txt = (txt or "").strip()
+            if len(txt) < 400:
+                continue
+
+            texts.append(txt)
+            used.append(u)
+
+        if not texts:
+            return False, "Could not extract enough readable text from sources."
+
+        answer = synthesize_answer(topic, texts, used)
+
+        # Write research note file so the existing pipeline stays consistent
+        note_file = os.path.join(RESEARCH_NOTES_DIR, topic_to_notes_filename(topic))
+        write_text_file(note_file, answer)
+
+        t = normalize_topic(topic)
+        existing_conf = float(self.knowledge.get(t, {}).get("confidence", 0.0))
+        new_conf = max(existing_conf, 0.70)
+
+        self.set_entry(
+            topic,
+            answer,
+            confidence=new_conf,
+            notes=f"Web learned on {now_date()}",
+            sources=used,
+        )
+
+        self.promote_if_present(topic)
+        self.last_web_sources = list(used)
+
+        return True, f"Web learned and saved. Sources used: {len(used)}. Notes file: {os.path.basename(note_file)}"
+
+    def webqueue(self, limit: int = WEBQUEUE_LIMIT_PER_RUN) -> Tuple[int, int]:
+        done = 0
+        attempted = 0
+        for item in self.queue:
+            if item.get("status", "pending") != "pending":
+                continue
+            topic = item.get("topic", "")
+            if not topic:
+                continue
+            attempted += 1
+            ok, _msg = self.weblearn_topic(topic)
+            if ok:
+                done += 1
+            if attempted >= limit:
+                break
+        return done, attempted
+
     def answer_query(self, raw_query: str) -> str:
         self.last_input_was_terminal = False
         self.last_why = {}
@@ -527,20 +834,17 @@ class BrainState:
         if not q:
             return "Say something, or type /help."
 
-        # exact topic
         if q in self.knowledge:
             entry = self.knowledge[q]
             self.last_why = {"type": "exact", "topic": q, "confidence": float(entry.get("confidence", 0.0))}
             return entry.get("answer", "")
 
-        # alias direct
         alias_target = self.resolve_alias(q)
         if alias_target and alias_target in self.knowledge:
             entry = self.knowledge[alias_target]
             self.last_why = {"type": "alias", "alias": q, "target": alias_target, "confidence": float(entry.get("confidence", 0.0))}
             return entry.get("answer", "")
 
-        # NEW: on-demand research note upgrade before fuzzy and queue
         note_path = find_research_note_path(q)
         if note_path:
             ok = self.upsert_from_notes(q, note_path)
@@ -554,7 +858,6 @@ class BrainState:
                 }
                 return entry.get("answer", "")
 
-        # fuzzy topic match
         candidates = self.build_candidate_topics()
         best_topic, best_ratio = best_fuzzy_match(q, candidates)
 
@@ -578,7 +881,6 @@ class BrainState:
             if best_ratio >= 0.84 and "answer" in entry:
                 return entry.get("answer", "")
 
-        # queue hygiene
         if len(q) >= 3:
             top_sug = suggestions[0][1] if suggestions else 0.0
             if (top_sug < 0.84) and (top_sug >= QUEUE_THRESHOLD) and re.search(r"[a-z0-9]", q):
@@ -602,6 +904,9 @@ Commands:
   /clearpending
   /promote <topic>
   /autoupgrade
+  /weblearn <topic>
+  /webqueue
+  /sources
   /confidence <topic> [new_value_0_to_1]
   /lowest [n]
   /alias <alias> | <target_topic>
@@ -612,8 +917,10 @@ Commands:
   /why
 
 Notes:
-- Terminal-like inputs (example: "git status", "cd ..") are ignored by alias and queue logic.
-- If a notes file exists in data/research_notes/ for a topic, the brain can auto learn it.
+- Terminal-like inputs are ignored by alias and queue logic.
+- /weblearn will search the web and generate an original answer, then store it locally.
+- /webqueue will web learn a few pending queue topics each run.
+- /sources shows sources used for the last web learned answer.
 """.strip()
 
 
@@ -646,7 +953,8 @@ def import_json_file(state: BrainState, path: str) -> int:
                 continue
             conf = float(v.get("confidence", state.knowledge.get(topic, {}).get("confidence", 0.45)))
             notes = str(v.get("notes", f"Imported from {os.path.basename(path)}"))
-            state.set_entry(topic, ans, confidence=conf, notes=notes)
+            sources = v.get("sources", None) if isinstance(v.get("sources", None), list) else None
+            state.set_entry(topic, ans, confidence=conf, notes=notes, sources=sources)
             count += 1
     return count
 
@@ -782,6 +1090,18 @@ def show_why(state: BrainState) -> str:
     return json.dumps(state.last_why, indent=2)
 
 
+def show_sources(state: BrainState) -> str:
+    if state.last_web_sources:
+        return "Last web sources:\n" + "\n".join([f"- {u}" for u in state.last_web_sources])
+    if state.last_why and state.last_why.get("type") == "exact":
+        topic = state.last_why.get("topic", "")
+        e = state.knowledge.get(topic, {})
+        src = e.get("sources", None)
+        if isinstance(src, list) and src:
+            return "Sources for last exact answer:\n" + "\n".join([f"- {u}" for u in src])
+    return "No sources available yet. Use /weblearn <topic> first."
+
+
 def main():
     state = BrainState()
     state.run_auto_import()
@@ -907,6 +1227,24 @@ def main():
             if cmdline == "/autoupgrade":
                 upgraded, checked = state.autoupgrade_from_notes()
                 print(f"Auto upgraded {upgraded} topics from notes. Checked {checked} pending items.")
+                continue
+
+            if cmdline.startswith("/weblearn "):
+                topic = cmdline[len("/weblearn "):].strip()
+                if not topic:
+                    print("Usage: /weblearn <topic>")
+                    continue
+                ok, msg = state.weblearn_topic(topic)
+                print(msg if msg else ("Done." if ok else "Failed."))
+                continue
+
+            if cmdline == "/webqueue":
+                done, attempted = state.webqueue(limit=WEBQUEUE_LIMIT_PER_RUN)
+                print(f"Web queue run complete. Learned {done} out of {attempted} attempted (limit {WEBQUEUE_LIMIT_PER_RUN}).")
+                continue
+
+            if cmdline == "/sources":
+                print(show_sources(state))
                 continue
 
             if cmdline.startswith("/confidence "):
