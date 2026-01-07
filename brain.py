@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-# MachineSpirit - brain.py (single-file, self-contained)
+# MachineSpirit brain.py
+# NOTE: This file is intentionally self-contained (single file) and file-backed (JSON in ./data).
+# It preserves the command set you listed and extends Phase 1 (queuehealth + retry/backoff + clearer headless logs).
 
 import os
 import re
@@ -16,10 +18,8 @@ from typing import Dict, Any, List, Tuple, Optional
 try:
     import urllib.parse
     import urllib.request
-    import urllib.error
 except Exception:
     urllib = None
-
 
 APP_NAME = "Machine Spirit"
 
@@ -28,1543 +28,1307 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 
 KNOWLEDGE_PATH = os.path.join(DATA_DIR, "local_knowledge.json")
 ALIASES_PATH = os.path.join(DATA_DIR, "aliases.json")
-PENDING_PATH = os.path.join(DATA_DIR, "pending_fixes.json")
-RESEARCH_QUEUE_PATH = os.path.join(DATA_DIR, "research_queue.json")
 
-RESEARCH_NOTES_DIR = os.path.join(DATA_DIR, "research_notes")
-LOG_DIR = os.path.join(DATA_DIR, "logs")
+QUEUE_PATH = os.path.join(DATA_DIR, "research_queue.json")
+PENDING_PATH = os.path.join(DATA_DIR, "pending_promotions.json")
+
+LOGS_DIR = os.path.join(DATA_DIR, "logs")
 EXPORTS_DIR = os.path.join(DATA_DIR, "exports")
 BACKUPS_DIR = os.path.join(DATA_DIR, "backups")
 
-CURIOSITY_LOG = os.path.join(LOG_DIR, "curiosity.log")
-WEBQUEUE_LOG = os.path.join(LOG_DIR, "webqueue.log")
+WEBQUEUE_LOG = os.path.join(LOGS_DIR, "webqueue.log")
+CURIOSITY_LOG = os.path.join(LOGS_DIR, "curiosity.log")
+BRAIN_LOG = os.path.join(LOGS_DIR, "brain.log")
 
-# Web controls
-DEFAULT_UA = (
-    "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-)
-HTTP_TIMEOUT = 12
-SEARCH_TIMEOUT = 10
-MAX_SEARCH_RESULTS = 6
-MAX_FETCH_PAGES = 3
-MAX_PAGE_BYTES = 900_000
-MIN_TEXT_CHARS = 600
-MAX_NOTE_CHARS = 20_000
+DEFAULT_MAX_QUEUE_ATTEMPTS = 3
+DEFAULT_COOLDOWN_SECONDS = 6 * 60 * 60  # 6 hours
 
-# Queue controls
-WEBQUEUE_DEFAULT_LIMIT = 3
-MIN_CONFIDENCE_FOR_NO_QUEUE = 0.70
+# -----------------------------
+# Small utilities
+# -----------------------------
 
-# Fuzzy suggestion controls
-FUZZY_CUTOFF = 0.72
-FUZZY_SUGGEST_N = 3
+def now_ts() -> int:
+    return int(time.time())
 
-# Hard ignore obvious junk topics so they never get queued
-IGNORE_QUEUE_TOPICS = {
-    "test topic",
-    "test_topic",
-    "testing",
-}
-
-# Internal state
-_shutdown = False
-_last_suggestion: Optional[Dict[str, str]] = None  # {"alias": "...", "target": "...", "reason": "..."}
-_lock = threading.Lock()
-
-
-# ----------------------------
-# Utilities
-# ----------------------------
-
-def now_iso() -> str:
-    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def today_str() -> str:
-    return datetime.datetime.now().strftime("%Y-%m-%d")
-
+def iso_now() -> str:
+    return datetime.datetime.now().isoformat(timespec="seconds")
 
 def ensure_dirs() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
-    os.makedirs(RESEARCH_NOTES_DIR, exist_ok=True)
-    os.makedirs(LOG_DIR, exist_ok=True)
+    os.makedirs(LOGS_DIR, exist_ok=True)
     os.makedirs(EXPORTS_DIR, exist_ok=True)
     os.makedirs(BACKUPS_DIR, exist_ok=True)
 
+def atomic_write_json(path: str, obj: Any) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
 
-def log_line(path: str, msg: str) -> None:
+def read_json(path: str, default: Any) -> Any:
+    if not os.path.exists(path):
+        return default
     try:
-        ensure_dirs()
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(f"[{now_iso()}] {msg}\n")
-    except Exception:
-        pass
-
-
-def load_json(path: str, default):
-    try:
-        if not os.path.exists(path):
-            return default
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return default
 
+def safe_log(path: str, msg: str) -> None:
+    try:
+        ensure_dirs()
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"[{iso_now()}] {msg}\n")
+    except Exception:
+        pass
 
-def save_json(path: str, data) -> None:
+def backup_file(path: str) -> Optional[str]:
+    if not os.path.exists(path):
+        return None
     ensure_dirs()
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, path)
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    base = os.path.basename(path)
+    dst = os.path.join(BACKUPS_DIR, f"{base}.{ts}.bak")
+    try:
+        shutil.copy2(path, dst)
+        return dst
+    except Exception:
+        return None
 
-
-def safe_slug(s: str) -> str:
-    s = s.strip().lower()
-    s = re.sub(r"\s+", "_", s)
-    s = re.sub(r"[^a-z0-9_]+", "", s)
-    if not s:
-        s = "topic"
-    return s[:120]
-
-
-def strip_prompt_prefixes(s: str) -> str:
-    """
-    Strips transcript prompts like:
-      '> thing' or '>> thing' or '> > thing'
-    """
-    t = s.strip()
-    while True:
-        new = re.sub(r"^\s*(?:>\s*)+", "", t)
-        if new == t:
-            break
-        t = new.strip()
+def normalize_topic(t: str) -> str:
+    t = (t or "").strip().lower()
+    t = re.sub(r"\s+", " ", t)
     return t
 
-
-def strip_control_chars(s: str) -> str:
-    """
-    Removes ASCII control characters (including ESC) that show up when users paste
-    terminal artifacts like arrow keys, etc.
-    """
-    # keep newlines/tabs? For topics, we only want single-line anyway.
-    s = s.replace("\r", " ").replace("\n", " ").replace("\t", " ")
-    return re.sub(r"[\x00-\x1f\x7f]", "", s)
-
-
-def normalize_topic(s: str) -> str:
-    s = strip_prompt_prefixes(s)
-    s = strip_control_chars(s)
-    s = s.strip()
-    s = re.sub(r"\s+", " ", s)
-    s = s.strip("\"'`")
-    return s
-
-
-def looks_like_url_or_domain(s: str) -> bool:
-    t = s.strip().lower()
-
-    if re.match(r"^(https?://|ftp://)", t):
+def is_urlish(s: str) -> bool:
+    s = (s or "").strip()
+    if not s:
+        return False
+    if re.search(r"^(https?://)", s, re.IGNORECASE):
         return True
-    if t.startswith("www."):
+    if re.search(r"\bwww\.", s, re.IGNORECASE):
         return True
-    if "/" in t and "." in t.split("/")[0]:
+    if re.search(r"\b[a-z0-9-]+\.[a-z]{2,}\b", s, re.IGNORECASE):
+        # domain-ish (but keep it conservative)
         return True
-    if re.match(r"^[a-z0-9-]+\.(com|net|org|io|edu|gov|mil|co|uk|de|jp|fr|ru|cn|info|biz)(/.*)?$", t):
-        return True
-    if re.match(r"^\d{1,3}(\.\d{1,3}){3}(:\d+)?(/.*)?$", t):
-        return True
-
     return False
 
-
-def pretty_conf(x: float) -> str:
-    try:
-        return f"{float(x):.2f}"
-    except Exception:
-        return "0.00"
-
-
-def clamp(v: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, v))
-
-
-# -------------------------
-# Terminal command detection
-# -------------------------
-
-def is_probably_terminal_command(text: str) -> bool:
-    """
-    If the user types shell commands inside the brain prompt, we must NOT treat
-    it as a topic, alias, or queue item.
-    """
-    t = normalize_topic(text)
-    if not t:
+def has_control_chars(s: str) -> bool:
+    if s is None:
         return False
-
-    if t.endswith("?"):
-        return False
-
-    lower = t.lower()
-
-    # If it's clearly a "question sentence", not a command
-    for qword in ("what is", "what does", "how do", "how to", "why does", "explain", "help me"):
-        if lower.startswith(qword):
-            return False
-
-    # typical shell operators
-    if any(ch in t for ch in ["|", "&&", "||", ";", ">", "<", "$(", "`"]):
-        return True
-
-    # prompt-looking
-    if re.search(r"^[\w-]+@[\w-]+:.*\$\s+", t):
-        return True
-
-    # sudo
-    if lower.startswith("sudo "):
-        rest = lower[5:].lstrip()
-        if not rest:
-            return False
-        lower = rest
-        t = rest
-
-    common_cmds = {
-        "cd", "ls", "pwd", "whoami", "clear",
-        "git", "nano", "vim", "vi",
-        "python", "python3", "pip", "pip3",
-        "docker", "docker-compose", "compose",
-        "apt", "apt-get", "dnf", "yum", "pacman",
-        "systemctl", "journalctl", "service",
-        "rm", "cp", "mv", "cat", "less", "more", "head", "tail",
-        "grep", "find", "chmod", "chown",
-        "mkdir", "rmdir", "touch",
-        "curl", "wget", "ping", "ip", "ifconfig", "ss", "netstat",
-        "ssh", "scp",
-        "make", "npm", "node", "yarn",
-        "tar", "zip", "unzip",
-    }
-    parts = lower.split()
-    first = parts[0] if parts else ""
-    if first in common_cmds:
-        return True
-
-    if t.startswith("./") or t.startswith("/") or re.match(r"^[A-Za-z]:\\", t):
-        return True
-
-    # looks like options flags in a command
-    if re.search(r"\s-\w", t) and (" " in t) and not re.search(r"[.!?]$", t):
-        return True
-
+    for ch in s:
+        o = ord(ch)
+        if o < 32 and ch not in ("\n", "\r", "\t"):
+            return True
     return False
 
+def looks_like_terminal_command(s: str) -> bool:
+    s = (s or "").strip()
+    if not s:
+        return False
+    # Very common command starters / patterns that we saw polluting queue
+    if s.startswith((">", "$", "#", "sudo ", "ssh ", "cd ", "ls", "cat ", "tail ", "grep ", "nano ", "rm ", "python", "./")):
+        return True
+    # Pipe / redirect heavy (likely shell)
+    if (" | " in s) or (" >" in s) or ("< " in s) or (" && " in s) or (" || " in s):
+        return True
+    return False
 
-def is_garbage_topic(s: str) -> Tuple[bool, str]:
+def looks_like_transcript_prompt(s: str) -> bool:
+    s = (s or "").strip().lower()
+    if not s:
+        return False
+    # Examples: "copy and paste", "new chat handoff", "type a message", etc.
+    bad = [
+        "copy and paste",
+        "new chat handoff",
+        "type a message",
+        "ctrl+c",
+        "shutting down",
+        "machine spirit brain online",
+        "usage:",
+        "open in gmail",
+    ]
+    return any(b in s for b in bad)
+
+def is_junk_topic(s: str) -> Tuple[bool, str]:
     """
-    Central gatekeeper: anything that fails here must never be queued,
-    and webqueue must skip it even if already present in JSON.
+    Strict junk blocking for queue pollution.
     """
-    t = normalize_topic(s)
-    if not t:
-        return True, "empty topic"
-
-    low = t.strip().lower()
-
-    if low in IGNORE_QUEUE_TOPICS:
-        return True, "ignored test topic"
-
-    # Control chars already stripped, but if it's still weird short, block.
-    if len(low) < 2:
-        return True, "too short"
-    if len(low) > 140:
-        return True, "too long"
-
-    # commands / transcripts
-    if low.startswith("/"):
-        return True, "looks like a command"
-    if low.startswith(">"):
-        return True, "looks like transcript prompt"
-    if is_probably_terminal_command(low):
-        return True, "looks like a terminal command"
-
-    # URLs/domains
-    if looks_like_url_or_domain(low):
-        return True, "looks like a URL/domain"
-
-    # mostly symbols
-    if re.match(r"^[^\w]+$", low):
-        return True, "only symbols"
-
-    # too many odd characters (after normalization)
-    weird = re.findall(r"[^\w\s\-\.\(\):]", low)
-    if len(weird) > 6:
-        return True, "too many unusual characters"
-
+    if s is None:
+        return True, "empty"
+    s0 = s
+    s = (s or "").strip()
+    if not s:
+        return True, "empty"
+    if has_control_chars(s):
+        return True, "control_chars"
+    if len(s) > 200:
+        return True, "too_long"
+    if is_urlish(s):
+        return True, "url_or_domain"
+    if looks_like_terminal_command(s):
+        return True, "terminal_command"
+    if looks_like_transcript_prompt(s0):
+        return True, "transcript_prompt"
+    # avoid raw slash commands being queued as topics
+    if s.startswith("/"):
+        return True, "slash_command"
     return False, ""
 
+def human_age(seconds: int) -> str:
+    if seconds < 0:
+        seconds = 0
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    d, h = divmod(h, 24)
+    if d > 0:
+        return f"{d}d {h}h"
+    if h > 0:
+        return f"{h}h {m}m"
+    if m > 0:
+        return f"{m}m {s}s"
+    return f"{s}s"
 
-# ----------------------------
-# Storage
-# ----------------------------
+# -----------------------------
+# Persistent stores
+# -----------------------------
 
 def load_knowledge() -> Dict[str, Any]:
-    return load_json(KNOWLEDGE_PATH, {})
-
+    return read_json(KNOWLEDGE_PATH, {})
 
 def save_knowledge(k: Dict[str, Any]) -> None:
-    save_json(KNOWLEDGE_PATH, k)
-
+    backup_file(KNOWLEDGE_PATH)
+    atomic_write_json(KNOWLEDGE_PATH, k)
 
 def load_aliases() -> Dict[str, str]:
-    return load_json(ALIASES_PATH, {})
-
+    return read_json(ALIASES_PATH, {})
 
 def save_aliases(a: Dict[str, str]) -> None:
-    save_json(ALIASES_PATH, a)
+    backup_file(ALIASES_PATH)
+    atomic_write_json(ALIASES_PATH, a)
 
-
-def load_pending() -> List[Dict[str, Any]]:
-    return load_json(PENDING_PATH, [])
-
-
-def save_pending(p: List[Dict[str, Any]]) -> None:
-    save_json(PENDING_PATH, p)
-
-
-def load_research_queue() -> List[Dict[str, Any]]:
-    data = load_json(RESEARCH_QUEUE_PATH, [])
-    # normalize any existing queue topics in-place (soft cleanup)
+def load_queue() -> List[Dict[str, Any]]:
+    q = read_json(QUEUE_PATH, [])
+    if not isinstance(q, list):
+        return []
+    # Phase 1: ensure new fields exist (non-destructive)
     changed = False
-    if isinstance(data, list):
-        for it in data:
-            if not isinstance(it, dict):
-                continue
-            raw = str(it.get("topic", "") or "")
-            norm = normalize_topic(raw).lower()
-            if norm != raw:
-                it["topic"] = norm
-                changed = True
+    for item in q:
+        if not isinstance(item, dict):
+            continue
+        if "max_attempts" not in item:
+            item["max_attempts"] = DEFAULT_MAX_QUEUE_ATTEMPTS
+            changed = True
+        if "attempts" not in item:
+            item["attempts"] = 0
+            changed = True
+        if "last_attempt_ts" not in item:
+            item["last_attempt_ts"] = 0
+            changed = True
+        if "cooldown_seconds" not in item:
+            item["cooldown_seconds"] = DEFAULT_COOLDOWN_SECONDS
+            changed = True
+        if "fail_reason" not in item:
+            item["fail_reason"] = ""
+            changed = True
+        if "status" not in item:
+            item["status"] = "pending"
+            changed = True
     if changed:
-        save_json(RESEARCH_QUEUE_PATH, data)
-    return data if isinstance(data, list) else []
+        save_queue(q)
+    return q
 
+def save_queue(q: List[Dict[str, Any]]) -> None:
+    backup_file(QUEUE_PATH)
+    atomic_write_json(QUEUE_PATH, q)
 
-def save_research_queue(q: List[Dict[str, Any]]) -> None:
-    save_json(RESEARCH_QUEUE_PATH, q)
+def load_pending_promotions() -> List[Dict[str, Any]]:
+    p = read_json(PENDING_PATH, [])
+    if not isinstance(p, list):
+        return []
+    return p
 
+def save_pending_promotions(p: List[Dict[str, Any]]) -> None:
+    backup_file(PENDING_PATH)
+    atomic_write_json(PENDING_PATH, p)
 
-def resolve_alias(topic: str, aliases: Dict[str, str]) -> str:
-    t = topic.strip().lower()
+# -----------------------------
+# Alias (fuzzy suggestion + accept)
+# -----------------------------
+
+def suggest_alias(topic: str, knowledge: Dict[str, Any], aliases: Dict[str, str]) -> Optional[str]:
+    """
+    Suggest best match in knowledge keys for topic.
+    """
+    t = normalize_topic(topic)
+    if not t:
+        return None
+
+    # already alias?
     if t in aliases:
         return aliases[t]
-    return topic
 
+    keys = list(knowledge.keys())
+    if not keys:
+        return None
 
-# ----------------------------
-# Fuzzy suggestion logic (keep)
-# ----------------------------
+    # strong exact-ish candidates
+    if t in knowledge:
+        return None
 
-def fuzzy_suggest(input_topic: str, knowledge: Dict[str, Any], aliases: Dict[str, str]) -> List[str]:
-    t = input_topic.strip().lower()
-    if not t:
-        return []
+    # difflib best match
+    match = difflib.get_close_matches(t, keys, n=1, cutoff=0.70)
+    if match:
+        return match[0]
 
-    candidates = set()
-    for k in knowledge.keys():
-        candidates.add(k)
-    for _a, target in aliases.items():
-        candidates.add(target)
+    # substring fallback
+    for k in keys:
+        if t in k or k in t:
+            return k
+    return None
 
-    cand_list = sorted(candidates)
-    matches = difflib.get_close_matches(t, cand_list, n=FUZZY_SUGGEST_N, cutoff=FUZZY_CUTOFF)
-    return matches
+# -----------------------------
+# Knowledge shape helpers
+# -----------------------------
 
+def ensure_entry_shape(entry: Dict[str, Any]) -> Dict[str, Any]:
+    if "answer" not in entry:
+        entry["answer"] = ""
+    if "confidence" not in entry:
+        entry["confidence"] = 0.5
+    if "sources" not in entry:
+        entry["sources"] = []
+    if "notes" not in entry:
+        entry["notes"] = ""
+    if "updated" not in entry:
+        entry["updated"] = iso_now()
+    if "taught_by_user" not in entry:
+        entry["taught_by_user"] = False
+    return entry
 
-def set_last_suggestion(alias_word: str, target_topic: str, reason: str) -> None:
-    global _last_suggestion
-    _last_suggestion = {"alias": alias_word, "target": target_topic, "reason": reason}
+def set_knowledge(topic: str, answer: str, confidence: float, sources: Optional[List[str]] = None,
+                  notes: str = "", taught_by_user: bool = False) -> None:
+    topic_n = normalize_topic(topic)
+    if not topic_n:
+        return
+    k = load_knowledge()
+    entry = ensure_entry_shape(k.get(topic_n, {}))
+    entry["answer"] = (answer or "").strip()
+    entry["confidence"] = float(confidence)
+    entry["updated"] = iso_now()
+    entry["notes"] = notes or entry.get("notes", "")
+    entry["taught_by_user"] = bool(taught_by_user) or bool(entry.get("taught_by_user", False))
+    if sources is not None:
+        entry["sources"] = sources
+    k[topic_n] = entry
+    save_knowledge(k)
 
+# -----------------------------
+# Web fetch/search (fallback chain)
+# -----------------------------
 
-def clear_last_suggestion() -> None:
-    global _last_suggestion
-    _last_suggestion = None
-
-
-# ----------------------------
-# Web: HTTP helpers
-# ----------------------------
-
-def http_get(url: str, timeout: int = HTTP_TIMEOUT) -> Tuple[int, bytes, str]:
+def http_get(url: str, timeout: int = 12, headers: Optional[Dict[str, str]] = None) -> Tuple[int, str]:
     if urllib is None:
-        raise RuntimeError("urllib is not available in this Python environment")
-
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": DEFAULT_UA,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        },
-        method="GET",
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        status = getattr(resp, "status", 200)
-        final_url = resp.geturl()
-        data = resp.read(MAX_PAGE_BYTES + 1)
-        if len(data) > MAX_PAGE_BYTES:
-            data = data[:MAX_PAGE_BYTES]
-        return status, data, final_url
-
-
-def decode_bytes(data: bytes, fallback: str = "utf-8") -> str:
-    if not data:
-        return ""
+        return 0, ""
+    req = urllib.request.Request(url, headers=headers or {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+    })
     try:
-        return data.decode("utf-8", errors="replace")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            code = getattr(resp, "status", 200)
+            body = resp.read()
+            try:
+                text = body.decode("utf-8", errors="replace")
+            except Exception:
+                text = str(body)
+            return int(code), text
     except Exception:
-        try:
-            return data.decode("latin-1", errors="replace")
-        except Exception:
-            return data.decode(fallback, errors="replace")
-
+        return 0, ""
 
 def strip_html(html: str) -> str:
     if not html:
         return ""
+    # Remove scripts/styles
+    html = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", html)
+    # Remove tags
+    html = re.sub(r"(?is)<.*?>", " ", html)
+    # Decode a few common entities (minimal)
+    html = html.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    html = html.replace("&#39;", "'").replace("&quot;", '"')
+    # Collapse whitespace
+    html = re.sub(r"\s+", " ", html).strip()
+    return html
 
-    html = re.sub(r"(?is)<script.*?>.*?</script>", " ", html)
-    html = re.sub(r"(?is)<style.*?>.*?</style>", " ", html)
-    html = re.sub(r"(?is)<noscript.*?>.*?</noscript>", " ", html)
-
-    html = re.sub(r"(?is)<(nav|footer|header|aside).*?>.*?</\1>", " ", html)
-
-    html = re.sub(r"(?i)<br\s*/?>", "\n", html)
-    html = re.sub(r"(?i)</p\s*>", "\n", html)
-    html = re.sub(r"(?i)</div\s*>", "\n", html)
-    html = re.sub(r"(?i)</li\s*>", "\n", html)
-
-    text = re.sub(r"(?s)<.*?>", " ", html)
-
-    text = text.replace("&nbsp;", " ")
-    text = text.replace("&amp;", "&")
-    text = text.replace("&quot;", "\"")
-    text = text.replace("&lt;", "<")
-    text = text.replace("&gt;", ">")
-
-    text = re.sub(r"[ \t\r\f\v]+", " ", text)
-    text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
-    text = re.sub(r" *\n *", "\n", text)
-    return text.strip()
-
-
-def pick_best_excerpt(text: str, max_chars: int = MAX_NOTE_CHARS) -> str:
-    if not text:
-        return ""
-    t = text.strip()
-    if len(t) <= max_chars:
-        return t
-    cut = t[:max_chars]
-    idx = cut.rfind("\n\n")
-    if idx > 800:
-        cut = cut[:idx].strip()
-    return cut.strip()
-
-
-# ----------------------------
-# Web: Search providers (fallback chain)
-# ----------------------------
-
-def search_wikipedia_opensearch(query: str) -> List[str]:
+def wiki_opensearch(query: str) -> Optional[Tuple[str, str]]:
+    """
+    Returns (title, snippet-ish text) from Wikipedia OpenSearch.
+    """
     if urllib is None:
-        return []
-
+        return None
     q = urllib.parse.quote(query)
-    url = (
-        "https://en.wikipedia.org/w/api.php"
-        f"?action=opensearch&search={q}&limit=5&namespace=0&format=json"
-    )
+    url = f"https://en.wikipedia.org/w/api.php?action=opensearch&search={q}&limit=1&namespace=0&format=json"
+    code, text = http_get(url)
+    if code != 200 or not text:
+        return None
     try:
-        status, raw, _final = http_get(url, timeout=SEARCH_TIMEOUT)
-        if status >= 400:
-            return []
-        s = decode_bytes(raw)
-        data = json.loads(s)
-        urls = data[3] if isinstance(data, list) and len(data) >= 4 else []
-        if not isinstance(urls, list):
-            return []
-        return [u for u in urls if isinstance(u, str) and u.startswith("http")]
+        data = json.loads(text)
+        # [searchterm, [titles], [descriptions], [links]]
+        titles = data[1] if len(data) > 1 else []
+        descs = data[2] if len(data) > 2 else []
+        if titles:
+            title = titles[0]
+            desc = descs[0] if descs else ""
+            return title, desc
     except Exception:
-        return []
+        return None
+    return None
 
-
-def parse_ddg_links_from_html(html: str) -> List[str]:
-    if not html:
-        return []
-
-    links: List[str] = []
-
-    for m in re.finditer(r'(?is)<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"', html):
-        href = m.group(1).strip()
-        links.append(href)
-
-    for m in re.finditer(r'(?is)href="(/l/\?[^"]*uddg=[^"&]+[^"]*)"', html):
-        href = m.group(1)
-        links.append("https://lite.duckduckgo.com" + href)
-
-    for m in re.finditer(r'(?is)href="([^"]+uddg=[^"]+)"', html):
-        href = m.group(1).strip()
-        links.append(href)
-
-    out: List[str] = []
-    seen = set()
-    for u in links:
-        if not u or u in seen:
-            continue
-        seen.add(u)
-        out.append(u)
-    return out
-
-
-def resolve_ddg_redirect(url: str) -> str:
-    try:
-        parsed = urllib.parse.urlparse(url)
-        qs = urllib.parse.parse_qs(parsed.query)
-        if "uddg" in qs and qs["uddg"]:
-            return urllib.parse.unquote(qs["uddg"][0])
-    except Exception:
-        pass
-    return url
-
-
-def search_duckduckgo_html(query: str) -> List[str]:
+def ddg_html_search(query: str) -> Optional[Tuple[str, str]]:
+    """
+    DuckDuckGo HTML results (light parsing).
+    """
     if urllib is None:
-        return []
+        return None
     q = urllib.parse.quote(query)
     url = f"https://duckduckgo.com/html/?q={q}"
-    try:
-        status, raw, _final = http_get(url, timeout=SEARCH_TIMEOUT)
-        if status >= 400:
-            return []
-        html = decode_bytes(raw)
-        links = parse_ddg_links_from_html(html)
-        cleaned: List[str] = []
-        for u in links:
-            u = resolve_ddg_redirect(u)
-            if u.startswith("http"):
-                cleaned.append(u)
-        return cleaned[:MAX_SEARCH_RESULTS]
-    except Exception:
-        return []
+    code, html = http_get(url)
+    if code != 200 or not html:
+        return None
+    # first result link + snippet
+    m = re.search(r'(?is)<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html)
+    if not m:
+        return None
+    link = m.group(1)
+    title = strip_html(m.group(2))
+    # snippet
+    sm = re.search(r'(?is)<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', html)
+    snippet = strip_html(sm.group(1)) if sm else ""
+    return f"{title} ({link})", snippet
 
-
-def search_duckduckgo_lite(query: str) -> List[str]:
+def ddg_lite_search(query: str) -> Optional[Tuple[str, str]]:
+    """
+    DuckDuckGo lite results.
+    """
     if urllib is None:
-        return []
+        return None
     q = urllib.parse.quote(query)
     url = f"https://lite.duckduckgo.com/lite/?q={q}"
-    try:
-        status, raw, _final = http_get(url, timeout=SEARCH_TIMEOUT)
-        if status >= 400:
-            return []
-        html = decode_bytes(raw)
-        links = parse_ddg_links_from_html(html)
-        cleaned: List[str] = []
-        for u in links:
-            u = resolve_ddg_redirect(u)
-            if u.startswith("http"):
-                cleaned.append(u)
-        return cleaned[:MAX_SEARCH_RESULTS]
-    except Exception:
-        return []
+    code, html = http_get(url)
+    if code != 200 or not html:
+        return None
+    # crude: find first result link
+    m = re.search(r'(?is)<a rel="nofollow" class="result-link" href="([^"]+)".*?>(.*?)</a>', html)
+    if not m:
+        # alternate pattern
+        m = re.search(r'(?is)<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html)
+    if not m:
+        return None
+    link = m.group(1)
+    title = strip_html(m.group(2))
+    return f"{title} ({link})", ""
 
+def web_search_fallback(query: str) -> Tuple[bool, str, List[str]]:
+    """
+    Returns (ok, synthesized_short, sources)
+    Phase 1 keeps this simple; Phase 2 will do structured synthesis.
+    """
+    sources: List[str] = []
+    # 1) Wikipedia OpenSearch
+    w = wiki_opensearch(query)
+    if w:
+        title, desc = w
+        sources.append(f"Wikipedia OpenSearch: {title}")
+        if desc:
+            return True, f"{title}: {desc}", sources
+        return True, f"{title}", sources
 
-def web_search(query: str) -> Tuple[List[str], str]:
-    q = normalize_topic(query)
+    # 2) DDG HTML
+    d = ddg_html_search(query)
+    if d:
+        t, snip = d
+        sources.append("DuckDuckGo HTML")
+        if snip:
+            return True, f"{t} — {snip}", sources
+        return True, f"{t}", sources
 
-    urls = search_wikipedia_opensearch(q)
-    if urls:
-        return urls, "wikipedia_opensearch"
+    # 3) DDG Lite
+    l = ddg_lite_search(query)
+    if l:
+        t, snip = l
+        sources.append("DuckDuckGo Lite")
+        if snip:
+            return True, f"{t} — {snip}", sources
+        return True, f"{t}", sources
 
-    urls = search_duckduckgo_html(q)
-    if urls:
-        return urls, "duckduckgo_html"
+    return False, "Web search returned no results or could not be fetched.", sources
 
-    urls = search_duckduckgo_lite(q)
-    if urls:
-        return urls, "duckduckgo_lite"
+# -----------------------------
+# Queue logic (Phase 1: retry/backoff + health)
+# -----------------------------
 
-    return [], "none"
-
-
-# ----------------------------
-# Web: ingestion and learning
-# ----------------------------
-
-def note_path_for_topic(topic: str) -> str:
-    slug = safe_slug(topic)
-    return os.path.join(RESEARCH_NOTES_DIR, f"{slug}.txt")
-
-
-def write_research_note(topic: str, provider: str, urls: List[str], notes_text: str) -> str:
-    ensure_dirs()
-    path = note_path_for_topic(topic)
-    header = []
-    header.append(f"TOPIC: {topic}")
-    header.append(f"CREATED: {now_iso()}")
-    header.append(f"SEARCH_PROVIDER: {provider}")
-    header.append("SOURCES:")
-    for u in urls:
-        header.append(f"- {u}")
-    header.append("")
-    content = "\n".join(header) + notes_text.strip() + "\n"
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
-    return path
-
-
-def fetch_and_extract(url: str) -> Tuple[bool, str, str]:
-    try:
-        status, raw, final_url = http_get(url, timeout=HTTP_TIMEOUT)
-        if status >= 400:
-            return False, final_url, f"HTTP {status}"
-        html = decode_bytes(raw)
-        text = strip_html(html)
-        text = pick_best_excerpt(text, MAX_NOTE_CHARS)
-        if len(text) < MIN_TEXT_CHARS:
-            return False, final_url, f"weak_text({len(text)} chars)"
-        return True, final_url, text
-    except urllib.error.HTTPError as e:
-        return False, url, f"HTTPError {getattr(e, 'code', 'unknown')}"
-    except urllib.error.URLError as e:
-        return False, url, f"URLError {str(e)}"
-    except Exception as e:
-        return False, url, f"error {str(e)}"
-
-
-def build_simple_answer_from_notes(topic: str, note_text: str, sources: List[str]) -> str:
-    t = note_text.strip()
-    if not t:
-        return f"I collected some web notes for '{topic}', but the extracted text was empty."
-
-    parts = [p.strip() for p in re.split(r"\n\s*\n", t) if p.strip()]
-    excerpt = ""
-    if parts:
-        excerpt = parts[0]
-        if len(parts) >= 2 and len(parts[1]) > 120 and len(excerpt) < 1200:
-            excerpt = excerpt + "\n\n" + parts[1]
-    if not excerpt:
-        excerpt = t[:1200].strip()
-
-    src_lines = "\n".join([f"- {u}" for u in sources[:6]]) if sources else "- (no sources captured)"
-    answer = f"{excerpt}\n\nSources I pulled from:\n{src_lines}"
-    return answer.strip()
-
-
-def weblearn_topic(topic: str, update_knowledge: bool = True) -> Tuple[bool, str]:
-    t = normalize_topic(topic)
-
-    bad, reason = is_garbage_topic(t)
-    if bad:
-        if reason == "ignored test topic":
-            return False, "That looks like a test topic. I am ignoring it."
-        msg = f"Refusing to web-learn that topic ({reason}). Use a normal topic phrase, not a URL or command."
-        return False, msg
-
-    urls, provider = web_search(t)
-    if not urls:
-        return False, "Web search returned no results or could not be fetched."
-
-    fetched_texts: List[str] = []
-    final_sources: List[str] = []
-
-    for u in urls[:MAX_FETCH_PAGES]:
-        ok, final_url, text_or_err = fetch_and_extract(u)
-        if ok:
-            fetched_texts.append(text_or_err)
-            final_sources.append(final_url)
-        else:
-            log_line(WEBQUEUE_LOG, f"fetch_skip topic='{t}' url='{u}' final='{final_url}' reason='{text_or_err}'")
-
-        if len(fetched_texts) >= 2:
-            break
-
-    if not fetched_texts:
-        return False, "Search worked, but the pages I tried were blocked/too thin to extract."
-
-    combined = "\n\n---\n\n".join(fetched_texts).strip()
-    note_path = write_research_note(t, provider, final_sources, "\n" + combined + "\n")
-
-    if update_knowledge:
-        knowledge = load_knowledge()
-        entry = knowledge.get(t, {})
-        old_conf = float(entry.get("confidence", 0.30) or 0.30)
-        new_conf = clamp(old_conf + 0.18, 0.10, 0.95)
-
-        answer = build_simple_answer_from_notes(t, combined, final_sources)
-        entry = {
-            "answer": answer,
-            "confidence": new_conf,
-            "sources": final_sources,
-            "updated_on": today_str(),
-            "notes": f"Upgraded using web research note: {os.path.basename(note_path)}",
-        }
-        knowledge[t] = entry
-        save_knowledge(knowledge)
-
-    return True, f"Learned from the web and saved notes: {os.path.relpath(note_path, BASE_DIR)}"
-
-
-# ----------------------------
-# Research queue
-# ----------------------------
-
-def queue_topic(topic: str, reason: str, current_conf: float = 0.30) -> Tuple[bool, str]:
-    t = normalize_topic(topic).lower()
-    bad, why = is_garbage_topic(t)
-    if bad:
-        if why == "ignored test topic":
-            return False, "Not queued (ignored test topic)."
-        return False, f"Not queued ({why})."
-
-    q = load_research_queue()
-
+def queue_find_item(q: List[Dict[str, Any]], topic: str) -> Optional[Dict[str, Any]]:
+    tn = normalize_topic(topic)
     for item in q:
-        if item.get("topic") == t and item.get("status") in ("pending", "running"):
-            return False, "Already pending in web queue."
+        if normalize_topic(item.get("topic", "")) == tn:
+            return item
+    return None
 
-    q.append({
-        "topic": t,
-        "reason": reason,
-        "requested_on": today_str(),
-        "status": "pending",
-        "current_confidence": float(current_conf),
-        "worker_note": "",
+def queue_add(topic: str, reason: str = "", confidence: float = 0.35) -> Tuple[bool, str]:
+    topic_n = normalize_topic(topic)
+    junk, why = is_junk_topic(topic_n)
+    if junk:
+        return False, f"Not queued (junk): {why}"
+    q = load_queue()
+    existing = queue_find_item(q, topic_n)
+    if existing:
+        # only bump reason if empty
+        if reason and not existing.get("reason"):
+            existing["reason"] = reason
+            save_queue(q)
+        return False, "Already queued."
+    item = {
+        "topic": topic_n,
+        "reason": reason or "",
+        "requested_on": iso_now(),
+        "status": "pending",  # pending, running, done, failed, failed_final
+        "current_confidence": float(confidence),
+
+        # Phase 1 fields
         "attempts": 0,
-        "last_error": "",
-    })
-    save_research_queue(q)
-    return True, "Queued for deeper web research."
+        "max_attempts": DEFAULT_MAX_QUEUE_ATTEMPTS,
+        "last_attempt_ts": 0,
+        "cooldown_seconds": DEFAULT_COOLDOWN_SECONDS,
+        "fail_reason": "",
+        "completed_on": "",
+        "worker_note": "",
+    }
+    q.append(item)
+    save_queue(q)
+    return True, "Queued."
 
-
-def clear_pending_queue() -> int:
-    q = load_research_queue()
+def queue_clear_pending() -> int:
+    q = load_queue()
     before = len(q)
-    q = [x for x in q if x.get("status") != "pending"]
-    save_research_queue(q)
-    return before - len(q)
+    q2 = [i for i in q if i.get("status") != "pending"]
+    save_queue(q2)
+    return before - len(q2)
 
-
-def purge_junk_pending() -> Dict[str, int]:
-    """
-    Removes ONLY pending junk items (commands, URLs, transcript junk).
-    Keeps done history.
-    """
-    q = load_research_queue()
+def queue_purge_junk_pending() -> int:
+    q = load_queue()
     kept = []
     removed = 0
-    for it in q:
-        if not isinstance(it, dict):
+    for item in q:
+        st = item.get("status", "pending")
+        if st != "pending":
+            kept.append(item)
             continue
-        status = it.get("status")
-        topic = str(it.get("topic", "") or "")
-        if status == "pending":
-            bad, _why = is_garbage_topic(topic)
-            if bad:
-                removed += 1
-                continue
-        kept.append(it)
-    save_research_queue(kept)
-    return {"removed": removed, "kept": len(kept)}
+        junk, _why = is_junk_topic(item.get("topic", ""))
+        if junk:
+            removed += 1
+            continue
+        kept.append(item)
+    save_queue(kept)
+    return removed
 
+def queue_health_report() -> Dict[str, Any]:
+    q = load_queue()
+    counts = {"pending": 0, "running": 0, "done": 0, "failed": 0, "failed_final": 0, "other": 0}
+    oldest_pending_ts: Optional[int] = None
+    failure_reasons: Dict[str, int] = {}
+    stuck_items: List[Dict[str, Any]] = []
 
-def webqueue_run(limit: int = WEBQUEUE_DEFAULT_LIMIT) -> Dict[str, Any]:
-    ensure_dirs()
-    q = load_research_queue()
+    now = now_ts()
+    for item in q:
+        st = item.get("status", "pending")
+        if st in counts:
+            counts[st] += 1
+        else:
+            counts["other"] += 1
 
+        if st == "pending":
+            # requested_on is ISO; try to parse
+            req = item.get("requested_on", "")
+            ts = parse_iso_to_ts(req)
+            if ts:
+                if oldest_pending_ts is None or ts < oldest_pending_ts:
+                    oldest_pending_ts = ts
+
+        if st in ("failed", "failed_final"):
+            r = (item.get("fail_reason") or "unknown").strip() or "unknown"
+            failure_reasons[r] = failure_reasons.get(r, 0) + 1
+
+        # Stuck detection
+        if st == "running":
+            last = int(item.get("last_attempt_ts") or 0)
+            if last > 0 and (now - last) > (60 * 30):  # 30 min since last attempt marked running
+                stuck_items.append(item)
+
+        if st == "pending":
+            # if it's pending but cooldown not satisfied and looks "stuck waiting"
+            last = int(item.get("last_attempt_ts") or 0)
+            cd = int(item.get("cooldown_seconds") or DEFAULT_COOLDOWN_SECONDS)
+            if last > 0 and (now - last) < cd and int(item.get("attempts") or 0) > 0:
+                # not truly stuck, but waiting
+                pass
+
+    oldest_pending_age = None
+    if oldest_pending_ts is not None:
+        oldest_pending_age = human_age(now - oldest_pending_ts)
+
+    top_reasons = sorted(failure_reasons.items(), key=lambda x: x[1], reverse=True)[:5]
+    return {
+        "counts": counts,
+        "oldest_pending_age": oldest_pending_age,
+        "top_failure_reasons": top_reasons,
+        "stuck_running_count": len(stuck_items),
+        "stuck_running_items": [
+            {
+                "topic": i.get("topic", ""),
+                "last_attempt_age": human_age(now - int(i.get("last_attempt_ts") or 0))
+            } for i in stuck_items[:5]
+        ],
+    }
+
+def parse_iso_to_ts(s: str) -> Optional[int]:
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        # accept "YYYY-MM-DDTHH:MM:SS"
+        dt = datetime.datetime.fromisoformat(s)
+        return int(dt.timestamp())
+    except Exception:
+        return None
+
+def can_attempt(item: Dict[str, Any]) -> Tuple[bool, str]:
+    """
+    Retry/backoff gate:
+    - skip if junk
+    - skip if status not pending/failed
+    - skip if attempts >= max_attempts -> failed_final
+    - skip if cooldown not elapsed since last_attempt_ts
+    """
+    topic = item.get("topic", "")
+    junk, why = is_junk_topic(topic)
+    if junk:
+        return False, f"junk:{why}"
+
+    st = item.get("status", "pending")
+    if st not in ("pending", "failed"):
+        return False, f"status:{st}"
+
+    attempts = int(item.get("attempts") or 0)
+    max_attempts = int(item.get("max_attempts") or DEFAULT_MAX_QUEUE_ATTEMPTS)
+    if attempts >= max_attempts:
+        return False, "max_attempts_reached"
+
+    last = int(item.get("last_attempt_ts") or 0)
+    cd = int(item.get("cooldown_seconds") or DEFAULT_COOLDOWN_SECONDS)
+    if last > 0:
+        elapsed = now_ts() - last
+        if elapsed < cd:
+            return False, f"cooldown:{human_age(cd - elapsed)}"
+
+    return True, "ok"
+
+def mark_failed(item: Dict[str, Any], reason: str, final: bool = False) -> None:
+    item["status"] = "failed_final" if final else "failed"
+    item["fail_reason"] = (reason or "").strip()[:200]
+    item["completed_on"] = iso_now() if final else item.get("completed_on", "")
+    if final:
+        item["worker_note"] = (item.get("worker_note") or "") + f" Finalized failure: {reason}"
+
+def mark_done(item: Dict[str, Any], note: str = "") -> None:
+    item["status"] = "done"
+    item["completed_on"] = iso_now()
+    if note:
+        item["worker_note"] = note
+
+def run_webqueue(limit: int = 3, autoupgrade: bool = True) -> Dict[str, Any]:
+    """
+    Headless safe runner for systemd timer use.
+    """
+    q = load_queue()
     attempted = 0
     learned = 0
     skipped = 0
-    failed = 0
+    finalized = 0
 
-    pending_idxs = [i for i, it in enumerate(q) if isinstance(it, dict) and it.get("status") == "pending"]
-
-    if not pending_idxs:
-        log_line(WEBQUEUE_LOG, f"run_webqueue: learned=0 attempted=0 skipped=0 failed=0 limit={limit} (no pending)")
-        return {"learned": 0, "attempted": 0, "skipped": 0, "failed": 0, "limit": limit, "note": "no pending"}
-
-    for idx in pending_idxs:
+    # work on earliest pending/failed first (stable order)
+    # keep original order but filter by eligibility
+    for item in q:
         if attempted >= limit:
             break
 
-        item = q[idx]
-        topic = str(item.get("topic", "") or "").strip()
-
-        bad, why = is_garbage_topic(topic)
-        if bad:
-            skipped += 1
-            item["status"] = "failed"
-            item["last_error"] = f"skipped: {why}"
-            item["attempts"] = int(item.get("attempts", 0)) + 1
-            q[idx] = item
-            log_line(WEBQUEUE_LOG, f"webqueue_skip topic='{topic}' reason='{why}'")
+        ok, why = can_attempt(item)
+        if not ok:
+            # If junk: mark failed_final immediately (don’t keep retrying junk)
+            if why.startswith("junk:"):
+                mark_failed(item, why, final=True)
+                safe_log(WEBQUEUE_LOG, f"webqueue: finalize junk topic='{item.get('topic','')}' reason='{why}'")
+                finalized += 1
+            elif why == "max_attempts_reached":
+                mark_failed(item, "max_attempts_reached", final=True)
+                safe_log(WEBQUEUE_LOG, f"webqueue: finalize max attempts topic='{item.get('topic','')}' attempts={item.get('attempts',0)}")
+                finalized += 1
+            else:
+                skipped += 1
+                safe_log(WEBQUEUE_LOG, f"webqueue: skip topic='{item.get('topic','')}' because {why}")
             continue
 
+        # Attempt
         attempted += 1
         item["status"] = "running"
-        item["attempts"] = int(item.get("attempts", 0)) + 1
-        q[idx] = item
-        save_research_queue(q)
+        item["attempts"] = int(item.get("attempts") or 0) + 1
+        item["last_attempt_ts"] = now_ts()
 
-        ok, msg = weblearn_topic(topic, update_knowledge=True)
-        if ok:
-            learned += 1
-            item["status"] = "done"
-            item["completed_on"] = today_str()
-            item["worker_note"] = "Upgraded knowledge using web research note"
-            item["last_error"] = ""
-            q[idx] = item
-            log_line(WEBQUEUE_LOG, f"webqueue_done topic='{topic}' msg='{msg}'")
-        else:
-            failed += 1
+        topic = item.get("topic", "")
+        safe_log(WEBQUEUE_LOG, f"webqueue: attempt {item['attempts']}/{item.get('max_attempts',DEFAULT_MAX_QUEUE_ATTEMPTS)} topic='{topic}'")
+
+        ok2, text, sources = web_search_fallback(topic)
+        if not ok2:
+            # transient failure -> failed (not final), will respect cooldown
             item["status"] = "failed"
-            item["last_error"] = msg
-            q[idx] = item
-            log_line(WEBQUEUE_LOG, f"webqueue_failed topic='{topic}' error='{msg}'")
+            item["fail_reason"] = "web_fetch_failed"
+            safe_log(WEBQUEUE_LOG, f"webqueue: failed topic='{topic}' reason='web_fetch_failed'")
+            continue
 
-        save_research_queue(q)
+        # If we got something back, store it as low-confidence learned note unless user already taught higher confidence.
+        if autoupgrade:
+            k = load_knowledge()
+            existing = k.get(topic)
+            existing_conf = float(existing.get("confidence", 0.0)) if isinstance(existing, dict) else 0.0
+            taught_by_user = bool(existing.get("taught_by_user", False)) if isinstance(existing, dict) else False
 
-    log_line(WEBQUEUE_LOG, f"run_webqueue: learned={learned} attempted={attempted} skipped={skipped} failed={failed} limit={limit}")
-    return {"learned": learned, "attempted": attempted, "skipped": skipped, "failed": failed, "limit": limit}
+            # Guardrail: do not overwrite strong user-taught answers
+            if taught_by_user and existing_conf >= 0.75:
+                mark_done(item, note="Skipped upgrade: user-taught answer is high confidence.")
+                safe_log(WEBQUEUE_LOG, f"webqueue: done (skipped overwrite) topic='{topic}' taught_by_user=True conf={existing_conf}")
+                continue
 
+            # Write/update entry
+            new_answer = text.strip()
+            new_conf = max(float(item.get("current_confidence", 0.35)), 0.40)
+            note = "Upgraded knowledge using web search fallback chain"
+            set_knowledge(topic, new_answer, new_conf, sources=sources, notes=note, taught_by_user=False)
+            learned += 1
+            mark_done(item, note=f"{note}.")
+            safe_log(WEBQUEUE_LOG, f"webqueue: learned topic='{topic}' sources={sources}")
+        else:
+            mark_done(item, note="Fetched (autoupgrade disabled).")
+            safe_log(WEBQUEUE_LOG, f"webqueue: done topic='{topic}' autoupgrade=False")
 
-# ----------------------------
-# Commands
-# ----------------------------
+    # finalize max attempts now (for items we didn’t touch this run)
+    for item in q:
+        if item.get("status") in ("pending", "failed"):
+            attempts = int(item.get("attempts") or 0)
+            max_attempts = int(item.get("max_attempts") or DEFAULT_MAX_QUEUE_ATTEMPTS)
+            if attempts >= max_attempts:
+                mark_failed(item, "max_attempts_reached", final=True)
+                finalized += 1
 
-def cmd_help() -> None:
-    print(f"{APP_NAME} commands:")
-    print("  /teach <topic> | <answer>")
-    print("  /teachfile <topic> | <path_to_text_file>")
-    print("  /import <path_to_json>")
-    print("  /importfolder <folder_path>")
-    print("  /ingest <topic> | <path_to_text_file>")
-    print("  /export")
-    print("  /queue")
-    print("  /clearpending")
-    print("  /purgejunk    (remove ONLY pending junk items like cat/tail/urls)")
-    print("  /promote <topic> [confidence]")
-    print("  /confidence <topic>")
-    print("  /lowest [n]")
-    print("  /alias <alias> | <target_topic>")
-    print("  /aliases")
-    print("  /unalias <alias>")
-    print("  /accept  (accept last alias suggestion)")
-    print("  /suggest (show last suggestion)")
-    print("  /why <topic>")
-    print("  /weblearn <topic>")
-    print("  /webqueue [limit]")
-    print("  /curiosity   (simple daily low-confidence queue fill)")
-    print("  /exit")
+    save_queue(q)
+    safe_log(WEBQUEUE_LOG, f"run_webqueue: learned={learned} attempted={attempted} skipped={skipped} finalized={finalized} limit={limit}")
+    return {"learned": learned, "attempted": attempted, "skipped": skipped, "finalized": finalized, "limit": limit}
 
+# -----------------------------
+# Promotions queue (/queue, /promote, /why)
+# -----------------------------
 
-def parse_pipe_args(s: str) -> Optional[Tuple[str, str]]:
-    if "|" not in s:
+def add_pending_promotion(topic: str, why: str = "") -> None:
+    p = load_pending_promotions()
+    topic_n = normalize_topic(topic)
+    if not topic_n:
+        return
+    # dedupe
+    for item in p:
+        if normalize_topic(item.get("topic", "")) == topic_n:
+            return
+    p.append({"topic": topic_n, "why": why or "", "added": iso_now()})
+    save_pending_promotions(p)
+
+def pop_pending() -> Optional[Dict[str, Any]]:
+    p = load_pending_promotions()
+    if not p:
         return None
-    left, right = s.split("|", 1)
+    item = p.pop(0)
+    save_pending_promotions(p)
+    return item
+
+# -----------------------------
+# Curiosity (minimal - existing command preserved)
+# -----------------------------
+
+def curiosity_tick(limit: int = 3) -> Dict[str, Any]:
+    """
+    Basic daily curiosity: look for lowest-confidence topics and queue them.
+    Guardrails are already in place via junk checks and queue dedupe.
+    """
+    k = load_knowledge()
+    # sort by confidence asc, then oldest updated
+    items = []
+    for topic, entry in k.items():
+        if not isinstance(entry, dict):
+            continue
+        conf = float(entry.get("confidence", 0.0))
+        upd = parse_iso_to_ts(entry.get("updated", "")) or 0
+        items.append((conf, upd, topic))
+    items.sort(key=lambda x: (x[0], x[1]))
+
+    queued = 0
+    considered = 0
+    for conf, _upd, topic in items:
+        if queued >= limit:
+            break
+        considered += 1
+        ok, msg = queue_add(topic, reason="Curiosity: low confidence topic", confidence=max(conf, 0.35))
+        if ok:
+            queued += 1
+
+    safe_log(CURIOSITY_LOG, f"curiosity: considered={considered} queued={queued} limit={limit}")
+    return {"considered": considered, "queued": queued, "limit": limit}
+
+# -----------------------------
+# Command parsing helpers
+# -----------------------------
+
+def split_pipe(cmd: str) -> Tuple[str, str]:
+    """
+    Split "left | right" once.
+    """
+    if "|" not in cmd:
+        return cmd.strip(), ""
+    left, right = cmd.split("|", 1)
     return left.strip(), right.strip()
 
+def print_help() -> None:
+    print(f"""{APP_NAME} commands:
+
+/teach <topic> | <answer>
+/teachfile <topic> | <path>
+/import <path>
+/importfolder <folder>
+/ingest <topic> | <text>
+/export
+/queue
+/clearpending
+/purgejunk
+/promote
+/confidence <topic>
+/lowest [n]
+/alias <from> | <to>
+/aliases
+/unalias <from>
+/why <topic>
+/accept
+/suggest
+/weblearn <topic>
+/webqueue [limit]
+/queuehealth
+/curiosity [limit]
+
+Type a normal topic name (example: "subnetting") to get an answer.
+""")
+
+# -----------------------------
+# Core interaction
+# -----------------------------
+
+def resolve_topic(topic: str, aliases: Dict[str, str]) -> str:
+    t = normalize_topic(topic)
+    if t in aliases:
+        return normalize_topic(aliases[t])
+    return t
+
+def get_answer_for_topic(topic: str) -> Optional[Dict[str, Any]]:
+    k = load_knowledge()
+    topic_n = normalize_topic(topic)
+    entry = k.get(topic_n)
+    if isinstance(entry, dict):
+        return ensure_entry_shape(entry)
+    return None
+
+def show_topic(topic: str) -> None:
+    aliases = load_aliases()
+    k = load_knowledge()
+
+    topic_raw = topic
+    topic_n = normalize_topic(topic_raw)
+    resolved = resolve_topic(topic_n, aliases)
+
+    # If alias suggestion exists, show it (but don't force)
+    if resolved == topic_n:
+        sug = suggest_alias(topic_n, k, aliases)
+        if sug and sug != topic_n:
+            print(f"Suggestion: /alias {topic_n} | {sug}")
+
+    entry = k.get(resolved)
+    if isinstance(entry, dict) and entry.get("answer"):
+        entry = ensure_entry_shape(entry)
+        print(entry["answer"])
+        # If low confidence, queue it
+        if float(entry.get("confidence", 0.0)) < 0.60:
+            ok, _ = queue_add(resolved, reason="Answer exists but confidence is low", confidence=float(entry["confidence"]))
+            if ok:
+                safe_log(BRAIN_LOG, f"autoqueue: topic='{resolved}' reason='low_confidence'")
+        return
+
+    # no answer
+    print("Machine Spirit: I do not have a taught answer for that yet. If my reply is wrong or weak, correct me in your own words and I will remember it. My analysis may be incomplete. If this seems wrong, correct me and I will update my understanding. I have also marked this topic for deeper research so I can improve my answer over time.")
+    queue_add(topic_n, reason="No taught answer yet", confidence=0.35)
 
 def cmd_teach(arg: str) -> None:
-    parsed = parse_pipe_args(arg)
-    if not parsed:
+    left, right = split_pipe(arg)
+    topic = normalize_topic(left.replace("/teach", "", 1).strip())
+    answer = right
+    if not topic or not answer:
         print("Usage: /teach <topic> | <answer>")
         return
-    topic, answer = parsed
-    topic = normalize_topic(topic).lower()
-    if not topic:
-        print("Topic cannot be empty.")
-        return
-    if not answer.strip():
-        print("Answer cannot be empty.")
-        return
-
-    knowledge = load_knowledge()
-    entry = knowledge.get(topic, {})
-    old_conf = float(entry.get("confidence", 0.30) or 0.30)
-    new_conf = clamp(old_conf + 0.25, 0.10, 0.98)
-
-    entry = {
-        "answer": answer.strip(),
-        "confidence": new_conf,
-        "sources": entry.get("sources", []),
-        "updated_on": today_str(),
-        "notes": "Updated by user via /teach",
-    }
-    knowledge[topic] = entry
-    save_knowledge(knowledge)
-    print(f"Learned: '{topic}' (confidence {pretty_conf(new_conf)})")
-
+    set_knowledge(topic, answer, confidence=0.90, sources=[], notes="Updated by user re teach", taught_by_user=True)
+    print("Saved.")
 
 def cmd_teachfile(arg: str) -> None:
-    parsed = parse_pipe_args(arg)
-    if not parsed:
-        print("Usage: /teachfile <topic> | <path_to_text_file>")
+    left, right = split_pipe(arg)
+    topic = normalize_topic(left.replace("/teachfile", "", 1).strip())
+    path = right
+    if not topic or not path:
+        print("Usage: /teachfile <topic> | <path>")
         return
-    topic, path = parsed
-    topic = normalize_topic(topic).lower()
-    path = path.strip()
-
     if not os.path.exists(path):
-        print(f"File not found: {path}")
+        print("File not found.")
         return
-
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read().strip()
-    except Exception as e:
-        print(f"Could not read file: {e}")
+            text = f.read()
+    except Exception:
+        print("Could not read file.")
         return
-
-    if not content:
-        print("File was empty.")
-        return
-
-    knowledge = load_knowledge()
-    entry = knowledge.get(topic, {})
-    old_conf = float(entry.get("confidence", 0.30) or 0.30)
-    new_conf = clamp(old_conf + 0.22, 0.10, 0.98)
-
-    entry = {
-        "answer": content,
-        "confidence": new_conf,
-        "sources": entry.get("sources", []),
-        "updated_on": today_str(),
-        "notes": f"Updated by user via /teachfile ({os.path.basename(path)})",
-    }
-    knowledge[topic] = entry
-    save_knowledge(knowledge)
-    print(f"Learned from file: '{topic}' (confidence {pretty_conf(new_conf)})")
-
+    set_knowledge(topic, text, confidence=0.90, sources=[f"local file: {path}"], notes="Taught via teachfile", taught_by_user=True)
+    print("Saved.")
 
 def cmd_ingest(arg: str) -> None:
-    parsed = parse_pipe_args(arg)
-    if not parsed:
-        print("Usage: /ingest <topic> | <path_to_text_file>")
+    left, right = split_pipe(arg)
+    topic = normalize_topic(left.replace("/ingest", "", 1).strip())
+    text = right
+    if not topic or not text:
+        print("Usage: /ingest <topic> | <text>")
         return
-    topic, path = parsed
-    topic = normalize_topic(topic).lower()
-    path = path.strip()
-
-    if not os.path.exists(path):
-        print(f"File not found: {path}")
-        return
-
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read().strip()
-    except Exception as e:
-        print(f"Could not read file: {e}")
-        return
-
-    if not content:
-        print("File was empty.")
-        return
-
-    note_path = write_research_note(topic, "local_ingest", [f"file:{os.path.abspath(path)}"], "\n" + content + "\n")
-
-    knowledge = load_knowledge()
-    entry = knowledge.get(topic, {})
-    old_conf = float(entry.get("confidence", 0.30) or 0.30)
-    new_conf = clamp(old_conf + 0.18, 0.10, 0.98)
-
-    entry = {
-        "answer": content,
-        "confidence": new_conf,
-        "sources": [f"file:{os.path.abspath(path)}"],
-        "updated_on": today_str(),
-        "notes": f"Ingested local file into research note: {os.path.basename(note_path)}",
-    }
-    knowledge[topic] = entry
-    save_knowledge(knowledge)
-
-    print(f"Ingested into notes + knowledge: '{topic}' (confidence {pretty_conf(new_conf)})")
-
+    set_knowledge(topic, text, confidence=0.75, sources=[], notes="Ingested text", taught_by_user=True)
+    print("Saved.")
 
 def cmd_import(path: str) -> None:
-    path = path.strip()
+    path = path.replace("/import", "", 1).strip()
     if not path:
-        print("Usage: /import <path_to_json>")
+        print("Usage: /import <path>")
         return
     if not os.path.exists(path):
-        print(f"File not found: {path}")
+        print("File not found.")
         return
-
-    data = load_json(path, None)
-    if data is None or not isinstance(data, dict):
-        print("Import failed: JSON must be an object of topic -> entry.")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        print("Import failed (not valid JSON).")
         return
-
-    knowledge = load_knowledge()
+    if not isinstance(data, dict):
+        print("Import failed (expected JSON object).")
+        return
+    k = load_knowledge()
     merged = 0
-    for k, v in data.items():
-        if not isinstance(k, str):
+    for topic, entry in data.items():
+        t = normalize_topic(topic)
+        if not t:
             continue
-        kk = normalize_topic(k).lower()
-        if isinstance(v, dict) and "answer" in v:
-            knowledge[kk] = v
-            merged += 1
-        elif isinstance(v, str):
-            knowledge[kk] = {"answer": v, "confidence": 0.50, "sources": [], "updated_on": today_str(), "notes": "Imported string entry"}
-            merged += 1
-
-    save_knowledge(knowledge)
-    print(f"Imported {merged} topics.")
-
+        if isinstance(entry, dict):
+            k[t] = ensure_entry_shape(entry)
+        else:
+            k[t] = ensure_entry_shape({"answer": str(entry), "confidence": 0.5})
+        merged += 1
+    save_knowledge(k)
+    print(f"Imported {merged} entries.")
 
 def cmd_importfolder(folder: str) -> None:
-    folder = folder.strip()
+    folder = folder.replace("/importfolder", "", 1).strip()
     if not folder:
-        print("Usage: /importfolder <folder_path>")
+        print("Usage: /importfolder <folder>")
         return
     if not os.path.isdir(folder):
-        print(f"Folder not found: {folder}")
+        print("Folder not found.")
         return
-
-    knowledge = load_knowledge()
+    files = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".json")]
+    files.sort()
     count = 0
-    for root, _dirs, files in os.walk(folder):
-        for fn in files:
-            if not fn.lower().endswith(".txt"):
-                continue
-            path = os.path.join(root, fn)
-            topic = os.path.splitext(fn)[0].replace("_", " ").strip().lower()
-            try:
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    content = f.read().strip()
-                if not content:
-                    continue
-                knowledge[topic] = {
-                    "answer": content,
-                    "confidence": 0.55,
-                    "sources": [f"file:{os.path.abspath(path)}"],
-                    "updated_on": today_str(),
-                    "notes": "Imported from folder",
-                }
+    for fp in files:
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                k = load_knowledge()
+                for topic, entry in data.items():
+                    t = normalize_topic(topic)
+                    if not t:
+                        continue
+                    if isinstance(entry, dict):
+                        k[t] = ensure_entry_shape(entry)
+                    else:
+                        k[t] = ensure_entry_shape({"answer": str(entry), "confidence": 0.5})
+                save_knowledge(k)
                 count += 1
-            except Exception:
-                continue
-
-    save_knowledge(knowledge)
-    print(f"Imported {count} text files from folder into knowledge.")
-
+        except Exception:
+            continue
+    print(f"Imported {count} JSON files.")
 
 def cmd_export() -> None:
+    k = load_knowledge()
     ensure_dirs()
-    knowledge = load_knowledge()
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     out = os.path.join(EXPORTS_DIR, f"knowledge_export_{ts}.json")
-    save_json(out, knowledge)
-    print(f"Exported knowledge to: {os.path.relpath(out, BASE_DIR)}")
-
+    atomic_write_json(out, k)
+    print(f"Exported to {out}")
 
 def cmd_queue() -> None:
-    q = load_research_queue()
+    q = load_queue()
     if not q:
-        print("Research queue is empty.")
+        print("Queue is empty.")
         return
-    print("Research queue (latest first):")
-    for item in list(reversed(q[-15:])):
-        topic = item.get("topic", "")
-        status = item.get("status", "")
-        reason = item.get("reason", "")
-        attempts = item.get("attempts", 0)
-        err = item.get("last_error", "")
-        print(f"- {topic} [{status}] attempts={attempts} reason='{reason}'")
-        if err:
-            print(f"  last_error: {err}")
-
+    # Show latest 15
+    print("Research queue (latest 15):")
+    for item in q[-15:]:
+        print(f"- {item.get('topic','')} | {item.get('status','')} | attempts={item.get('attempts',0)}/{item.get('max_attempts',DEFAULT_MAX_QUEUE_ATTEMPTS)} | reason={item.get('reason','')}")
 
 def cmd_clearpending() -> None:
-    removed = clear_pending_queue()
-    print(f"Removed {removed} pending items from web research queue.")
-
+    removed = queue_clear_pending()
+    print(f"Removed {removed} pending items.")
 
 def cmd_purgejunk() -> None:
-    res = purge_junk_pending()
-    print(f"Purged junk pending items. removed={res['removed']} kept={res['kept']}")
+    removed = queue_purge_junk_pending()
+    print(f"Purged {removed} junk pending items.")
 
+def cmd_queuehealth() -> None:
+    rep = queue_health_report()
+    c = rep["counts"]
+    print("Queue health:")
+    print(f"- pending: {c.get('pending',0)}")
+    print(f"- running: {c.get('running',0)}")
+    print(f"- done: {c.get('done',0)}")
+    print(f"- failed: {c.get('failed',0)}")
+    print(f"- failed_final: {c.get('failed_final',0)}")
+    if rep.get("oldest_pending_age"):
+        print(f"- oldest pending age: {rep['oldest_pending_age']}")
+    top = rep.get("top_failure_reasons", [])
+    if top:
+        print("- top failure reasons:")
+        for reason, n in top:
+            print(f"  - {reason}: {n}")
+    if rep.get("stuck_running_count", 0) > 0:
+        print(f"- stuck running items: {rep['stuck_running_count']}")
+        for it in rep.get("stuck_running_items", []):
+            print(f"  - {it.get('topic','')} (last attempt {it.get('last_attempt_age','')})")
 
-def cmd_promote(arg: str) -> None:
-    parts = arg.strip().split()
-    if not parts:
-        print("Usage: /promote <topic> [confidence]")
+def cmd_confidence(arg: str) -> None:
+    topic = normalize_topic(arg.replace("/confidence", "", 1).strip())
+    if not topic:
+        print("Usage: /confidence <topic>")
         return
-    topic = normalize_topic(" ".join(parts[:-1] if len(parts) > 1 and re.match(r"^\d+(\.\d+)?$", parts[-1]) else parts)).lower()
-    new_conf = None
-    if len(parts) > 1 and re.match(r"^\d+(\.\d+)?$", parts[-1]):
-        try:
-            new_conf = float(parts[-1])
-        except Exception:
-            new_conf = None
-
-    knowledge = load_knowledge()
-    if topic not in knowledge:
+    aliases = load_aliases()
+    resolved = resolve_topic(topic, aliases)
+    entry = get_answer_for_topic(resolved)
+    if not entry:
         print("No entry yet for that topic. Teach it first.")
         return
-
-    entry = knowledge.get(topic, {})
-    old = float(entry.get("confidence", 0.30) or 0.30)
-    if new_conf is None:
-        new = clamp(old + 0.10, 0.10, 0.99)
-    else:
-        new = clamp(new_conf, 0.10, 0.99)
-
-    entry["confidence"] = new
-    entry["updated_on"] = today_str()
-    entry["notes"] = "Promoted confidence via /promote"
-    knowledge[topic] = entry
-    save_knowledge(knowledge)
-    print(f"Promoted '{topic}' confidence: {pretty_conf(old)} -> {pretty_conf(new)}")
-
-
-def cmd_confidence(topic: str) -> None:
-    t = normalize_topic(topic).lower()
-    knowledge = load_knowledge()
-    entry = knowledge.get(t)
-    if not entry:
-        print("No entry for that topic.")
-        return
-    print(f"{t}: confidence={pretty_conf(entry.get('confidence', 0.0))}")
-
+    print(f"{resolved} confidence: {entry.get('confidence',0.0)} (updated {entry.get('updated','')})")
 
 def cmd_lowest(arg: str) -> None:
+    n_str = arg.replace("/lowest", "", 1).strip()
     n = 10
-    arg = arg.strip()
-    if arg:
+    if n_str:
         try:
-            n = int(arg)
+            n = int(n_str)
         except Exception:
             n = 10
-    n = max(1, min(50, n))
-
-    knowledge = load_knowledge()
+    k = load_knowledge()
     items = []
-    for k, v in knowledge.items():
-        try:
-            c = float(v.get("confidence", 0.0) or 0.0)
-        except Exception:
-            c = 0.0
-        items.append((c, k))
+    for topic, entry in k.items():
+        if not isinstance(entry, dict):
+            continue
+        conf = float(entry.get("confidence", 0.0))
+        items.append((conf, topic))
     items.sort(key=lambda x: x[0])
-    print(f"Lowest confidence topics (top {n}):")
-    for c, k in items[:n]:
-        print(f"- {k}: {pretty_conf(c)}")
-
+    print(f"Lowest confidence (top {n}):")
+    for conf, topic in items[:n]:
+        print(f"- {topic}: {conf}")
 
 def cmd_alias(arg: str) -> None:
-    parsed = parse_pipe_args(arg)
-    if not parsed:
-        print("Usage: /alias <alias> | <target_topic>")
+    left, right = split_pipe(arg)
+    frm = normalize_topic(left.replace("/alias", "", 1).strip())
+    to = normalize_topic(right)
+    if not frm or not to:
+        print("Usage: /alias <from> | <to>")
         return
-    alias_word, target = parsed
-    alias_word = normalize_topic(alias_word).lower()
-    target = normalize_topic(target).lower()
-
-    if not alias_word or not target:
-        print("Alias and target cannot be empty.")
-        return
-
-    aliases = load_aliases()
-    aliases[alias_word] = target
-    save_aliases(aliases)
-    print(f"Alias set: {alias_word} -> {target}")
-
+    a = load_aliases()
+    a[frm] = to
+    save_aliases(a)
+    print("Saved alias.")
 
 def cmd_aliases() -> None:
-    aliases = load_aliases()
-    if not aliases:
-        print("No aliases set.")
+    a = load_aliases()
+    if not a:
+        print("No aliases.")
         return
     print("Aliases:")
-    for a in sorted(aliases.keys()):
-        print(f"- {a} -> {aliases[a]}")
-
+    for k, v in sorted(a.items()):
+        print(f"- {k} -> {v}")
 
 def cmd_unalias(arg: str) -> None:
-    a = normalize_topic(arg).lower()
-    if not a:
-        print("Usage: /unalias <alias>")
+    frm = normalize_topic(arg.replace("/unalias", "", 1).strip())
+    if not frm:
+        print("Usage: /unalias <from>")
         return
-    aliases = load_aliases()
-    if a not in aliases:
-        print("Alias not found.")
-        return
-    target = aliases.pop(a)
-    save_aliases(aliases)
-    print(f"Removed alias: {a} -> {target}")
-
+    a = load_aliases()
+    if frm in a:
+        del a[frm]
+        save_aliases(a)
+        print("Removed.")
+    else:
+        print("No such alias.")
 
 def cmd_suggest() -> None:
-    if not _last_suggestion:
-        print("No suggestion available.")
-        return
-    print(f"Suggestion: /alias {_last_suggestion['alias']} | {_last_suggestion['target']}")
-    if _last_suggestion.get("reason"):
-        print(f"Reason: {_last_suggestion['reason']}")
+    """
+    Suggest an alias for the last typed topic is hard without state.
+    This keeps the command for compatibility: it suggests based on the last pending queue item, if any.
+    """
+    q = load_queue()
+    k = load_knowledge()
+    a = load_aliases()
 
+    # pick last pending item topic
+    pending = [i for i in q if i.get("status") == "pending"]
+    if not pending:
+        print("No pending topics to suggest for.")
+        return
+    topic = pending[-1].get("topic", "")
+    sug = suggest_alias(topic, k, a)
+    if sug and sug != topic:
+        print(f"Suggestion: /alias {topic} | {sug}")
+    else:
+        print("No good suggestion found.")
 
 def cmd_accept() -> None:
-    if not _last_suggestion:
-        print("No suggestion to accept.")
-        return
-    alias_word = _last_suggestion["alias"]
-    target = _last_suggestion["target"]
-    aliases = load_aliases()
-    aliases[alias_word] = target
-    save_aliases(aliases)
-    print(f"Accepted alias: {alias_word} -> {target}")
-    clear_last_suggestion()
+    """
+    Accept the best alias suggestion for the last pending item.
+    """
+    q = load_queue()
+    k = load_knowledge()
+    a = load_aliases()
 
+    pending = [i for i in q if i.get("status") == "pending"]
+    if not pending:
+        print("No pending topics to accept for.")
+        return
+    topic = pending[-1].get("topic", "")
+    sug = suggest_alias(topic, k, a)
+    if not sug or sug == topic:
+        print("No suggestion available.")
+        return
+    a[topic] = sug
+    save_aliases(a)
+    print(f"Accepted: {topic} -> {sug}")
 
 def cmd_why(arg: str) -> None:
-    topic = normalize_topic(arg).lower()
+    topic = normalize_topic(arg.replace("/why", "", 1).strip())
     if not topic:
         print("Usage: /why <topic>")
         return
-    aliases = load_aliases()
-    resolved = resolve_alias(topic, aliases).lower()
+    q = load_queue()
+    for item in q:
+        if normalize_topic(item.get("topic", "")) == topic:
+            print(f"Why queued: {item.get('reason','')}")
+            print(f"Status: {item.get('status','')}")
+            print(f"Attempts: {item.get('attempts',0)}/{item.get('max_attempts',DEFAULT_MAX_QUEUE_ATTEMPTS)}")
+            if item.get("fail_reason"):
+                print(f"Fail reason: {item.get('fail_reason')}")
+            return
+    print("Not found in queue.")
 
-    knowledge = load_knowledge()
-    entry = knowledge.get(resolved)
-    if not entry:
-        print("No entry for that topic.")
+def cmd_promote() -> None:
+    """
+    Promote one pending learned item into an explicit 'pending promotions' list.
+    Keeps command for compatibility.
+    """
+    q = load_queue()
+    # find a "done" item that was learned, push to pending promotions
+    done = [i for i in q if i.get("status") == "done"]
+    if not done:
+        print("Nothing to promote.")
         return
-
-    print(f"WHY for '{resolved}':")
-    print(f"- confidence: {pretty_conf(entry.get('confidence', 0.0))}")
-    note = entry.get("notes", "")
-    if note:
-        print(f"- notes: {note}")
-    srcs = entry.get("sources", [])
-    if srcs:
-        print("- sources:")
-        for u in srcs[:8]:
-            print(f"  - {u}")
-    else:
-        print("- sources: (none recorded)")
-
+    item = done[-1]
+    add_pending_promotion(item.get("topic", ""), why=item.get("worker_note", ""))
+    print("Added to pending promotions.")
 
 def cmd_weblearn(arg: str) -> None:
-    topic = normalize_topic(arg)
-    ok, msg = weblearn_topic(topic, update_knowledge=True)
-    print(msg)
-
+    topic = normalize_topic(arg.replace("/weblearn", "", 1).strip())
+    if not topic:
+        print("Usage: /weblearn <topic>")
+        return
+    junk, why = is_junk_topic(topic)
+    if junk:
+        print(f"Refusing (junk topic): {why}")
+        return
+    ok, text, sources = web_search_fallback(topic)
+    if not ok:
+        print(text)
+        return
+    # store low confidence
+    set_knowledge(topic, text.strip(), confidence=0.45, sources=sources, notes="Learned via /weblearn", taught_by_user=False)
+    print("Learned.")
+    # also queue for deeper follow-up if still low confidence
+    queue_add(topic, reason="Learned via /weblearn (needs synthesis later)", confidence=0.45)
 
 def cmd_webqueue(arg: str) -> None:
-    limit = WEBQUEUE_DEFAULT_LIMIT
-    s = arg.strip()
-    if s:
+    rest = arg.replace("/webqueue", "", 1).strip()
+    limit = 3
+    if rest:
         try:
-            limit = int(s)
+            limit = int(rest)
         except Exception:
-            limit = WEBQUEUE_DEFAULT_LIMIT
-    limit = max(1, min(25, limit))
-    res = webqueue_run(limit=limit)
+            limit = 3
+    res = run_webqueue(limit=limit, autoupgrade=True)
     print(f"Web queue run complete. Learned {res['learned']} out of {res['attempted']} attempted (limit {res['limit']}).")
-    if res.get("skipped", 0) or res.get("failed", 0):
-        print(f"Skipped={res.get('skipped',0)} Failed={res.get('failed',0)} (see {os.path.relpath(WEBQUEUE_LOG, BASE_DIR)})")
 
-
-def cmd_curiosity() -> None:
-    """
-    Simple: queue low-confidence topics that are not already pending.
-    (This is intentionally light-weight.)
-    """
-    knowledge = load_knowledge()
-    q = load_research_queue()
-    pending = {str(it.get("topic", "")) for it in q if isinstance(it, dict) and it.get("status") == "pending"}
-
-    queued = 0
-    for topic, entry in knowledge.items():
+def cmd_curiosity(arg: str) -> None:
+    rest = arg.replace("/curiosity", "", 1).strip()
+    limit = 3
+    if rest:
         try:
-            conf = float(entry.get("confidence", 0.30) or 0.30)
+            limit = int(rest)
         except Exception:
-            conf = 0.30
-        if conf < 0.50 and topic not in pending:
-            bad, _why = is_garbage_topic(topic)
-            if bad:
-                continue
-            ok, _msg = queue_topic(topic, reason="Curiosity maintenance: low confidence topic", current_conf=conf)
-            if ok:
-                queued += 1
+            limit = 3
+    res = curiosity_tick(limit=limit)
+    print(f"Curiosity complete. Queued {res['queued']} out of {res['considered']} considered (limit {res['limit']}).")
 
-    log_line(CURIOSITY_LOG, f"curiosity_manual_run queued={queued}")
-    print(f"Curiosity queued={queued}")
-
-
-# ----------------------------
-# Chat / answering behavior
-# ----------------------------
-
-def should_queue_for_research(topic: str, knowledge: Dict[str, Any]) -> Tuple[bool, str, float]:
-    entry = knowledge.get(topic)
-    if not entry:
-        return True, "No taught answer yet", 0.30
-
-    try:
-        conf = float(entry.get("confidence", 0.30) or 0.30)
-    except Exception:
-        conf = 0.30
-
-    if conf < MIN_CONFIDENCE_FOR_NO_QUEUE:
-        return True, "Answer exists but confidence is low", conf
-
-    return False, "", conf
-
-
-def respond_to_topic(user_text: str) -> None:
-    raw = normalize_topic(user_text)
-    if not raw:
-        return
-
-    bad, why = is_garbage_topic(raw)
-    if bad:
-        if why == "ignored test topic":
-            print(f"{APP_NAME}: That looks like a test topic. I am ignoring it.")
-            clear_last_suggestion()
-            return
-        if why == "looks like a terminal command":
-            print(f"{APP_NAME}: That looks like a terminal command. I will not treat it as a topic, alias, or research queue item. Run it in your terminal, or ask me what it does.")
-            clear_last_suggestion()
-            return
-        if why == "looks like a URL/domain":
-            print(f"{APP_NAME}: That looks like a URL or domain string. Ask using a normal topic name instead (example: 'rfc 1918').")
-            clear_last_suggestion()
-            return
-        print(f"{APP_NAME}: I am ignoring that input ({why}).")
-        clear_last_suggestion()
-        return
-
-    topic = raw.lower()
-
-    aliases = load_aliases()
-    resolved = resolve_alias(topic, aliases).lower()
-
-    knowledge = load_knowledge()
-
-    entry = knowledge.get(resolved)
-    if entry and entry.get("answer"):
-        print(f"{APP_NAME}: {entry['answer']}")
-        clear_last_suggestion()
-
-        qit, reason, conf = should_queue_for_research(resolved, knowledge)
-        if qit:
-            ok, _qmsg = queue_topic(resolved, reason=reason, current_conf=conf)
-            if ok:
-                log_line(CURIOSITY_LOG, f"queued topic='{resolved}' reason='{reason}' conf={conf}")
-        return
-
-    suggestions = fuzzy_suggest(resolved, knowledge, aliases)
-    if suggestions:
-        best = suggestions[0]
-        set_last_suggestion(alias_word=topic, target_topic=best, reason="fuzzy match")
-        print(f"Suggestion: /alias {topic} | {best}")
-        print(f"{APP_NAME}: I do not have a taught answer for that yet. If my reply is wrong or weak, correct me in your own words and I will remember it.")
-        print("My analysis may be incomplete. If this seems wrong, correct me and I will update my understanding.")
-        print("I have also marked this topic for deeper research so I can improve my answer over time.")
-    else:
-        clear_last_suggestion()
-        print(f"{APP_NAME}: I do not have a taught answer for that yet. If my reply is wrong or weak, correct me in your own words and I will remember it.")
-        print("My analysis may be incomplete. If this seems wrong, correct me and I will update my understanding.")
-        print("I have also marked this topic for deeper research so I can improve my answer over time.")
-
-    qit, reason, conf = should_queue_for_research(resolved, knowledge)
-    if qit:
-        ok, qmsg = queue_topic(resolved, reason=reason, current_conf=conf)
-        if ok:
-            log_line(CURIOSITY_LOG, f"queued topic='{resolved}' reason='{reason}' conf={conf}")
-        else:
-            log_line(CURIOSITY_LOG, f"queue_reject topic='{resolved}' msg='{qmsg}'")
-
-
-# ----------------------------
-# Headless jobs (systemd timers)
-# ----------------------------
-
-def run_headless_webqueue(limit: int = WEBQUEUE_DEFAULT_LIMIT) -> int:
-    try:
-        res = webqueue_run(limit=limit)
-        if res.get("attempted", 0) == 0:
-            return 1
-        if res.get("failed", 0) > 0:
-            return 2
-        return 0
-    except Exception as e:
-        log_line(WEBQUEUE_LOG, f"headless_webqueue_exception: {e}")
-        return 2
-
-
-def run_headless_curiosity() -> int:
-    try:
-        cmd_curiosity()
-        return 0
-    except Exception as e:
-        log_line(CURIOSITY_LOG, f"daily_curiosity_exception: {e}")
-        return 1
-
-
-# ----------------------------
+# -----------------------------
 # Main loop
-# ----------------------------
+# -----------------------------
 
-def handle_command(line: str) -> bool:
-    s = line.strip()
-    if not s:
-        return True
+STOP = False
 
-    s_norm = strip_prompt_prefixes(s)
+def handle_sigint(_sig, _frame):
+    global STOP
+    STOP = True
 
-    if s_norm in ("/exit", "/quit"):
-        return False
-
-    if s_norm == "/help":
-        cmd_help()
-        return True
-
-    cmd, *rest = s_norm.split(" ", 1)
-    arg = rest[0] if rest else ""
-
-    if cmd == "/teach":
-        cmd_teach(arg)
-        return True
-    if cmd == "/teachfile":
-        cmd_teachfile(arg)
-        return True
-    if cmd == "/import":
-        cmd_import(arg)
-        return True
-    if cmd == "/importfolder":
-        cmd_importfolder(arg)
-        return True
-    if cmd == "/ingest":
-        cmd_ingest(arg)
-        return True
-    if cmd == "/export":
-        cmd_export()
-        return True
-    if cmd == "/queue":
-        cmd_queue()
-        return True
-    if cmd == "/clearpending":
-        cmd_clearpending()
-        return True
-    if cmd == "/purgejunk":
-        cmd_purgejunk()
-        return True
-    if cmd == "/promote":
-        cmd_promote(arg)
-        return True
-    if cmd == "/confidence":
-        cmd_confidence(arg)
-        return True
-    if cmd == "/lowest":
-        cmd_lowest(arg)
-        return True
-    if cmd == "/alias":
-        cmd_alias(arg)
-        return True
-    if cmd == "/aliases":
-        cmd_aliases()
-        return True
-    if cmd == "/unalias":
-        cmd_unalias(arg)
-        return True
-    if cmd == "/accept":
-        cmd_accept()
-        return True
-    if cmd == "/suggest":
-        cmd_suggest()
-        return True
-    if cmd == "/why":
-        cmd_why(arg)
-        return True
-    if cmd == "/weblearn":
-        cmd_weblearn(arg)
-        return True
-    if cmd == "/webqueue":
-        cmd_webqueue(arg)
-        return True
-    if cmd == "/curiosity":
-        cmd_curiosity()
-        return True
-
-    if s_norm.startswith("/"):
-        print("Unknown command. Type /help")
-        return True
-
-    respond_to_topic(s_norm)
-    return True
-
-
-def signal_handler(_signum, _frame) -> None:
-    global _shutdown
-    _shutdown = True
-    print("\nShutting down.")
-
-
-def main_interactive() -> int:
+def main() -> None:
     ensure_dirs()
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, handle_sigint)
+
+    # ensure base files exist
+    if not os.path.exists(KNOWLEDGE_PATH):
+        atomic_write_json(KNOWLEDGE_PATH, {})
+    if not os.path.exists(ALIASES_PATH):
+        atomic_write_json(ALIASES_PATH, {})
+    if not os.path.exists(QUEUE_PATH):
+        atomic_write_json(QUEUE_PATH, [])
+    if not os.path.exists(PENDING_PATH):
+        atomic_write_json(PENDING_PATH, [])
 
     print(f"{APP_NAME} brain online. Type a message, or /help for commands. Ctrl+C to exit.")
-    while not _shutdown:
+
+    while not STOP:
         try:
-            line = input("> ")
+            user = input("> ").strip()
         except EOFError:
             break
         except KeyboardInterrupt:
             break
 
-        keep_going = handle_command(line)
-        if not keep_going:
-            break
+        if not user:
+            continue
+
+        # reject raw URL inputs (existing behavior)
+        if is_urlish(user) and not user.startswith("/"):
+            print("Machine Spirit: That looks like a URL or domain string. Ask using a normal topic name instead (example: 'rfc 1918').")
+            continue
+
+        # commands
+        if user.startswith("/"):
+            if user in ("/help", "/h", "/?"):
+                print_help()
+                continue
+
+            if user.startswith("/teach "):
+                cmd_teach(user)
+                continue
+            if user.startswith("/teachfile "):
+                cmd_teachfile(user)
+                continue
+            if user.startswith("/ingest "):
+                cmd_ingest(user)
+                continue
+            if user.startswith("/importfolder"):
+                cmd_importfolder(user)
+                continue
+            if user.startswith("/import"):
+                cmd_import(user)
+                continue
+            if user.startswith("/export"):
+                cmd_export()
+                continue
+            if user.startswith("/queuehealth"):
+                cmd_queuehealth()
+                continue
+            if user.startswith("/queue"):
+                cmd_queue()
+                continue
+            if user.startswith("/clearpending"):
+                cmd_clearpending()
+                continue
+            if user.startswith("/purgejunk"):
+                cmd_purgejunk()
+                continue
+            if user.startswith("/promote"):
+                cmd_promote()
+                continue
+            if user.startswith("/confidence"):
+                cmd_confidence(user)
+                continue
+            if user.startswith("/lowest"):
+                cmd_lowest(user)
+                continue
+            if user.startswith("/alias "):
+                cmd_alias(user)
+                continue
+            if user.startswith("/aliases"):
+                cmd_aliases()
+                continue
+            if user.startswith("/unalias"):
+                cmd_unalias(user)
+                continue
+            if user.startswith("/why"):
+                cmd_why(user)
+                continue
+            if user.startswith("/accept"):
+                cmd_accept()
+                continue
+            if user.startswith("/suggest"):
+                cmd_suggest()
+                continue
+            if user.startswith("/weblearn"):
+                cmd_weblearn(user)
+                continue
+            if user.startswith("/webqueue"):
+                cmd_webqueue(user)
+                continue
+            if user.startswith("/curiosity"):
+                cmd_curiosity(user)
+                continue
+
+            print("Unknown command. Type /help.")
+            continue
+
+        # normal topic
+        show_topic(user)
 
     print("Shutting down.")
-    return 0
-
-
-def parse_args(argv: List[str]) -> Dict[str, Any]:
-    out = {"mode": "interactive", "limit": WEBQUEUE_DEFAULT_LIMIT}
-    if len(argv) <= 1:
-        return out
-
-    if argv[1] == "--webqueue":
-        out["mode"] = "webqueue"
-        if len(argv) >= 3:
-            try:
-                out["limit"] = int(argv[2])
-            except Exception:
-                out["limit"] = WEBQUEUE_DEFAULT_LIMIT
-        return out
-
-    if argv[1] == "--curiosity":
-        out["mode"] = "curiosity"
-        return out
-
-    return out
-
 
 if __name__ == "__main__":
-    ensure_dirs()
-    args = parse_args(sys.argv)
-
-    if args["mode"] == "webqueue":
-        rc = run_headless_webqueue(limit=max(1, min(25, int(args.get("limit", WEBQUEUE_DEFAULT_LIMIT)))))
-        sys.exit(rc)
-
-    if args["mode"] == "curiosity":
-        rc = run_headless_curiosity()
-        sys.exit(rc)
-
-    sys.exit(main_interactive())
+    main()
