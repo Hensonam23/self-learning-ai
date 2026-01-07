@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# MachineSpirit - brain.py (single-file, self-contained)
 
 import os
 import re
@@ -15,6 +16,7 @@ from typing import Dict, Any, List, Tuple, Optional
 try:
     import urllib.parse
     import urllib.request
+    import urllib.error
 except Exception:
     urllib = None
 
@@ -26,146 +28,162 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 
 KNOWLEDGE_PATH = os.path.join(DATA_DIR, "local_knowledge.json")
 ALIASES_PATH = os.path.join(DATA_DIR, "aliases.json")
-QUEUE_PATH = os.path.join(DATA_DIR, "research_queue.json")
+PENDING_PATH = os.path.join(DATA_DIR, "pending_fixes.json")
+RESEARCH_QUEUE_PATH = os.path.join(DATA_DIR, "research_queue.json")
 
+RESEARCH_NOTES_DIR = os.path.join(DATA_DIR, "research_notes")
+LOG_DIR = os.path.join(DATA_DIR, "logs")
 EXPORTS_DIR = os.path.join(DATA_DIR, "exports")
 BACKUPS_DIR = os.path.join(DATA_DIR, "backups")
 
-AUTO_INGEST_DIR = os.path.join(DATA_DIR, "auto_ingest")
-AUTO_INGEST_STATE_PATH = os.path.join(DATA_DIR, "auto_ingest_state.json")
+CURIOSITY_LOG = os.path.join(LOG_DIR, "curiosity.log")
+WEBQUEUE_LOG = os.path.join(LOG_DIR, "webqueue.log")
 
-AUTO_IMPORT_DIR = os.path.join(DATA_DIR, "auto_import")
-AUTO_IMPORT_STATE_PATH = os.path.join(DATA_DIR, "auto_import_state.json")
+# Web controls
+DEFAULT_UA = (
+    "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+)
+HTTP_TIMEOUT = 12
+SEARCH_TIMEOUT = 10
+MAX_SEARCH_RESULTS = 6
+MAX_FETCH_PAGES = 3
+MAX_PAGE_BYTES = 900_000
+MIN_TEXT_CHARS = 600
+MAX_NOTE_CHARS = 20_000
 
-RESEARCH_NOTES_DIR = os.path.join(DATA_DIR, "research_notes")
-WEB_CACHE_DIR = os.path.join(DATA_DIR, "web_cache")
+# Queue controls
+WEBQUEUE_DEFAULT_LIMIT = 3
+MIN_CONFIDENCE_FOR_NO_QUEUE = 0.70
 
-LOGS_DIR = os.path.join(DATA_DIR, "logs")
-WEBQUEUE_LOG_PATH = os.path.join(LOGS_DIR, "webqueue.log")
-CURIOSITY_LOG_PATH = os.path.join(LOGS_DIR, "curiosity.log")
+# Fuzzy suggestion controls
+FUZZY_CUTOFF = 0.72
+FUZZY_SUGGEST_N = 3
 
-AUTO_STATE_PATH = os.path.join(DATA_DIR, "auto_state.json")
+# Hard ignore obvious junk topics so they never get queued
+IGNORE_QUEUE_TOPICS = {
+    "test topic",
+    "test_topic",
+    "testing",
+}
 
-
-BACKUP_EVERY_SECONDS = 20 * 60  # 20 minutes
-
-FUZZY_SUGGEST_THRESHOLD = 0.72
-FUZZY_ACCEPT_THRESHOLD = 0.92
-QUEUE_THRESHOLD = 0.58
-MIN_CONFIDENCE_FOR_AUTO_ALIAS_TARGET = 0.55
-
-AUTO_NOTES_CONFIDENCE_FLOOR = 0.65
-
-WEBQUEUE_LIMIT_PER_RUN = 3
-WEBLEARN_MAX_SOURCES = 5
-WEBLEARN_TIMEOUT_SEC = 14
-WEBLEARN_PER_SOURCE_CHAR_LIMIT = 14000
-WEBLEARN_SLEEP_BETWEEN_FETCH_SEC = 1.0
-
-CURIOSITY_DEFAULT_N = 3
-CURIOSITY_MAX_N = 10
-CURIOSITY_LOW_CONF_THRESHOLD = 0.70
-
-# URL/domain-ish topic filtering
-TOPIC_MIN_LEN_FOR_AUTOQUEUE = 3
-BLOCK_TOPIC_IF_LOOKS_LIKE_URL = True
+# Internal state
+_shutdown = False
+_last_suggestion: Optional[Dict[str, str]] = None  # {"alias": "...", "target": "...", "reason": "..."}
+_lock = threading.Lock()
 
 
-# -------------------------
-# Console safety helpers
-# -------------------------
+# ----------------------------
+# Utilities
+# ----------------------------
 
-def configure_stdio() -> None:
-    try:
-        if hasattr(sys.stdout, "reconfigure"):
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
-    try:
-        if hasattr(sys.stderr, "reconfigure"):
-            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+def now_iso() -> str:
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def safe_print(*args, sep=" ", end="\n") -> None:
-    msg = sep.join(str(a) for a in args)
-    try:
-        print(msg, end=end)
-        return
-    except UnicodeEncodeError:
-        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
-        try:
-            clean = msg.encode(enc, errors="replace").decode(enc, errors="replace")
-        except Exception:
-            clean = msg.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
-        print(clean, end=end)
-
-
-def now_date() -> str:
-    return datetime.date.today().isoformat()
-
-
-def now_ts() -> str:
-    return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+def today_str() -> str:
+    return datetime.datetime.now().strftime("%Y-%m-%d")
 
 
 def ensure_dirs() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(RESEARCH_NOTES_DIR, exist_ok=True)
+    os.makedirs(LOG_DIR, exist_ok=True)
     os.makedirs(EXPORTS_DIR, exist_ok=True)
     os.makedirs(BACKUPS_DIR, exist_ok=True)
-    os.makedirs(AUTO_INGEST_DIR, exist_ok=True)
-    os.makedirs(AUTO_IMPORT_DIR, exist_ok=True)
-    os.makedirs(RESEARCH_NOTES_DIR, exist_ok=True)
-    os.makedirs(WEB_CACHE_DIR, exist_ok=True)
-    os.makedirs(LOGS_DIR, exist_ok=True)
 
 
-def append_log(path: str, line: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    out = f"[{stamp}] {line}".rstrip() + "\n"
+def log_line(path: str, msg: str) -> None:
     try:
-        with open(path, "a", encoding="utf-8", errors="replace") as f:
-            f.write(out)
+        ensure_dirs()
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"[{now_iso()}] {msg}\n")
     except Exception:
         pass
 
 
 def load_json(path: str, default):
-    if not os.path.exists(path):
-        return default
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        if not os.path.exists(path):
+            return default
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
             return json.load(f)
     except Exception:
         return default
 
 
-def save_json(path: str, obj) -> None:
+def save_json(path: str, data) -> None:
+    ensure_dirs()
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
+        json.dump(data, f, indent=2, ensure_ascii=False)
     os.replace(tmp, path)
 
 
-def read_text_file(path: str) -> str:
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        return f.read()
+def safe_slug(s: str) -> str:
+    s = s.strip().lower()
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"[^a-z0-9_]+", "", s)
+    if not s:
+        s = "topic"
+    return s[:120]
 
 
-def write_text_file(path: str, text: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.replace(tmp, path)
+def strip_prompt_prefixes(s: str) -> str:
+    """
+    Strips transcript prompts like:
+      '> thing' or '>> thing' or '> > thing'
+    """
+    t = s.strip()
+    while True:
+        new = re.sub(r"^\s*(?:>\s*)+", "", t)
+        if new == t:
+            break
+        t = new.strip()
+    return t
+
+
+def strip_control_chars(s: str) -> str:
+    """
+    Removes ASCII control characters (including ESC) that show up when users paste
+    terminal artifacts like arrow keys, etc.
+    """
+    # keep newlines/tabs? For topics, we only want single-line anyway.
+    s = s.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    return re.sub(r"[\x00-\x1f\x7f]", "", s)
 
 
 def normalize_topic(s: str) -> str:
-    s = s.strip().lower()
+    s = strip_prompt_prefixes(s)
+    s = strip_control_chars(s)
+    s = s.strip()
     s = re.sub(r"\s+", " ", s)
+    s = s.strip("\"'`")
     return s
+
+
+def looks_like_url_or_domain(s: str) -> bool:
+    t = s.strip().lower()
+
+    if re.match(r"^(https?://|ftp://)", t):
+        return True
+    if t.startswith("www."):
+        return True
+    if "/" in t and "." in t.split("/")[0]:
+        return True
+    if re.match(r"^[a-z0-9-]+\.(com|net|org|io|edu|gov|mil|co|uk|de|jp|fr|ru|cn|info|biz)(/.*)?$", t):
+        return True
+    if re.match(r"^\d{1,3}(\.\d{1,3}){3}(:\d+)?(/.*)?$", t):
+        return True
+
+    return False
+
+
+def pretty_conf(x: float) -> str:
+    try:
+        return f"{float(x):.2f}"
+    except Exception:
+        return "0.00"
 
 
 def clamp(v: float, lo: float, hi: float) -> float:
@@ -173,91 +191,15 @@ def clamp(v: float, lo: float, hi: float) -> float:
 
 
 # -------------------------
-# Topic safety / hygiene
-# -------------------------
-
-def looks_like_url_or_domain(text: str) -> bool:
-    """
-    True if it looks like a URL, domain, file download, or a raw hostname-like string.
-    We do NOT want Curiosity/auto-queue to treat these as topics.
-    """
-    t = normalize_topic(text)
-    if not t:
-        return False
-
-    if "://" in t:
-        return True
-    if t.startswith("www."):
-        return True
-    if t.startswith("http "):
-        return True
-    if t.startswith("https "):
-        return True
-
-    # contains a slash like a URL path
-    if "/" in t and not t.startswith("/"):
-        # allow things like "tcp/ip" as a legit concept
-        if t not in ("tcp/ip", "ip/tcp"):
-            return True
-
-    # ends with common file types or looks like a download
-    if re.search(r"\.(pdf|zip|tar|gz|tgz|exe|dmg|apk|iso|bin)\b", t):
-        return True
-
-    # domain-like: has dot + TLD-ish
-    if re.search(r"\b[a-z0-9-]+\.(com|org|net|edu|gov|mil|io|co|us|uk|de|jp|fr|au|ca)\b", t):
-        return True
-
-    return False
-
-
-def is_ok_for_autoqueue(topic: str) -> Tuple[bool, str]:
-    t = normalize_topic(topic)
-
-    if len(t) < TOPIC_MIN_LEN_FOR_AUTOQUEUE:
-        return False, "Too short to auto-queue."
-
-    if BLOCK_TOPIC_IF_LOOKS_LIKE_URL and looks_like_url_or_domain(t):
-        return False, "Looks like a URL/domain, not a topic."
-
-    return True, ""
-
-
-def topic_to_notes_filename(topic: str) -> str:
-    t = normalize_topic(topic)
-    t = t.replace(" ", "_")
-    t = re.sub(r"[^a-z0-9_]+", "", t)
-    t = re.sub(r"_+", "_", t).strip("_")
-    if not t:
-        t = "untitled"
-    return t + ".txt"
-
-
-def find_research_note_path(topic: str) -> Optional[str]:
-    os.makedirs(RESEARCH_NOTES_DIR, exist_ok=True)
-
-    candidates = []
-    candidates.append(os.path.join(RESEARCH_NOTES_DIR, topic_to_notes_filename(topic)))
-
-    norm = normalize_topic(topic)
-    norm_safe = re.sub(r"[^a-z0-9_ ]+", "", norm).strip()
-    if norm_safe:
-        candidates.append(os.path.join(RESEARCH_NOTES_DIR, norm_safe.replace(" ", "_") + ".txt"))
-
-    candidates.append(os.path.join(RESEARCH_NOTES_DIR, topic_to_notes_filename(topic)[:-4] + ".md"))
-
-    for p in candidates:
-        if os.path.exists(p) and os.path.isfile(p):
-            return p
-    return None
-
-
-# -------------------------
 # Terminal command detection
 # -------------------------
 
 def is_probably_terminal_command(text: str) -> bool:
-    t = text.strip()
+    """
+    If the user types shell commands inside the brain prompt, we must NOT treat
+    it as a topic, alias, or queue item.
+    """
+    t = normalize_topic(text)
     if not t:
         return False
 
@@ -266,16 +208,20 @@ def is_probably_terminal_command(text: str) -> bool:
 
     lower = t.lower()
 
+    # If it's clearly a "question sentence", not a command
     for qword in ("what is", "what does", "how do", "how to", "why does", "explain", "help me"):
         if lower.startswith(qword):
             return False
 
+    # typical shell operators
     if any(ch in t for ch in ["|", "&&", "||", ";", ">", "<", "$(", "`"]):
         return True
 
+    # prompt-looking
     if re.search(r"^[\w-]+@[\w-]+:.*\$\s+", t):
         return True
 
+    # sudo
     if lower.startswith("sudo "):
         rest = lower[5:].lstrip()
         if not rest:
@@ -306,1428 +252,1319 @@ def is_probably_terminal_command(text: str) -> bool:
     if t.startswith("./") or t.startswith("/") or re.match(r"^[A-Za-z]:\\", t):
         return True
 
+    # looks like options flags in a command
     if re.search(r"\s-\w", t) and (" " in t) and not re.search(r"[.!?]$", t):
         return True
 
     return False
 
 
-# -------------------------
-# Fuzzy matching and keywords
-# -------------------------
+def is_garbage_topic(s: str) -> Tuple[bool, str]:
+    """
+    Central gatekeeper: anything that fails here must never be queued,
+    and webqueue must skip it even if already present in JSON.
+    """
+    t = normalize_topic(s)
+    if not t:
+        return True, "empty topic"
 
-def best_fuzzy_match(query: str, candidates: List[str]) -> Tuple[Optional[str], float]:
-    best = None
-    best_ratio = 0.0
-    for c in candidates:
-        r = difflib.SequenceMatcher(None, query, c).ratio()
-        if r > best_ratio:
-            best_ratio = r
-            best = c
-    return best, best_ratio
+    low = t.strip().lower()
 
+    if low in IGNORE_QUEUE_TOPICS:
+        return True, "ignored test topic"
 
-STOPWORDS = {
-    "the", "a", "an", "and", "or", "but", "if", "then", "else", "for", "to", "of",
-    "in", "on", "at", "by", "with", "as", "is", "are", "was", "were", "be", "been",
-    "it", "this", "that", "these", "those", "from", "into", "over", "under",
-    "you", "your", "we", "our", "they", "their", "he", "she", "them", "his", "her",
-    "not", "no", "yes", "can", "could", "should", "would", "will", "may", "might",
-    "also", "more", "most", "some", "such", "than", "too", "very",
-    "about", "what", "why", "how", "when", "where",
-}
+    # Control chars already stripped, but if it's still weird short, block.
+    if len(low) < 2:
+        return True, "too short"
+    if len(low) > 140:
+        return True, "too long"
 
+    # commands / transcripts
+    if low.startswith("/"):
+        return True, "looks like a command"
+    if low.startswith(">"):
+        return True, "looks like transcript prompt"
+    if is_probably_terminal_command(low):
+        return True, "looks like a terminal command"
 
-def tokenize_words(text: str) -> List[str]:
-    text = text.lower()
-    text = re.sub(r"[^a-z0-9\s\-]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    if not text:
-        return []
-    return [w for w in text.split(" ") if w]
+    # URLs/domains
+    if looks_like_url_or_domain(low):
+        return True, "looks like a URL/domain"
 
+    # mostly symbols
+    if re.match(r"^[^\w]+$", low):
+        return True, "only symbols"
 
-def top_keywords(text: str, n: int = 18) -> List[str]:
-    words = tokenize_words(text)
-    freq: Dict[str, int] = {}
-    for w in words:
-        if w in STOPWORDS:
-            continue
-        if len(w) <= 2:
-            continue
-        freq[w] = freq.get(w, 0) + 1
-    items = sorted(freq.items(), key=lambda x: x[1], reverse=True)
-    return [k for k, _v in items[:n]]
-
-
-# -------------------------
-# Web learning
-# -------------------------
-
-def looks_disallowed_for_weblearn(topic: str) -> Tuple[bool, str]:
-    t = normalize_topic(topic)
-
-    if BLOCK_TOPIC_IF_LOOKS_LIKE_URL and looks_like_url_or_domain(t):
-        return True, "That looks like a URL/domain, not a topic. Use a plain topic like: 'rfc 1918 private ip ranges'."
-
-    bad_markers = [
-        "hack", "exploit", "bypass", "crack", "keylogger", "phishing", "malware",
-        "ddos", "steal", "credential", "password dump", "ransomware",
-        "how to break into", "break into", "cheat code", "aimbot", "undetectable",
-        "make a bomb", "build a bomb", "pipe bomb",
-    ]
-    for m in bad_markers:
-        if m in t:
-            return True, "I will not web learn topics related to hacking, malware, or wrongdoing."
-
-    personal_markers = [
-        "address of", "phone number", "social security", "ssn", "dox", "doxx",
-        "private info", "home address", "credit card", "bank account",
-    ]
-    for m in personal_markers:
-        if m in t:
-            return True, "I will not web learn requests for personal or private data."
+    # too many odd characters (after normalization)
+    weird = re.findall(r"[^\w\s\-\.\(\):]", low)
+    if len(weird) > 6:
+        return True, "too many unusual characters"
 
     return False, ""
 
 
-def domain_from_url(url: str) -> str:
-    m = re.match(r"^https?://([^/]+)", url.strip().lower())
-    return m.group(1) if m else ""
+# ----------------------------
+# Storage
+# ----------------------------
+
+def load_knowledge() -> Dict[str, Any]:
+    return load_json(KNOWLEDGE_PATH, {})
 
 
-def source_quality_score(url: str) -> float:
-    d = domain_from_url(url)
-    if not d:
-        return 0.2
-    if d.endswith(".gov") or d.endswith(".edu"):
-        return 0.95
-    if "nist.gov" in d or "ietf.org" in d or "iso.org" in d or "rfc-editor.org" in d:
-        return 0.95
-    if "wikipedia.org" in d:
-        return 0.80
-    if d.startswith("docs.") or "/docs" in url.lower():
-        return 0.75
-    if any(x in d for x in ["medium.com", "blogspot.", "wordpress."]):
-        return 0.35
-    return 0.55
+def save_knowledge(k: Dict[str, Any]) -> None:
+    save_json(KNOWLEDGE_PATH, k)
 
 
-def is_bad_source_url(url: str) -> bool:
-    u = url.lower().strip()
-    if not u.startswith("http"):
-        return True
-    if any(x in u for x in ["youtube.com", "facebook.com", "instagram.com", "tiktok.com", "reddit.com"]):
-        return True
-    if re.search(r"\.(pdf|zip|tar|gz|tgz|exe|dmg|apk|iso|bin)\b", u):
-        return True
-    return False
+def load_aliases() -> Dict[str, str]:
+    return load_json(ALIASES_PATH, {})
 
 
-def ddg_lite_search(query: str, max_results: int = 8) -> List[str]:
+def save_aliases(a: Dict[str, str]) -> None:
+    save_json(ALIASES_PATH, a)
+
+
+def load_pending() -> List[Dict[str, Any]]:
+    return load_json(PENDING_PATH, [])
+
+
+def save_pending(p: List[Dict[str, Any]]) -> None:
+    save_json(PENDING_PATH, p)
+
+
+def load_research_queue() -> List[Dict[str, Any]]:
+    data = load_json(RESEARCH_QUEUE_PATH, [])
+    # normalize any existing queue topics in-place (soft cleanup)
+    changed = False
+    if isinstance(data, list):
+        for it in data:
+            if not isinstance(it, dict):
+                continue
+            raw = str(it.get("topic", "") or "")
+            norm = normalize_topic(raw).lower()
+            if norm != raw:
+                it["topic"] = norm
+                changed = True
+    if changed:
+        save_json(RESEARCH_QUEUE_PATH, data)
+    return data if isinstance(data, list) else []
+
+
+def save_research_queue(q: List[Dict[str, Any]]) -> None:
+    save_json(RESEARCH_QUEUE_PATH, q)
+
+
+def resolve_alias(topic: str, aliases: Dict[str, str]) -> str:
+    t = topic.strip().lower()
+    if t in aliases:
+        return aliases[t]
+    return topic
+
+
+# ----------------------------
+# Fuzzy suggestion logic (keep)
+# ----------------------------
+
+def fuzzy_suggest(input_topic: str, knowledge: Dict[str, Any], aliases: Dict[str, str]) -> List[str]:
+    t = input_topic.strip().lower()
+    if not t:
+        return []
+
+    candidates = set()
+    for k in knowledge.keys():
+        candidates.add(k)
+    for _a, target in aliases.items():
+        candidates.add(target)
+
+    cand_list = sorted(candidates)
+    matches = difflib.get_close_matches(t, cand_list, n=FUZZY_SUGGEST_N, cutoff=FUZZY_CUTOFF)
+    return matches
+
+
+def set_last_suggestion(alias_word: str, target_topic: str, reason: str) -> None:
+    global _last_suggestion
+    _last_suggestion = {"alias": alias_word, "target": target_topic, "reason": reason}
+
+
+def clear_last_suggestion() -> None:
+    global _last_suggestion
+    _last_suggestion = None
+
+
+# ----------------------------
+# Web: HTTP helpers
+# ----------------------------
+
+def http_get(url: str, timeout: int = HTTP_TIMEOUT) -> Tuple[int, bytes, str]:
     if urllib is None:
-        return []
+        raise RuntimeError("urllib is not available in this Python environment")
 
-    q = urllib.parse.quote_plus(query)
-    url = f"https://lite.duckduckgo.com/lite/?q={q}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": DEFAULT_UA,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        status = getattr(resp, "status", 200)
+        final_url = resp.geturl()
+        data = resp.read(MAX_PAGE_BYTES + 1)
+        if len(data) > MAX_PAGE_BYTES:
+            data = data[:MAX_PAGE_BYTES]
+        return status, data, final_url
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) MachineSpirit/1.0",
-        "Accept": "text/html",
-    }
 
-    req = urllib.request.Request(url, headers=headers, method="GET")
+def decode_bytes(data: bytes, fallback: str = "utf-8") -> str:
+    if not data:
+        return ""
     try:
-        with urllib.request.urlopen(req, timeout=WEBLEARN_TIMEOUT_SEC) as resp:
-            html = resp.read().decode("utf-8", errors="ignore")
+        return data.decode("utf-8", errors="replace")
     except Exception:
-        return []
-
-    links = re.findall(r'href="(https?://[^"]+)"', html)
-    cleaned: List[str] = []
-    for u in links:
-        if "duckduckgo.com" in u:
-            continue
-        if "javascript:" in u.lower():
-            continue
-        if is_bad_source_url(u):
-            continue
-        if u not in cleaned:
-            cleaned.append(u)
-        if len(cleaned) >= max_results:
-            break
-    return cleaned
+        try:
+            return data.decode("latin-1", errors="replace")
+        except Exception:
+            return data.decode(fallback, errors="replace")
 
 
-def strip_html_to_text(html: str) -> str:
+def strip_html(html: str) -> str:
+    if not html:
+        return ""
+
     html = re.sub(r"(?is)<script.*?>.*?</script>", " ", html)
     html = re.sub(r"(?is)<style.*?>.*?</style>", " ", html)
     html = re.sub(r"(?is)<noscript.*?>.*?</noscript>", " ", html)
 
-    html = re.sub(r"(?is)<br\s*/?>", "\n", html)
-    html = re.sub(r"(?is)</p\s*>", "\n", html)
-    html = re.sub(r"(?is)</h[1-6]\s*>", "\n", html)
-    html = re.sub(r"(?is)</li\s*>", "\n", html)
+    html = re.sub(r"(?is)<(nav|footer|header|aside).*?>.*?</\1>", " ", html)
 
-    text = re.sub(r"(?is)<.*?>", " ", html)
+    html = re.sub(r"(?i)<br\s*/?>", "\n", html)
+    html = re.sub(r"(?i)</p\s*>", "\n", html)
+    html = re.sub(r"(?i)</div\s*>", "\n", html)
+    html = re.sub(r"(?i)</li\s*>", "\n", html)
+
+    text = re.sub(r"(?s)<.*?>", " ", html)
+
     text = text.replace("&nbsp;", " ")
     text = text.replace("&amp;", "&")
+    text = text.replace("&quot;", "\"")
     text = text.replace("&lt;", "<")
     text = text.replace("&gt;", ">")
-    text = text.replace("&quot;", '"')
-    text = text.replace("&#39;", "'")
+
     text = re.sub(r"[ \t\r\f\v]+", " ", text)
-    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
+    text = re.sub(r" *\n *", "\n", text)
     return text.strip()
 
 
-def fetch_url_text(url: str) -> str:
+def pick_best_excerpt(text: str, max_chars: int = MAX_NOTE_CHARS) -> str:
+    if not text:
+        return ""
+    t = text.strip()
+    if len(t) <= max_chars:
+        return t
+    cut = t[:max_chars]
+    idx = cut.rfind("\n\n")
+    if idx > 800:
+        cut = cut[:idx].strip()
+    return cut.strip()
+
+
+# ----------------------------
+# Web: Search providers (fallback chain)
+# ----------------------------
+
+def search_wikipedia_opensearch(query: str) -> List[str]:
     if urllib is None:
-        return ""
+        return []
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) MachineSpirit/1.0",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-    req = urllib.request.Request(url, headers=headers, method="GET")
+    q = urllib.parse.quote(query)
+    url = (
+        "https://en.wikipedia.org/w/api.php"
+        f"?action=opensearch&search={q}&limit=5&namespace=0&format=json"
+    )
     try:
-        with urllib.request.urlopen(req, timeout=WEBLEARN_TIMEOUT_SEC) as resp:
-            raw = resp.read()
-            try:
-                html = raw.decode("utf-8", errors="ignore")
-            except Exception:
-                html = raw.decode(errors="ignore")
+        status, raw, _final = http_get(url, timeout=SEARCH_TIMEOUT)
+        if status >= 400:
+            return []
+        s = decode_bytes(raw)
+        data = json.loads(s)
+        urls = data[3] if isinstance(data, list) and len(data) >= 4 else []
+        if not isinstance(urls, list):
+            return []
+        return [u for u in urls if isinstance(u, str) and u.startswith("http")]
     except Exception:
-        return ""
-
-    text = strip_html_to_text(html)
-    if len(text) > WEBLEARN_PER_SOURCE_CHAR_LIMIT:
-        text = text[:WEBLEARN_PER_SOURCE_CHAR_LIMIT]
-    return text
+        return []
 
 
-def cache_path_for_url(url: str) -> str:
-    safe = re.sub(r"[^a-z0-9]+", "_", url.lower()).strip("_")
-    if len(safe) > 160:
-        safe = safe[:160]
-    if not safe:
-        safe = "url"
-    return os.path.join(WEB_CACHE_DIR, safe + ".json")
+def parse_ddg_links_from_html(html: str) -> List[str]:
+    if not html:
+        return []
 
+    links: List[str] = []
 
-def get_cached_url_text(url: str, max_age_hours: int = 72) -> Optional[str]:
-    p = cache_path_for_url(url)
-    if not os.path.exists(p):
-        return None
-    try:
-        payload = load_json(p, None)
-        if not isinstance(payload, dict):
-            return None
-        ts = payload.get("fetched_at", "")
-        txt = payload.get("text", "")
-        if not ts or not txt:
-            return None
-        fetched = datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S")
-        age = datetime.datetime.now() - fetched
-        if age.total_seconds() > max_age_hours * 3600:
-            return None
-        return str(txt)
-    except Exception:
-        return None
+    for m in re.finditer(r'(?is)<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"', html):
+        href = m.group(1).strip()
+        links.append(href)
 
+    for m in re.finditer(r'(?is)href="(/l/\?[^"]*uddg=[^"&]+[^"]*)"', html):
+        href = m.group(1)
+        links.append("https://lite.duckduckgo.com" + href)
 
-def set_cached_url_text(url: str, text: str) -> None:
-    p = cache_path_for_url(url)
-    payload = {
-        "url": url,
-        "fetched_at": datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-        "text": text,
-    }
-    save_json(p, payload)
+    for m in re.finditer(r'(?is)href="([^"]+uddg=[^"]+)"', html):
+        href = m.group(1).strip()
+        links.append(href)
 
-
-def _pick_definition_lines(topic: str, combined_text: str, limit: int = 5) -> List[str]:
-    t = topic.lower().strip()
-    lines = [ln.strip() for ln in combined_text.splitlines() if ln.strip()]
-    candidates: List[str] = []
-
-    for ln in lines[:1200]:
-        low = ln.lower()
-        if len(ln) < 45 or len(ln) > 240:
-            continue
-        if t and t in low:
-            if " is " in low or " refers to " in low or " means " in low:
-                candidates.append(ln)
-                continue
-        if " is " in low and len(low.split()) <= 28:
-            candidates.append(ln)
-            continue
-
-    out = []
+    out: List[str] = []
     seen = set()
-    for c in candidates:
-        key = c.lower()
-        if key in seen:
+    for u in links:
+        if not u or u in seen:
             continue
-        seen.add(key)
-        out.append(c)
-        if len(out) >= limit:
-            break
+        seen.add(u)
+        out.append(u)
     return out
 
 
-def _make_quick_check_questions(topic: str, keywords: List[str]) -> List[str]:
-    base = topic.strip()
-    k = [x for x in keywords if len(x) > 3][:6]
-    qs = []
-    qs.append(f"What problem does {base} solve?")
-    qs.append(f"What are the main parts or layers of {base}?")
-    if k:
-        qs.append(f"How does {base} relate to {k[0]} and {k[1] if len(k) > 1 else k[0]}?")
-    else:
-        qs.append(f"What is a real world example where {base} shows up?")
-    return qs[:3]
+def resolve_ddg_redirect(url: str) -> str:
+    try:
+        parsed = urllib.parse.urlparse(url)
+        qs = urllib.parse.parse_qs(parsed.query)
+        if "uddg" in qs and qs["uddg"]:
+            return urllib.parse.unquote(qs["uddg"][0])
+    except Exception:
+        pass
+    return url
 
 
-def heuristic_structured_answer(topic: str, source_urls: List[str], source_texts: List[str]) -> str:
-    combined = "\n\n".join(source_texts)
-    keywords = top_keywords(combined, n=18)
-    defs = _pick_definition_lines(topic, combined, limit=4)
-
-    definition = defs[0] if defs else f"{topic.strip()} is a concept you will see referenced often in this area."
-    extras = defs[1:3] if len(defs) > 1 else []
-
-    parts_guess = []
-    if keywords:
-        for w in keywords[:10]:
-            parts_guess.append(f"- {w}")
-
-    quick_check = _make_quick_check_questions(topic, keywords)
-
-    out = []
-    out.append(f"{topic.strip()} (synthesized)")
-    out.append("")
-    out.append("Definition:")
-    out.append(f"- {definition}")
-    for x in extras:
-        out.append(f"- {x}")
-
-    out.append("")
-    out.append("How it works:")
-    out.append("- Break it into the main components or layers.")
-    out.append("- For each component, say what it is responsible for, and what it is not responsible for.")
-    out.append("- When troubleshooting, map the symptom to the layer or component that most likely owns it.")
-
-    out.append("")
-    out.append("Examples:")
-    out.append("- Write one simple example first, then one realistic example you might see at work.")
-    out.append("- If it is a model or standard, explain what changes when you move between layers or parts.")
-
-    out.append("")
-    out.append("Common mistakes:")
-    out.append("- Mixing up similar sounding terms.")
-    out.append("- Memorizing lists without understanding what actually changes in real systems.")
-    out.append("- Using the wrong layer or component when troubleshooting.")
-
-    if parts_guess:
-        out.append("")
-        out.append("Related keywords (from sources):")
-        out.extend(parts_guess)
-
-    out.append("")
-    out.append("Quick check (answer these to prove you understand it):")
-    for q in quick_check:
-        out.append(f"- {q}")
-
-    out.append("")
-    out.append("Sources used:")
-    for u in source_urls[:WEBLEARN_MAX_SOURCES]:
-        out.append(f"- {u}")
-
-    return "\n".join(out).strip()
+def search_duckduckgo_html(query: str) -> List[str]:
+    if urllib is None:
+        return []
+    q = urllib.parse.quote(query)
+    url = f"https://duckduckgo.com/html/?q={q}"
+    try:
+        status, raw, _final = http_get(url, timeout=SEARCH_TIMEOUT)
+        if status >= 400:
+            return []
+        html = decode_bytes(raw)
+        links = parse_ddg_links_from_html(html)
+        cleaned: List[str] = []
+        for u in links:
+            u = resolve_ddg_redirect(u)
+            if u.startswith("http"):
+                cleaned.append(u)
+        return cleaned[:MAX_SEARCH_RESULTS]
+    except Exception:
+        return []
 
 
-def synthesize_answer(topic: str, source_texts: List[str], source_urls: List[str]) -> str:
-    return heuristic_structured_answer(topic, source_urls, source_texts)
+def search_duckduckgo_lite(query: str) -> List[str]:
+    if urllib is None:
+        return []
+    q = urllib.parse.quote(query)
+    url = f"https://lite.duckduckgo.com/lite/?q={q}"
+    try:
+        status, raw, _final = http_get(url, timeout=SEARCH_TIMEOUT)
+        if status >= 400:
+            return []
+        html = decode_bytes(raw)
+        links = parse_ddg_links_from_html(html)
+        cleaned: List[str] = []
+        for u in links:
+            u = resolve_ddg_redirect(u)
+            if u.startswith("http"):
+                cleaned.append(u)
+        return cleaned[:MAX_SEARCH_RESULTS]
+    except Exception:
+        return []
 
 
-# -------------------------
-# Brain state and features
-# -------------------------
+def web_search(query: str) -> Tuple[List[str], str]:
+    q = normalize_topic(query)
 
-class BrainState:
-    def __init__(self):
-        ensure_dirs()
+    urls = search_wikipedia_opensearch(q)
+    if urls:
+        return urls, "wikipedia_opensearch"
 
-        self.knowledge: Dict[str, Dict[str, Any]] = load_json(KNOWLEDGE_PATH, {})
-        self.aliases: Dict[str, str] = load_json(ALIASES_PATH, {})
-        self.queue: List[Dict[str, Any]] = load_json(QUEUE_PATH, [])
+    urls = search_duckduckgo_html(q)
+    if urls:
+        return urls, "duckduckgo_html"
 
-        self.auto_ingest_state: Dict[str, Any] = load_json(AUTO_INGEST_STATE_PATH, {"seen_files": {}})
-        self.auto_import_state: Dict[str, Any] = load_json(AUTO_IMPORT_STATE_PATH, {"seen_files": {}})
-        self.auto_state: Dict[str, Any] = load_json(AUTO_STATE_PATH, {"last_curiosity_date": ""})
+    urls = search_duckduckgo_lite(q)
+    if urls:
+        return urls, "duckduckgo_lite"
 
-        self.last_why: Dict[str, Any] = {}
-        self.last_suggestions: List[Tuple[str, float]] = []
-        self.last_user_input: str = ""
-        self.last_input_was_terminal: bool = False
+    return [], "none"
 
-        self.last_web_sources: List[str] = []
 
-        self._backup_timer: Optional[threading.Timer] = None
-        self._shutdown = False
+# ----------------------------
+# Web: ingestion and learning
+# ----------------------------
 
-    def save_all(self) -> None:
-        save_json(KNOWLEDGE_PATH, self.knowledge)
-        save_json(ALIASES_PATH, self.aliases)
-        save_json(QUEUE_PATH, self.queue)
-        save_json(AUTO_INGEST_STATE_PATH, self.auto_ingest_state)
-        save_json(AUTO_IMPORT_STATE_PATH, self.auto_import_state)
-        save_json(AUTO_STATE_PATH, self.auto_state)
+def note_path_for_topic(topic: str) -> str:
+    slug = safe_slug(topic)
+    return os.path.join(RESEARCH_NOTES_DIR, f"{slug}.txt")
 
-    # -------- backups --------
 
-    def start_backup_timer(self) -> None:
-        self.stop_backup_timer()
+def write_research_note(topic: str, provider: str, urls: List[str], notes_text: str) -> str:
+    ensure_dirs()
+    path = note_path_for_topic(topic)
+    header = []
+    header.append(f"TOPIC: {topic}")
+    header.append(f"CREATED: {now_iso()}")
+    header.append(f"SEARCH_PROVIDER: {provider}")
+    header.append("SOURCES:")
+    for u in urls:
+        header.append(f"- {u}")
+    header.append("")
+    content = "\n".join(header) + notes_text.strip() + "\n"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return path
 
-        def tick():
-            if self._shutdown:
-                return
-            try:
-                self.make_backup()
-            finally:
-                self._backup_timer = threading.Timer(BACKUP_EVERY_SECONDS, tick)
-                self._backup_timer.daemon = True
-                self._backup_timer.start()
 
-        self._backup_timer = threading.Timer(BACKUP_EVERY_SECONDS, tick)
-        self._backup_timer.daemon = True
-        self._backup_timer.start()
+def fetch_and_extract(url: str) -> Tuple[bool, str, str]:
+    try:
+        status, raw, final_url = http_get(url, timeout=HTTP_TIMEOUT)
+        if status >= 400:
+            return False, final_url, f"HTTP {status}"
+        html = decode_bytes(raw)
+        text = strip_html(html)
+        text = pick_best_excerpt(text, MAX_NOTE_CHARS)
+        if len(text) < MIN_TEXT_CHARS:
+            return False, final_url, f"weak_text({len(text)} chars)"
+        return True, final_url, text
+    except urllib.error.HTTPError as e:
+        return False, url, f"HTTPError {getattr(e, 'code', 'unknown')}"
+    except urllib.error.URLError as e:
+        return False, url, f"URLError {str(e)}"
+    except Exception as e:
+        return False, url, f"error {str(e)}"
 
-    def stop_backup_timer(self) -> None:
-        if self._backup_timer:
-            try:
-                self._backup_timer.cancel()
-            except Exception:
-                pass
-            self._backup_timer = None
 
-    def make_backup(self) -> None:
-        os.makedirs(BACKUPS_DIR, exist_ok=True)
-        stamp = now_ts()
-        bundle_dir = os.path.join(BACKUPS_DIR, f"backup_{stamp}")
-        os.makedirs(bundle_dir, exist_ok=True)
+def build_simple_answer_from_notes(topic: str, note_text: str, sources: List[str]) -> str:
+    t = note_text.strip()
+    if not t:
+        return f"I collected some web notes for '{topic}', but the extracted text was empty."
 
-        for p in [
-            KNOWLEDGE_PATH, ALIASES_PATH, QUEUE_PATH,
-            AUTO_INGEST_STATE_PATH, AUTO_IMPORT_STATE_PATH, AUTO_STATE_PATH
-        ]:
-            if os.path.exists(p):
-                shutil.copy2(p, os.path.join(bundle_dir, os.path.basename(p)))
+    parts = [p.strip() for p in re.split(r"\n\s*\n", t) if p.strip()]
+    excerpt = ""
+    if parts:
+        excerpt = parts[0]
+        if len(parts) >= 2 and len(parts[1]) > 120 and len(excerpt) < 1200:
+            excerpt = excerpt + "\n\n" + parts[1]
+    if not excerpt:
+        excerpt = t[:1200].strip()
 
-    # -------- auto ingest --------
+    src_lines = "\n".join([f"- {u}" for u in sources[:6]]) if sources else "- (no sources captured)"
+    answer = f"{excerpt}\n\nSources I pulled from:\n{src_lines}"
+    return answer.strip()
 
-    def run_auto_ingest(self) -> None:
-        os.makedirs(AUTO_INGEST_DIR, exist_ok=True)
-        seen = self.auto_ingest_state.get("seen_files", {})
-        changed = False
 
-        for name in sorted(os.listdir(AUTO_INGEST_DIR)):
-            path = os.path.join(AUTO_INGEST_DIR, name)
-            if not os.path.isfile(path):
-                continue
+def weblearn_topic(topic: str, update_knowledge: bool = True) -> Tuple[bool, str]:
+    t = normalize_topic(topic)
 
-            mtime = os.path.getmtime(path)
-            last = seen.get(name)
-            if last is not None and float(last) >= float(mtime):
-                continue
+    bad, reason = is_garbage_topic(t)
+    if bad:
+        if reason == "ignored test topic":
+            return False, "That looks like a test topic. I am ignoring it."
+        msg = f"Refusing to web-learn that topic ({reason}). Use a normal topic phrase, not a URL or command."
+        return False, msg
 
-            try:
-                raw = read_text_file(path).strip()
-                if not raw:
-                    seen[name] = mtime
-                    changed = True
-                    continue
+    urls, provider = web_search(t)
+    if not urls:
+        return False, "Web search returned no results or could not be fetched."
 
-                lines = raw.splitlines()
-                if lines and lines[0].lower().startswith("topic:"):
-                    topic = lines[0].split(":", 1)[1].strip()
-                    answer = "\n".join(lines[1:]).strip()
-                else:
-                    topic = os.path.splitext(name)[0]
-                    answer = raw
+    fetched_texts: List[str] = []
+    final_sources: List[str] = []
 
-                t = normalize_topic(topic)
-                if answer:
-                    prev_conf = float(self.knowledge.get(t, {}).get("confidence", 0.45))
-                    self.knowledge[t] = {
-                        "answer": answer,
-                        "confidence": clamp(prev_conf, 0.0, 1.0),
-                        "updated_on": now_date(),
-                        "notes": f"Auto ingested from {name}",
-                    }
+    for u in urls[:MAX_FETCH_PAGES]:
+        ok, final_url, text_or_err = fetch_and_extract(u)
+        if ok:
+            fetched_texts.append(text_or_err)
+            final_sources.append(final_url)
+        else:
+            log_line(WEBQUEUE_LOG, f"fetch_skip topic='{t}' url='{u}' final='{final_url}' reason='{text_or_err}'")
 
-                seen[name] = mtime
-                changed = True
-            except Exception:
-                continue
+        if len(fetched_texts) >= 2:
+            break
 
-        if changed:
-            self.auto_ingest_state["seen_files"] = seen
-            self.save_all()
+    if not fetched_texts:
+        return False, "Search worked, but the pages I tried were blocked/too thin to extract."
 
-    # -------- auto import --------
+    combined = "\n\n---\n\n".join(fetched_texts).strip()
+    note_path = write_research_note(t, provider, final_sources, "\n" + combined + "\n")
 
-    def run_auto_import(self) -> None:
-        os.makedirs(AUTO_IMPORT_DIR, exist_ok=True)
-        seen = self.auto_import_state.get("seen_files", {})
-        changed = False
+    if update_knowledge:
+        knowledge = load_knowledge()
+        entry = knowledge.get(t, {})
+        old_conf = float(entry.get("confidence", 0.30) or 0.30)
+        new_conf = clamp(old_conf + 0.18, 0.10, 0.95)
 
-        for name in sorted(os.listdir(AUTO_IMPORT_DIR)):
-            path = os.path.join(AUTO_IMPORT_DIR, name)
-            if not (os.path.isfile(path) and name.lower().endswith(".json")):
-                continue
-
-            mtime = os.path.getmtime(path)
-            last = seen.get(name)
-            if last is not None and float(last) >= float(mtime):
-                continue
-
-            try:
-                payload = load_json(path, None)
-                if isinstance(payload, dict):
-                    for k, v in payload.items():
-                        topic = normalize_topic(str(k))
-                        if isinstance(v, str):
-                            prev_conf = float(self.knowledge.get(topic, {}).get("confidence", 0.45))
-                            self.knowledge[topic] = {
-                                "answer": v,
-                                "confidence": clamp(prev_conf, 0.0, 1.0),
-                                "updated_on": now_date(),
-                                "notes": f"Auto imported from {name}",
-                            }
-                            changed = True
-                        elif isinstance(v, dict):
-                            answer = str(v.get("answer", "")).strip()
-                            if not answer:
-                                continue
-                            conf = float(v.get("confidence", self.knowledge.get(topic, {}).get("confidence", 0.45)))
-                            self.knowledge[topic] = {
-                                "answer": answer,
-                                "confidence": clamp(conf, 0.0, 1.0),
-                                "updated_on": now_date(),
-                                "notes": v.get("notes", f"Auto imported from {name}"),
-                                "sources": v.get("sources", []),
-                            }
-                            changed = True
-
-                seen[name] = mtime
-                changed = True
-            except Exception:
-                continue
-
-        if changed:
-            self.auto_import_state["seen_files"] = seen
-            self.save_all()
-
-    # -------- knowledge ops --------
-
-    def get_entry(self, topic: str) -> Optional[Dict[str, Any]]:
-        return self.knowledge.get(normalize_topic(topic))
-
-    def set_entry(self, topic: str, answer: str, confidence: float = 0.55, notes: str = "", sources: Optional[List[str]] = None) -> None:
-        t = normalize_topic(topic)
-        entry: Dict[str, Any] = {
-            "answer": answer.strip(),
-            "confidence": clamp(float(confidence), 0.0, 1.0),
-            "updated_on": now_date(),
-            "notes": notes.strip(),
+        answer = build_simple_answer_from_notes(t, combined, final_sources)
+        entry = {
+            "answer": answer,
+            "confidence": new_conf,
+            "sources": final_sources,
+            "updated_on": today_str(),
+            "notes": f"Upgraded using web research note: {os.path.basename(note_path)}",
         }
-        if sources:
-            entry["sources"] = list(sources)
-        self.knowledge[t] = entry
-        self.save_all()
+        knowledge[t] = entry
+        save_knowledge(knowledge)
 
-    # -------- queue --------
+    return True, f"Learned from the web and saved notes: {os.path.relpath(note_path, BASE_DIR)}"
 
-    def promote_if_present(self, topic_norm: str) -> bool:
-        t = normalize_topic(topic_norm)
-        changed = False
-        for item in self.queue:
-            if normalize_topic(item.get("topic", "")) == t:
-                if item.get("status", "pending") != "done":
-                    item["status"] = "done"
-                    item["completed_on"] = now_date()
-                    changed = True
-        if changed:
-            self.save_all()
-        return changed
 
-    def queue_topic(self, topic: str, reason: str, confidence: float) -> bool:
-        t = normalize_topic(topic)
-        if not t:
-            return False
+# ----------------------------
+# Research queue
+# ----------------------------
 
-        ok, why = is_ok_for_autoqueue(t)
-        if not ok:
-            return False
+def queue_topic(topic: str, reason: str, current_conf: float = 0.30) -> Tuple[bool, str]:
+    t = normalize_topic(topic).lower()
+    bad, why = is_garbage_topic(t)
+    if bad:
+        if why == "ignored test topic":
+            return False, "Not queued (ignored test topic)."
+        return False, f"Not queued ({why})."
 
-        for item in self.queue:
-            if normalize_topic(item.get("topic", "")) == t and item.get("status", "pending") == "pending":
-                return False
+    q = load_research_queue()
 
-        note_path = find_research_note_path(t)
-        worker_note = ""
-        if note_path is None:
-            worker_note = f"Missing research note file: {os.path.join(RESEARCH_NOTES_DIR, topic_to_notes_filename(t))}"
+    for item in q:
+        if item.get("topic") == t and item.get("status") in ("pending", "running"):
+            return False, "Already pending in web queue."
 
-        self.queue.append({
-            "topic": t,
-            "reason": reason,
-            "requested_on": now_date(),
-            "status": "pending",
-            "current_confidence": float(confidence),
-            "worker_note": worker_note,
-        })
-        self.save_all()
-        return True
+    q.append({
+        "topic": t,
+        "reason": reason,
+        "requested_on": today_str(),
+        "status": "pending",
+        "current_confidence": float(current_conf),
+        "worker_note": "",
+        "attempts": 0,
+        "last_error": "",
+    })
+    save_research_queue(q)
+    return True, "Queued for deeper web research."
 
-    def clear_pending(self) -> int:
-        before = len(self.queue)
-        self.queue = [q for q in self.queue if q.get("status") != "pending"]
-        self.save_all()
-        return before - len(self.queue)
 
-    # -------- aliases --------
+def clear_pending_queue() -> int:
+    q = load_research_queue()
+    before = len(q)
+    q = [x for x in q if x.get("status") != "pending"]
+    save_research_queue(q)
+    return before - len(q)
 
-    def add_alias(self, alias: str, target: str) -> None:
-        a = normalize_topic(alias)
-        t = normalize_topic(target)
-        if not a or not t:
-            return
-        self.aliases[a] = t
-        self.save_all()
 
-    def remove_alias(self, alias: str) -> bool:
-        a = normalize_topic(alias)
-        if a in self.aliases:
-            del self.aliases[a]
-            self.save_all()
-            return True
-        return False
-
-    def resolve_alias(self, text: str) -> Optional[str]:
-        return self.aliases.get(normalize_topic(text))
-
-    # -------- suggestions --------
-
-    def build_candidate_topics(self) -> List[str]:
-        return sorted(set(self.knowledge.keys()))
-
-    def compute_suggestions(self, raw_query: str) -> List[Tuple[str, float]]:
-        q = normalize_topic(raw_query)
-        candidates = self.build_candidate_topics()
-        scored = []
-        for c in candidates:
-            r = difflib.SequenceMatcher(None, q, c).ratio()
-            scored.append((c, r))
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return scored[:8]
-
-    def maybe_auto_accept_alias(self, raw_query: str, match_topic: str, match_ratio: float) -> bool:
-        q = normalize_topic(raw_query)
-        if not q or q == match_topic:
-            return False
-        if q in self.aliases:
-            return False
-        if match_ratio < FUZZY_ACCEPT_THRESHOLD:
-            return False
-
-        entry = self.knowledge.get(match_topic)
-        if not entry:
-            return False
-        conf = float(entry.get("confidence", 0.0))
-        if conf < MIN_CONFIDENCE_FOR_AUTO_ALIAS_TARGET:
-            return False
-
-        self.add_alias(q, match_topic)
-        return True
-
-    # -------- notes upgrade --------
-
-    def upsert_from_notes(self, topic: str, note_path: str) -> bool:
-        try:
-            txt = read_text_file(note_path).strip()
-            if not txt:
-                return False
-        except Exception:
-            return False
-
-        t = normalize_topic(topic)
-        existing_conf = float(self.knowledge.get(t, {}).get("confidence", 0.0))
-        new_conf = max(existing_conf, AUTO_NOTES_CONFIDENCE_FLOOR)
-
-        self.knowledge[t] = {
-            "answer": txt,
-            "confidence": clamp(new_conf, 0.0, 1.0),
-            "updated_on": now_date(),
-            "notes": f"Upgraded from research note: {os.path.basename(note_path)}",
-        }
-
-        self.promote_if_present(t)
-        self.save_all()
-        return True
-
-    def autoupgrade_from_notes(self) -> Tuple[int, int]:
-        upgraded = 0
-        checked = 0
-        for item in self.queue:
-            if item.get("status", "pending") != "pending":
+def purge_junk_pending() -> Dict[str, int]:
+    """
+    Removes ONLY pending junk items (commands, URLs, transcript junk).
+    Keeps done history.
+    """
+    q = load_research_queue()
+    kept = []
+    removed = 0
+    for it in q:
+        if not isinstance(it, dict):
+            continue
+        status = it.get("status")
+        topic = str(it.get("topic", "") or "")
+        if status == "pending":
+            bad, _why = is_garbage_topic(topic)
+            if bad:
+                removed += 1
                 continue
-            topic = item.get("topic", "")
-            if not topic:
-                continue
-            checked += 1
-            p = find_research_note_path(topic)
-            if p:
-                if self.upsert_from_notes(topic, p):
-                    upgraded += 1
-        return upgraded, checked
-
-    # -------- web learn --------
-
-    def weblearn_topic(self, topic: str) -> Tuple[bool, str]:
-        disallowed, reason = looks_disallowed_for_weblearn(topic)
-        if disallowed:
-            return False, reason
-
-        if urllib is None:
-            return False, "Web learning is unavailable because urllib is not available in this Python environment."
-
-        urls = ddg_lite_search(topic, max_results=12)
-        if not urls:
-            return False, "Web search returned no results or could not be fetched."
-
-        filtered = []
-        for u in urls:
-            if is_bad_source_url(u):
-                continue
-            filtered.append(u)
-
-        filtered.sort(key=lambda x: source_quality_score(x), reverse=True)
-
-        picked: List[str] = []
-        for u in filtered:
-            picked.append(u)
-            if len(picked) >= WEBLEARN_MAX_SOURCES:
-                break
-
-        if not picked:
-            return False, "Search results were filtered out. Try a more specific topic."
-
-        texts: List[str] = []
-        used: List[str] = []
-
-        for u in picked:
-            cached = get_cached_url_text(u)
-            if cached is None:
-                txt = fetch_url_text(u)
-                if txt:
-                    set_cached_url_text(u, txt)
-                time.sleep(WEBLEARN_SLEEP_BETWEEN_FETCH_SEC)
-            else:
-                txt = cached
-
-            txt = (txt or "").strip()
-            if len(txt) < 400:
-                continue
-
-            texts.append(txt)
-            used.append(u)
-
-        if not texts:
-            return False, "Could not extract enough readable text from sources."
-
-        answer = synthesize_answer(topic, texts, used)
-
-        note_file = os.path.join(RESEARCH_NOTES_DIR, topic_to_notes_filename(topic))
-        write_text_file(note_file, answer)
-
-        q_scores = [source_quality_score(u) for u in used]
-        base_q = sum(q_scores) / max(1, len(q_scores))
-
-        t = normalize_topic(topic)
-        existing_conf = float(self.knowledge.get(t, {}).get("confidence", 0.0))
-        new_conf = max(existing_conf, clamp(0.55 + (base_q * 0.35), 0.55, 0.88))
-
-        notes = f"Web learned on {now_date()} using local synthesis"
-
-        self.set_entry(
-            topic,
-            answer,
-            confidence=new_conf,
-            notes=notes,
-            sources=used,
-        )
-
-        self.promote_if_present(topic)
-        self.last_web_sources = list(used)
-
-        return True, f"Web learned and saved. Sources used: {len(used)}. Notes file: {os.path.basename(note_file)}"
-
-    def webqueue(self, limit: int = WEBQUEUE_LIMIT_PER_RUN) -> Tuple[int, int]:
-        done = 0
-        attempted = 0
-        for item in self.queue:
-            if item.get("status", "pending") != "pending":
-                continue
-            topic = item.get("topic", "")
-            if not topic:
-                continue
-
-            # Skip garbage URL-like topics that got into queue from older versions
-            if looks_like_url_or_domain(topic):
-                item["status"] = "done"
-                item["completed_on"] = now_date()
-                item["worker_note"] = (item.get("worker_note", "") + " | auto-skipped: url-like topic").strip()
-                self.save_all()
-                continue
-
-            attempted += 1
-            ok, _msg = self.weblearn_topic(topic)
-            if ok:
-                done += 1
-            if attempted >= limit:
-                break
-        return done, attempted
-
-    # -------- curiosity --------
-
-    def curiosity_queue(self, n: int = CURIOSITY_DEFAULT_N) -> Tuple[int, List[str], str]:
-        n = int(n)
-        if n < 1:
-            n = 1
-        if n > CURIOSITY_MAX_N:
-            n = CURIOSITY_MAX_N
-
-        today = now_date()
-        last = str(self.auto_state.get("last_curiosity_date", "")).strip()
-        if last == today:
-            return 0, [], "Curiosity already ran today."
-
-        pending = set()
-        for item in self.queue:
-            if item.get("status", "pending") == "pending":
-                pending.add(normalize_topic(item.get("topic", "")))
-
-        candidates: List[Tuple[str, float]] = []
-        for t, e in self.knowledge.items():
-            try:
-                c = float(e.get("confidence", 0.0))
-            except Exception:
-                c = 0.0
-
-            if c >= CURIOSITY_LOW_CONF_THRESHOLD:
-                continue
-            if t in pending:
-                continue
-
-            ok, _why = is_ok_for_autoqueue(t)
-            if not ok:
-                continue
-
-            candidates.append((t, c))
-
-        candidates.sort(key=lambda x: x[1])
-
-        picked = [t for (t, _c) in candidates[:n]]
-        added = 0
-        added_topics: List[str] = []
-        for t in picked:
-            if self.queue_topic(t, reason="Curiosity maintenance: low confidence topic", confidence=0.35):
-                added += 1
-                added_topics.append(t)
-
-        self.auto_state["last_curiosity_date"] = today
-        self.save_all()
-
-        if added == 0:
-            return 0, [], "Curiosity found no topics to add."
-        return added, added_topics, "Curiosity queued topics for learning."
-
-    # -------- import/export/ingest --------
-
-    def import_json_file(self, path: str) -> Tuple[int, int]:
-        payload = load_json(path, None)
-        if not isinstance(payload, dict):
-            return 0, 0
-
-        added = 0
-        updated = 0
-        for k, v in payload.items():
-            topic = normalize_topic(str(k))
-            if not topic:
-                continue
-
-            if isinstance(v, str):
-                if topic in self.knowledge:
-                    updated += 1
-                else:
-                    added += 1
-                prev_conf = float(self.knowledge.get(topic, {}).get("confidence", 0.45))
-                self.knowledge[topic] = {
-                    "answer": v,
-                    "confidence": clamp(prev_conf, 0.0, 1.0),
-                    "updated_on": now_date(),
-                    "notes": f"Imported from {os.path.basename(path)}",
-                }
-            elif isinstance(v, dict):
-                answer = str(v.get("answer", "")).strip()
-                if not answer:
-                    continue
-                conf = float(v.get("confidence", self.knowledge.get(topic, {}).get("confidence", 0.45)))
-                if topic in self.knowledge:
-                    updated += 1
-                else:
-                    added += 1
-                self.knowledge[topic] = {
-                    "answer": answer,
-                    "confidence": clamp(conf, 0.0, 1.0),
-                    "updated_on": now_date(),
-                    "notes": v.get("notes", f"Imported from {os.path.basename(path)}"),
-                    "sources": v.get("sources", []),
-                }
-
-        self.save_all()
-        return added, updated
-
-    def import_folder(self, folder: str) -> Tuple[int, int, int]:
-        if not os.path.isdir(folder):
-            return 0, 0, 0
-
-        files = [f for f in os.listdir(folder) if f.lower().endswith(".json")]
-        total_added = 0
-        total_updated = 0
-        total_files = 0
-        for f in sorted(files):
-            p = os.path.join(folder, f)
-            if not os.path.isfile(p):
-                continue
-            a, u = self.import_json_file(p)
-            total_added += a
-            total_updated += u
-            total_files += 1
-        return total_files, total_added, total_updated
-
-    def ingest_folder_as_topics(self, folder: str) -> Tuple[int, int]:
-        if not os.path.isdir(folder):
-            return 0, 0
-
-        supported_ext = (".txt", ".md")
-        files = [f for f in os.listdir(folder) if f.lower().endswith(supported_ext)]
-        added = 0
-        updated = 0
-        for f in sorted(files):
-            p = os.path.join(folder, f)
-            if not os.path.isfile(p):
-                continue
-            topic = os.path.splitext(f)[0]
-            content = read_text_file(p).strip()
-            if not content:
-                continue
-            t = normalize_topic(topic)
-            prev_conf = float(self.knowledge.get(t, {}).get("confidence", 0.45))
-            if t in self.knowledge:
-                updated += 1
-            else:
-                added += 1
-            self.knowledge[t] = {
-                "answer": content,
-                "confidence": clamp(prev_conf, 0.0, 1.0),
-                "updated_on": now_date(),
-                "notes": f"Ingested from {f}",
-            }
-        self.save_all()
-        return added, updated
-
-    def export_to_folder(self, folder: str) -> str:
-        os.makedirs(folder, exist_ok=True)
-        out_path = os.path.join(folder, f"knowledge_export_{now_ts()}.json")
-        save_json(out_path, self.knowledge)
-        return out_path
-
-    # -------- main answering logic --------
-
-    def answer_query(self, raw_query: str) -> str:
-        self.last_input_was_terminal = False
-        self.last_why = {}
-        self.last_suggestions = []
-        self.last_user_input = raw_query.strip()
-
-        if is_probably_terminal_command(raw_query):
-            self.last_input_was_terminal = True
-            self.last_why = {
-                "type": "terminal_detected",
-                "input": raw_query.strip(),
-                "note": "Input looked like a shell command, so alias and queue logic was skipped.",
-            }
-            return "That looks like a terminal command. I will not treat it as a topic, alias, or research queue item. Run it in your terminal, or ask me what it does."
-
-        q = normalize_topic(raw_query)
-        if not q:
-            return "Say something, or type /help."
-
-        if q in self.knowledge:
-            entry = self.knowledge[q]
-            self.last_why = {"type": "exact", "topic": q, "confidence": float(entry.get("confidence", 0.0))}
-            return entry.get("answer", "")
-
-        alias_target = self.resolve_alias(q)
-        if alias_target and alias_target in self.knowledge:
-            entry = self.knowledge[alias_target]
-            self.last_why = {"type": "alias", "alias": q, "target": alias_target, "confidence": float(entry.get("confidence", 0.0))}
-            return entry.get("answer", "")
-
-        note_path = find_research_note_path(q)
-        if note_path:
-            if self.upsert_from_notes(q, note_path):
-                entry = self.knowledge.get(q, {})
-                self.last_why = {
-                    "type": "notes_autoupgrade",
-                    "topic": q,
-                    "note_file": os.path.basename(note_path),
-                    "confidence": float(entry.get("confidence", 0.0)),
-                }
-                return entry.get("answer", "")
-
-        suggestions = self.compute_suggestions(q)
-        self.last_suggestions = suggestions
-
-        candidates = self.build_candidate_topics()
-        best_topic, best_ratio = best_fuzzy_match(q, candidates)
-
-        if best_topic is not None:
-            entry = self.knowledge.get(best_topic, {})
-            best_conf = float(entry.get("confidence", 0.0))
-            auto_aliased = self.maybe_auto_accept_alias(q, best_topic, best_ratio)
-
-            self.last_why = {
-                "type": "fuzzy",
-                "input": q,
-                "best_topic": best_topic,
-                "ratio": best_ratio,
-                "best_confidence": best_conf,
-                "auto_alias_created": auto_aliased,
-            }
-
-            if best_ratio >= 0.84 and "answer" in entry:
-                return entry.get("answer", "")
-
-        # Queue hygiene: avoid auto-queueing URLs/domains and short junk
-        if len(q) >= TOPIC_MIN_LEN_FOR_AUTOQUEUE:
-            top_sug = suggestions[0][1] if suggestions else 0.0
-            if (top_sug < 0.84) and (top_sug >= QUEUE_THRESHOLD) and re.search(r"[a-z0-9]", q):
-                ok, _why = is_ok_for_autoqueue(q)
-                if ok:
-                    self.queue_topic(q, reason="No taught answer yet", confidence=0.3)
-
-        return "I do not have a taught answer for that yet. If my reply is wrong or weak, correct me in your own words and I will remember it."
-
-
-# -------------------------
-# CLI command parsing
-# -------------------------
-
-HELP_TEXT = f"""
-{APP_NAME} brain online.
-
-Commands:
-  /help
-  /teach <topic> | <answer>
-  /teachfile <topic> | <path_to_text_file>
-
-  /import <path_to_json_file>
-  /importfolder <folder_path>
-  /ingest <folder_path>
-  /export <folder_path>
-
-  /queue
-  /clearpending
-  /promote <topic>
-
-  /weblearn <topic>
-  /webqueue
-  /sources
-
-  /confidence <topic> [new_value_0_to_1]
-  /lowest [n]
-
-  /alias <alias> | <target_topic>
-  /aliases
-  /unalias <alias>
-
-  /suggest
-  /accept <number>
-  /why
-
-  /curiosity [n]
-
-Notes:
-- Terminal-like inputs are ignored by alias and queue logic.
-- /weblearn uses web search plus local synthesis only.
-""".strip()
-
-
-def parse_pipe_args(s: str) -> Tuple[str, str]:
+        kept.append(it)
+    save_research_queue(kept)
+    return {"removed": removed, "kept": len(kept)}
+
+
+def webqueue_run(limit: int = WEBQUEUE_DEFAULT_LIMIT) -> Dict[str, Any]:
+    ensure_dirs()
+    q = load_research_queue()
+
+    attempted = 0
+    learned = 0
+    skipped = 0
+    failed = 0
+
+    pending_idxs = [i for i, it in enumerate(q) if isinstance(it, dict) and it.get("status") == "pending"]
+
+    if not pending_idxs:
+        log_line(WEBQUEUE_LOG, f"run_webqueue: learned=0 attempted=0 skipped=0 failed=0 limit={limit} (no pending)")
+        return {"learned": 0, "attempted": 0, "skipped": 0, "failed": 0, "limit": limit, "note": "no pending"}
+
+    for idx in pending_idxs:
+        if attempted >= limit:
+            break
+
+        item = q[idx]
+        topic = str(item.get("topic", "") or "").strip()
+
+        bad, why = is_garbage_topic(topic)
+        if bad:
+            skipped += 1
+            item["status"] = "failed"
+            item["last_error"] = f"skipped: {why}"
+            item["attempts"] = int(item.get("attempts", 0)) + 1
+            q[idx] = item
+            log_line(WEBQUEUE_LOG, f"webqueue_skip topic='{topic}' reason='{why}'")
+            continue
+
+        attempted += 1
+        item["status"] = "running"
+        item["attempts"] = int(item.get("attempts", 0)) + 1
+        q[idx] = item
+        save_research_queue(q)
+
+        ok, msg = weblearn_topic(topic, update_knowledge=True)
+        if ok:
+            learned += 1
+            item["status"] = "done"
+            item["completed_on"] = today_str()
+            item["worker_note"] = "Upgraded knowledge using web research note"
+            item["last_error"] = ""
+            q[idx] = item
+            log_line(WEBQUEUE_LOG, f"webqueue_done topic='{topic}' msg='{msg}'")
+        else:
+            failed += 1
+            item["status"] = "failed"
+            item["last_error"] = msg
+            q[idx] = item
+            log_line(WEBQUEUE_LOG, f"webqueue_failed topic='{topic}' error='{msg}'")
+
+        save_research_queue(q)
+
+    log_line(WEBQUEUE_LOG, f"run_webqueue: learned={learned} attempted={attempted} skipped={skipped} failed={failed} limit={limit}")
+    return {"learned": learned, "attempted": attempted, "skipped": skipped, "failed": failed, "limit": limit}
+
+
+# ----------------------------
+# Commands
+# ----------------------------
+
+def cmd_help() -> None:
+    print(f"{APP_NAME} commands:")
+    print("  /teach <topic> | <answer>")
+    print("  /teachfile <topic> | <path_to_text_file>")
+    print("  /import <path_to_json>")
+    print("  /importfolder <folder_path>")
+    print("  /ingest <topic> | <path_to_text_file>")
+    print("  /export")
+    print("  /queue")
+    print("  /clearpending")
+    print("  /purgejunk    (remove ONLY pending junk items like cat/tail/urls)")
+    print("  /promote <topic> [confidence]")
+    print("  /confidence <topic>")
+    print("  /lowest [n]")
+    print("  /alias <alias> | <target_topic>")
+    print("  /aliases")
+    print("  /unalias <alias>")
+    print("  /accept  (accept last alias suggestion)")
+    print("  /suggest (show last suggestion)")
+    print("  /why <topic>")
+    print("  /weblearn <topic>")
+    print("  /webqueue [limit]")
+    print("  /curiosity   (simple daily low-confidence queue fill)")
+    print("  /exit")
+
+
+def parse_pipe_args(s: str) -> Optional[Tuple[str, str]]:
     if "|" not in s:
-        return s.strip(), ""
+        return None
     left, right = s.split("|", 1)
     return left.strip(), right.strip()
 
 
-def format_suggestions(sugs: List[Tuple[str, float]]) -> str:
-    if not sugs:
-        return "No suggestions."
-    out = []
-    for i, (t, r) in enumerate(sugs, start=1):
-        out.append(f"{i}) {t} ({r:.2f})")
-    return "\n".join(out)
+def cmd_teach(arg: str) -> None:
+    parsed = parse_pipe_args(arg)
+    if not parsed:
+        print("Usage: /teach <topic> | <answer>")
+        return
+    topic, answer = parsed
+    topic = normalize_topic(topic).lower()
+    if not topic:
+        print("Topic cannot be empty.")
+        return
+    if not answer.strip():
+        print("Answer cannot be empty.")
+        return
+
+    knowledge = load_knowledge()
+    entry = knowledge.get(topic, {})
+    old_conf = float(entry.get("confidence", 0.30) or 0.30)
+    new_conf = clamp(old_conf + 0.25, 0.10, 0.98)
+
+    entry = {
+        "answer": answer.strip(),
+        "confidence": new_conf,
+        "sources": entry.get("sources", []),
+        "updated_on": today_str(),
+        "notes": "Updated by user via /teach",
+    }
+    knowledge[topic] = entry
+    save_knowledge(knowledge)
+    print(f"Learned: '{topic}' (confidence {pretty_conf(new_conf)})")
 
 
-def run_headless_webqueue(limit: int) -> int:
-    configure_stdio()
-    state = BrainState()
+def cmd_teachfile(arg: str) -> None:
+    parsed = parse_pipe_args(arg)
+    if not parsed:
+        print("Usage: /teachfile <topic> | <path_to_text_file>")
+        return
+    topic, path = parsed
+    topic = normalize_topic(topic).lower()
+    path = path.strip()
+
+    if not os.path.exists(path):
+        print(f"File not found: {path}")
+        return
+
     try:
-        state.run_auto_import()
-        state.run_auto_ingest()
-        upgraded, checked = state.autoupgrade_from_notes()
-        done, attempted = state.webqueue(limit=limit)
-        state.save_all()
-        append_log(WEBQUEUE_LOG_PATH, f"webqueue headless run complete. autoupgrade={upgraded}/{checked} learned={done}/{attempted} limit={limit}")
-        return 0
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read().strip()
     except Exception as e:
-        append_log(WEBQUEUE_LOG_PATH, f"webqueue headless run failed: {repr(e)}")
-        return 2
+        print(f"Could not read file: {e}")
+        return
+
+    if not content:
+        print("File was empty.")
+        return
+
+    knowledge = load_knowledge()
+    entry = knowledge.get(topic, {})
+    old_conf = float(entry.get("confidence", 0.30) or 0.30)
+    new_conf = clamp(old_conf + 0.22, 0.10, 0.98)
+
+    entry = {
+        "answer": content,
+        "confidence": new_conf,
+        "sources": entry.get("sources", []),
+        "updated_on": today_str(),
+        "notes": f"Updated by user via /teachfile ({os.path.basename(path)})",
+    }
+    knowledge[topic] = entry
+    save_knowledge(knowledge)
+    print(f"Learned from file: '{topic}' (confidence {pretty_conf(new_conf)})")
 
 
-def run_headless_curiosity(n: int) -> int:
-    configure_stdio()
-    state = BrainState()
+def cmd_ingest(arg: str) -> None:
+    parsed = parse_pipe_args(arg)
+    if not parsed:
+        print("Usage: /ingest <topic> | <path_to_text_file>")
+        return
+    topic, path = parsed
+    topic = normalize_topic(topic).lower()
+    path = path.strip()
+
+    if not os.path.exists(path):
+        print(f"File not found: {path}")
+        return
+
     try:
-        state.run_auto_import()
-        state.run_auto_ingest()
-        added, topics, msg = state.curiosity_queue(n=n)
-        append_log(CURIOSITY_LOG_PATH, f"{msg} added={added} topics={topics}")
-        return 0
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read().strip()
     except Exception as e:
-        append_log(CURIOSITY_LOG_PATH, f"curiosity headless run failed: {repr(e)}")
-        return 2
+        print(f"Could not read file: {e}")
+        return
+
+    if not content:
+        print("File was empty.")
+        return
+
+    note_path = write_research_note(topic, "local_ingest", [f"file:{os.path.abspath(path)}"], "\n" + content + "\n")
+
+    knowledge = load_knowledge()
+    entry = knowledge.get(topic, {})
+    old_conf = float(entry.get("confidence", 0.30) or 0.30)
+    new_conf = clamp(old_conf + 0.18, 0.10, 0.98)
+
+    entry = {
+        "answer": content,
+        "confidence": new_conf,
+        "sources": [f"file:{os.path.abspath(path)}"],
+        "updated_on": today_str(),
+        "notes": f"Ingested local file into research note: {os.path.basename(note_path)}",
+    }
+    knowledge[topic] = entry
+    save_knowledge(knowledge)
+
+    print(f"Ingested into notes + knowledge: '{topic}' (confidence {pretty_conf(new_conf)})")
 
 
-def main():
-    configure_stdio()
+def cmd_import(path: str) -> None:
+    path = path.strip()
+    if not path:
+        print("Usage: /import <path_to_json>")
+        return
+    if not os.path.exists(path):
+        print(f"File not found: {path}")
+        return
 
-    state = BrainState()
-    state.run_auto_import()
-    state.run_auto_ingest()
-    state.start_backup_timer()
+    data = load_json(path, None)
+    if data is None or not isinstance(data, dict):
+        print("Import failed: JSON must be an object of topic -> entry.")
+        return
 
-    safe_print(f"{APP_NAME} brain online. Type a message, or /help for commands. Ctrl+C to exit.")
+    knowledge = load_knowledge()
+    merged = 0
+    for k, v in data.items():
+        if not isinstance(k, str):
+            continue
+        kk = normalize_topic(k).lower()
+        if isinstance(v, dict) and "answer" in v:
+            knowledge[kk] = v
+            merged += 1
+        elif isinstance(v, str):
+            knowledge[kk] = {"answer": v, "confidence": 0.50, "sources": [], "updated_on": today_str(), "notes": "Imported string entry"}
+            merged += 1
 
-    def shutdown(*_args):
-        state._shutdown = True
-        state.stop_backup_timer()
-        state.save_all()
-        safe_print("\nShutting down.")
-        sys.exit(0)
+    save_knowledge(knowledge)
+    print(f"Imported {merged} topics.")
 
-    signal.signal(signal.SIGINT, shutdown)
 
-    while True:
+def cmd_importfolder(folder: str) -> None:
+    folder = folder.strip()
+    if not folder:
+        print("Usage: /importfolder <folder_path>")
+        return
+    if not os.path.isdir(folder):
+        print(f"Folder not found: {folder}")
+        return
+
+    knowledge = load_knowledge()
+    count = 0
+    for root, _dirs, files in os.walk(folder):
+        for fn in files:
+            if not fn.lower().endswith(".txt"):
+                continue
+            path = os.path.join(root, fn)
+            topic = os.path.splitext(fn)[0].replace("_", " ").strip().lower()
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read().strip()
+                if not content:
+                    continue
+                knowledge[topic] = {
+                    "answer": content,
+                    "confidence": 0.55,
+                    "sources": [f"file:{os.path.abspath(path)}"],
+                    "updated_on": today_str(),
+                    "notes": "Imported from folder",
+                }
+                count += 1
+            except Exception:
+                continue
+
+    save_knowledge(knowledge)
+    print(f"Imported {count} text files from folder into knowledge.")
+
+
+def cmd_export() -> None:
+    ensure_dirs()
+    knowledge = load_knowledge()
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    out = os.path.join(EXPORTS_DIR, f"knowledge_export_{ts}.json")
+    save_json(out, knowledge)
+    print(f"Exported knowledge to: {os.path.relpath(out, BASE_DIR)}")
+
+
+def cmd_queue() -> None:
+    q = load_research_queue()
+    if not q:
+        print("Research queue is empty.")
+        return
+    print("Research queue (latest first):")
+    for item in list(reversed(q[-15:])):
+        topic = item.get("topic", "")
+        status = item.get("status", "")
+        reason = item.get("reason", "")
+        attempts = item.get("attempts", 0)
+        err = item.get("last_error", "")
+        print(f"- {topic} [{status}] attempts={attempts} reason='{reason}'")
+        if err:
+            print(f"  last_error: {err}")
+
+
+def cmd_clearpending() -> None:
+    removed = clear_pending_queue()
+    print(f"Removed {removed} pending items from web research queue.")
+
+
+def cmd_purgejunk() -> None:
+    res = purge_junk_pending()
+    print(f"Purged junk pending items. removed={res['removed']} kept={res['kept']}")
+
+
+def cmd_promote(arg: str) -> None:
+    parts = arg.strip().split()
+    if not parts:
+        print("Usage: /promote <topic> [confidence]")
+        return
+    topic = normalize_topic(" ".join(parts[:-1] if len(parts) > 1 and re.match(r"^\d+(\.\d+)?$", parts[-1]) else parts)).lower()
+    new_conf = None
+    if len(parts) > 1 and re.match(r"^\d+(\.\d+)?$", parts[-1]):
         try:
-            raw = input("> ").rstrip("\n")
+            new_conf = float(parts[-1])
+        except Exception:
+            new_conf = None
+
+    knowledge = load_knowledge()
+    if topic not in knowledge:
+        print("No entry yet for that topic. Teach it first.")
+        return
+
+    entry = knowledge.get(topic, {})
+    old = float(entry.get("confidence", 0.30) or 0.30)
+    if new_conf is None:
+        new = clamp(old + 0.10, 0.10, 0.99)
+    else:
+        new = clamp(new_conf, 0.10, 0.99)
+
+    entry["confidence"] = new
+    entry["updated_on"] = today_str()
+    entry["notes"] = "Promoted confidence via /promote"
+    knowledge[topic] = entry
+    save_knowledge(knowledge)
+    print(f"Promoted '{topic}' confidence: {pretty_conf(old)} -> {pretty_conf(new)}")
+
+
+def cmd_confidence(topic: str) -> None:
+    t = normalize_topic(topic).lower()
+    knowledge = load_knowledge()
+    entry = knowledge.get(t)
+    if not entry:
+        print("No entry for that topic.")
+        return
+    print(f"{t}: confidence={pretty_conf(entry.get('confidence', 0.0))}")
+
+
+def cmd_lowest(arg: str) -> None:
+    n = 10
+    arg = arg.strip()
+    if arg:
+        try:
+            n = int(arg)
+        except Exception:
+            n = 10
+    n = max(1, min(50, n))
+
+    knowledge = load_knowledge()
+    items = []
+    for k, v in knowledge.items():
+        try:
+            c = float(v.get("confidence", 0.0) or 0.0)
+        except Exception:
+            c = 0.0
+        items.append((c, k))
+    items.sort(key=lambda x: x[0])
+    print(f"Lowest confidence topics (top {n}):")
+    for c, k in items[:n]:
+        print(f"- {k}: {pretty_conf(c)}")
+
+
+def cmd_alias(arg: str) -> None:
+    parsed = parse_pipe_args(arg)
+    if not parsed:
+        print("Usage: /alias <alias> | <target_topic>")
+        return
+    alias_word, target = parsed
+    alias_word = normalize_topic(alias_word).lower()
+    target = normalize_topic(target).lower()
+
+    if not alias_word or not target:
+        print("Alias and target cannot be empty.")
+        return
+
+    aliases = load_aliases()
+    aliases[alias_word] = target
+    save_aliases(aliases)
+    print(f"Alias set: {alias_word} -> {target}")
+
+
+def cmd_aliases() -> None:
+    aliases = load_aliases()
+    if not aliases:
+        print("No aliases set.")
+        return
+    print("Aliases:")
+    for a in sorted(aliases.keys()):
+        print(f"- {a} -> {aliases[a]}")
+
+
+def cmd_unalias(arg: str) -> None:
+    a = normalize_topic(arg).lower()
+    if not a:
+        print("Usage: /unalias <alias>")
+        return
+    aliases = load_aliases()
+    if a not in aliases:
+        print("Alias not found.")
+        return
+    target = aliases.pop(a)
+    save_aliases(aliases)
+    print(f"Removed alias: {a} -> {target}")
+
+
+def cmd_suggest() -> None:
+    if not _last_suggestion:
+        print("No suggestion available.")
+        return
+    print(f"Suggestion: /alias {_last_suggestion['alias']} | {_last_suggestion['target']}")
+    if _last_suggestion.get("reason"):
+        print(f"Reason: {_last_suggestion['reason']}")
+
+
+def cmd_accept() -> None:
+    if not _last_suggestion:
+        print("No suggestion to accept.")
+        return
+    alias_word = _last_suggestion["alias"]
+    target = _last_suggestion["target"]
+    aliases = load_aliases()
+    aliases[alias_word] = target
+    save_aliases(aliases)
+    print(f"Accepted alias: {alias_word} -> {target}")
+    clear_last_suggestion()
+
+
+def cmd_why(arg: str) -> None:
+    topic = normalize_topic(arg).lower()
+    if not topic:
+        print("Usage: /why <topic>")
+        return
+    aliases = load_aliases()
+    resolved = resolve_alias(topic, aliases).lower()
+
+    knowledge = load_knowledge()
+    entry = knowledge.get(resolved)
+    if not entry:
+        print("No entry for that topic.")
+        return
+
+    print(f"WHY for '{resolved}':")
+    print(f"- confidence: {pretty_conf(entry.get('confidence', 0.0))}")
+    note = entry.get("notes", "")
+    if note:
+        print(f"- notes: {note}")
+    srcs = entry.get("sources", [])
+    if srcs:
+        print("- sources:")
+        for u in srcs[:8]:
+            print(f"  - {u}")
+    else:
+        print("- sources: (none recorded)")
+
+
+def cmd_weblearn(arg: str) -> None:
+    topic = normalize_topic(arg)
+    ok, msg = weblearn_topic(topic, update_knowledge=True)
+    print(msg)
+
+
+def cmd_webqueue(arg: str) -> None:
+    limit = WEBQUEUE_DEFAULT_LIMIT
+    s = arg.strip()
+    if s:
+        try:
+            limit = int(s)
+        except Exception:
+            limit = WEBQUEUE_DEFAULT_LIMIT
+    limit = max(1, min(25, limit))
+    res = webqueue_run(limit=limit)
+    print(f"Web queue run complete. Learned {res['learned']} out of {res['attempted']} attempted (limit {res['limit']}).")
+    if res.get("skipped", 0) or res.get("failed", 0):
+        print(f"Skipped={res.get('skipped',0)} Failed={res.get('failed',0)} (see {os.path.relpath(WEBQUEUE_LOG, BASE_DIR)})")
+
+
+def cmd_curiosity() -> None:
+    """
+    Simple: queue low-confidence topics that are not already pending.
+    (This is intentionally light-weight.)
+    """
+    knowledge = load_knowledge()
+    q = load_research_queue()
+    pending = {str(it.get("topic", "")) for it in q if isinstance(it, dict) and it.get("status") == "pending"}
+
+    queued = 0
+    for topic, entry in knowledge.items():
+        try:
+            conf = float(entry.get("confidence", 0.30) or 0.30)
+        except Exception:
+            conf = 0.30
+        if conf < 0.50 and topic not in pending:
+            bad, _why = is_garbage_topic(topic)
+            if bad:
+                continue
+            ok, _msg = queue_topic(topic, reason="Curiosity maintenance: low confidence topic", current_conf=conf)
+            if ok:
+                queued += 1
+
+    log_line(CURIOSITY_LOG, f"curiosity_manual_run queued={queued}")
+    print(f"Curiosity queued={queued}")
+
+
+# ----------------------------
+# Chat / answering behavior
+# ----------------------------
+
+def should_queue_for_research(topic: str, knowledge: Dict[str, Any]) -> Tuple[bool, str, float]:
+    entry = knowledge.get(topic)
+    if not entry:
+        return True, "No taught answer yet", 0.30
+
+    try:
+        conf = float(entry.get("confidence", 0.30) or 0.30)
+    except Exception:
+        conf = 0.30
+
+    if conf < MIN_CONFIDENCE_FOR_NO_QUEUE:
+        return True, "Answer exists but confidence is low", conf
+
+    return False, "", conf
+
+
+def respond_to_topic(user_text: str) -> None:
+    raw = normalize_topic(user_text)
+    if not raw:
+        return
+
+    bad, why = is_garbage_topic(raw)
+    if bad:
+        if why == "ignored test topic":
+            print(f"{APP_NAME}: That looks like a test topic. I am ignoring it.")
+            clear_last_suggestion()
+            return
+        if why == "looks like a terminal command":
+            print(f"{APP_NAME}: That looks like a terminal command. I will not treat it as a topic, alias, or research queue item. Run it in your terminal, or ask me what it does.")
+            clear_last_suggestion()
+            return
+        if why == "looks like a URL/domain":
+            print(f"{APP_NAME}: That looks like a URL or domain string. Ask using a normal topic name instead (example: 'rfc 1918').")
+            clear_last_suggestion()
+            return
+        print(f"{APP_NAME}: I am ignoring that input ({why}).")
+        clear_last_suggestion()
+        return
+
+    topic = raw.lower()
+
+    aliases = load_aliases()
+    resolved = resolve_alias(topic, aliases).lower()
+
+    knowledge = load_knowledge()
+
+    entry = knowledge.get(resolved)
+    if entry and entry.get("answer"):
+        print(f"{APP_NAME}: {entry['answer']}")
+        clear_last_suggestion()
+
+        qit, reason, conf = should_queue_for_research(resolved, knowledge)
+        if qit:
+            ok, _qmsg = queue_topic(resolved, reason=reason, current_conf=conf)
+            if ok:
+                log_line(CURIOSITY_LOG, f"queued topic='{resolved}' reason='{reason}' conf={conf}")
+        return
+
+    suggestions = fuzzy_suggest(resolved, knowledge, aliases)
+    if suggestions:
+        best = suggestions[0]
+        set_last_suggestion(alias_word=topic, target_topic=best, reason="fuzzy match")
+        print(f"Suggestion: /alias {topic} | {best}")
+        print(f"{APP_NAME}: I do not have a taught answer for that yet. If my reply is wrong or weak, correct me in your own words and I will remember it.")
+        print("My analysis may be incomplete. If this seems wrong, correct me and I will update my understanding.")
+        print("I have also marked this topic for deeper research so I can improve my answer over time.")
+    else:
+        clear_last_suggestion()
+        print(f"{APP_NAME}: I do not have a taught answer for that yet. If my reply is wrong or weak, correct me in your own words and I will remember it.")
+        print("My analysis may be incomplete. If this seems wrong, correct me and I will update my understanding.")
+        print("I have also marked this topic for deeper research so I can improve my answer over time.")
+
+    qit, reason, conf = should_queue_for_research(resolved, knowledge)
+    if qit:
+        ok, qmsg = queue_topic(resolved, reason=reason, current_conf=conf)
+        if ok:
+            log_line(CURIOSITY_LOG, f"queued topic='{resolved}' reason='{reason}' conf={conf}")
+        else:
+            log_line(CURIOSITY_LOG, f"queue_reject topic='{resolved}' msg='{qmsg}'")
+
+
+# ----------------------------
+# Headless jobs (systemd timers)
+# ----------------------------
+
+def run_headless_webqueue(limit: int = WEBQUEUE_DEFAULT_LIMIT) -> int:
+    try:
+        res = webqueue_run(limit=limit)
+        if res.get("attempted", 0) == 0:
+            return 1
+        if res.get("failed", 0) > 0:
+            return 2
+        return 0
+    except Exception as e:
+        log_line(WEBQUEUE_LOG, f"headless_webqueue_exception: {e}")
+        return 2
+
+
+def run_headless_curiosity() -> int:
+    try:
+        cmd_curiosity()
+        return 0
+    except Exception as e:
+        log_line(CURIOSITY_LOG, f"daily_curiosity_exception: {e}")
+        return 1
+
+
+# ----------------------------
+# Main loop
+# ----------------------------
+
+def handle_command(line: str) -> bool:
+    s = line.strip()
+    if not s:
+        return True
+
+    s_norm = strip_prompt_prefixes(s)
+
+    if s_norm in ("/exit", "/quit"):
+        return False
+
+    if s_norm == "/help":
+        cmd_help()
+        return True
+
+    cmd, *rest = s_norm.split(" ", 1)
+    arg = rest[0] if rest else ""
+
+    if cmd == "/teach":
+        cmd_teach(arg)
+        return True
+    if cmd == "/teachfile":
+        cmd_teachfile(arg)
+        return True
+    if cmd == "/import":
+        cmd_import(arg)
+        return True
+    if cmd == "/importfolder":
+        cmd_importfolder(arg)
+        return True
+    if cmd == "/ingest":
+        cmd_ingest(arg)
+        return True
+    if cmd == "/export":
+        cmd_export()
+        return True
+    if cmd == "/queue":
+        cmd_queue()
+        return True
+    if cmd == "/clearpending":
+        cmd_clearpending()
+        return True
+    if cmd == "/purgejunk":
+        cmd_purgejunk()
+        return True
+    if cmd == "/promote":
+        cmd_promote(arg)
+        return True
+    if cmd == "/confidence":
+        cmd_confidence(arg)
+        return True
+    if cmd == "/lowest":
+        cmd_lowest(arg)
+        return True
+    if cmd == "/alias":
+        cmd_alias(arg)
+        return True
+    if cmd == "/aliases":
+        cmd_aliases()
+        return True
+    if cmd == "/unalias":
+        cmd_unalias(arg)
+        return True
+    if cmd == "/accept":
+        cmd_accept()
+        return True
+    if cmd == "/suggest":
+        cmd_suggest()
+        return True
+    if cmd == "/why":
+        cmd_why(arg)
+        return True
+    if cmd == "/weblearn":
+        cmd_weblearn(arg)
+        return True
+    if cmd == "/webqueue":
+        cmd_webqueue(arg)
+        return True
+    if cmd == "/curiosity":
+        cmd_curiosity()
+        return True
+
+    if s_norm.startswith("/"):
+        print("Unknown command. Type /help")
+        return True
+
+    respond_to_topic(s_norm)
+    return True
+
+
+def signal_handler(_signum, _frame) -> None:
+    global _shutdown
+    _shutdown = True
+    print("\nShutting down.")
+
+
+def main_interactive() -> int:
+    ensure_dirs()
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    print(f"{APP_NAME} brain online. Type a message, or /help for commands. Ctrl+C to exit.")
+    while not _shutdown:
+        try:
+            line = input("> ")
         except EOFError:
-            shutdown()
+            break
+        except KeyboardInterrupt:
+            break
 
-        if not raw.strip():
-            continue
+        keep_going = handle_command(line)
+        if not keep_going:
+            break
 
-        state.run_auto_import()
-        state.run_auto_ingest()
+    print("Shutting down.")
+    return 0
 
-        if raw.startswith("/"):
-            cmdline = raw.strip()
 
-            if cmdline == "/help":
-                safe_print(HELP_TEXT)
-                continue
+def parse_args(argv: List[str]) -> Dict[str, Any]:
+    out = {"mode": "interactive", "limit": WEBQUEUE_DEFAULT_LIMIT}
+    if len(argv) <= 1:
+        return out
 
-            if cmdline.startswith("/teach "):
-                rest = cmdline[len("/teach "):].strip()
-                topic, answer = parse_pipe_args(rest)
-                if not topic or not answer:
-                    safe_print("Usage: /teach <topic> | <answer>")
-                    continue
-                state.set_entry(topic, answer, confidence=0.55, notes="Updated by user re teach")
-                safe_print("Saved.")
-                continue
+    if argv[1] == "--webqueue":
+        out["mode"] = "webqueue"
+        if len(argv) >= 3:
+            try:
+                out["limit"] = int(argv[2])
+            except Exception:
+                out["limit"] = WEBQUEUE_DEFAULT_LIMIT
+        return out
 
-            if cmdline.startswith("/teachfile "):
-                rest = cmdline[len("/teachfile "):].strip()
-                topic, path = parse_pipe_args(rest)
-                if not topic or not path:
-                    safe_print("Usage: /teachfile <topic> | <path_to_text_file>")
-                    continue
-                if not os.path.exists(path):
-                    safe_print("File not found.")
-                    continue
-                ans = read_text_file(path).strip()
-                if not ans:
-                    safe_print("File was empty.")
-                    continue
-                state.set_entry(topic, ans, confidence=0.55, notes=f"Teachfile from {os.path.basename(path)}")
-                safe_print("Saved.")
-                continue
+    if argv[1] == "--curiosity":
+        out["mode"] = "curiosity"
+        return out
 
-            if cmdline.startswith("/import "):
-                path = cmdline[len("/import "):].strip()
-                if not path:
-                    safe_print("Usage: /import <path_to_json_file>")
-                    continue
-                if not os.path.exists(path):
-                    safe_print("File not found.")
-                    continue
-                added, updated = state.import_json_file(path)
-                safe_print(f"Imported. Added {added}, updated {updated}.")
-                continue
-
-            if cmdline.startswith("/importfolder "):
-                folder = cmdline[len("/importfolder "):].strip()
-                if not folder:
-                    safe_print("Usage: /importfolder <folder_path>")
-                    continue
-                files, added, updated = state.import_folder(folder)
-                safe_print(f"Imported folder. Files {files}, added {added}, updated {updated}.")
-                continue
-
-            if cmdline.startswith("/ingest "):
-                folder = cmdline[len("/ingest "):].strip()
-                if not folder:
-                    safe_print("Usage: /ingest <folder_path>")
-                    continue
-                added, updated = state.ingest_folder_as_topics(folder)
-                safe_print(f"Ingested folder. Added {added}, updated {updated}.")
-                continue
-
-            if cmdline.startswith("/export "):
-                folder = cmdline[len("/export "):].strip()
-                if not folder:
-                    safe_print("Usage: /export <folder_path>")
-                    continue
-                out_path = state.export_to_folder(folder)
-                safe_print(f"Exported to {out_path}")
-                continue
-
-            if cmdline == "/queue":
-                pending = [q for q in state.queue if q.get("status") == "pending"]
-                safe_print(f"Pending queue items: {len(pending)}")
-                for i, item in enumerate(pending, start=1):
-                    safe_print(f"{i}) {item.get('topic')} | {item.get('reason')}")
-                continue
-
-            if cmdline == "/clearpending":
-                removed = state.clear_pending()
-                safe_print(f"Removed {removed} pending items.")
-                continue
-
-            if cmdline.startswith("/promote "):
-                topic = cmdline[len("/promote "):].strip()
-                if not topic:
-                    safe_print("Usage: /promote <topic>")
-                    continue
-                changed = state.promote_if_present(topic)
-                safe_print("Promoted." if changed else "No matching queue item found.")
-                continue
-
-            if cmdline.startswith("/confidence "):
-                rest = cmdline[len("/confidence "):].strip()
-                parts = rest.split()
-                if not parts:
-                    safe_print("Usage: /confidence <topic> [new_value_0_to_1]")
-                    continue
-                topic = " ".join(parts[:-1]) if len(parts) > 1 else parts[0]
-                entry = state.get_entry(topic)
-                if entry is None:
-                    safe_print("No such topic.")
-                    continue
-                if len(parts) == 1:
-                    safe_print(f"{normalize_topic(topic)} confidence: {float(entry.get('confidence', 0.0)):.2f}")
-                    continue
-                try:
-                    newv = float(parts[-1])
-                except Exception:
-                    safe_print("Confidence must be a number 0 to 1.")
-                    continue
-                entry["confidence"] = clamp(newv, 0.0, 1.0)
-                entry["updated_on"] = now_date()
-                entry["notes"] = (entry.get("notes", "") + " | confidence edited").strip()
-                state.knowledge[normalize_topic(topic)] = entry
-                state.save_all()
-                safe_print("Updated confidence.")
-                continue
-
-            if cmdline.startswith("/lowest"):
-                rest = cmdline[len("/lowest"):].strip()
-                n = 10
-                if rest:
-                    try:
-                        n = int(rest)
-                    except Exception:
-                        n = 10
-                items = []
-                for t, e in state.knowledge.items():
-                    try:
-                        c = float(e.get("confidence", 0.0))
-                    except Exception:
-                        c = 0.0
-                    items.append((t, c))
-                items.sort(key=lambda x: x[1])
-                safe_print("Lowest confidence topics:")
-                for t, c in items[:max(1, n)]:
-                    safe_print(f"- {t}: {c:.2f}")
-                continue
-
-            if cmdline.startswith("/alias "):
-                rest = cmdline[len("/alias "):].strip()
-                a, t = parse_pipe_args(rest)
-                if not a or not t:
-                    safe_print("Usage: /alias <alias> | <target_topic>")
-                    continue
-                state.add_alias(a, t)
-                safe_print("Alias saved.")
-                continue
-
-            if cmdline == "/aliases":
-                if not state.aliases:
-                    safe_print("No aliases.")
-                    continue
-                safe_print("Aliases:")
-                for a in sorted(state.aliases.keys()):
-                    safe_print(f"- {a} -> {state.aliases[a]}")
-                continue
-
-            if cmdline.startswith("/unalias "):
-                a = cmdline[len("/unalias "):].strip()
-                if not a:
-                    safe_print("Usage: /unalias <alias>")
-                    continue
-                ok = state.remove_alias(a)
-                safe_print("Removed." if ok else "Alias not found.")
-                continue
-
-            if cmdline == "/suggest":
-                if state.last_input_was_terminal:
-                    safe_print("Last input looked like a terminal command. No alias suggestions.")
-                    continue
-                safe_print("Suggestions:")
-                safe_print(format_suggestions(state.last_suggestions))
-                safe_print("Use: /accept <number>")
-                continue
-
-            if cmdline.startswith("/accept "):
-                if state.last_input_was_terminal:
-                    safe_print("Last input looked like a terminal command. Refusing to create alias.")
-                    continue
-                num_s = cmdline[len("/accept "):].strip()
-                try:
-                    n = int(num_s)
-                except Exception:
-                    safe_print("Usage: /accept <number>")
-                    continue
-                if n < 1 or n > len(state.last_suggestions):
-                    safe_print("Invalid selection number.")
-                    continue
-                if not state.last_user_input.strip():
-                    safe_print("No last input to alias from.")
-                    continue
-                alias_from = normalize_topic(state.last_user_input)
-                target = state.last_suggestions[n - 1][0]
-                state.add_alias(alias_from, target)
-                safe_print(f"Accepted. Alias created: {alias_from} -> {target}")
-                continue
-
-            if cmdline == "/why":
-                if not state.last_why:
-                    safe_print("No last decision recorded.")
-                else:
-                    safe_print(json.dumps(state.last_why, indent=2, ensure_ascii=False))
-                continue
-
-            if cmdline.startswith("/weblearn "):
-                topic = cmdline[len("/weblearn "):].strip()
-                if not topic:
-                    safe_print("Usage: /weblearn <topic>")
-                    continue
-                ok, msg = state.weblearn_topic(topic)
-                safe_print(msg)
-                continue
-
-            if cmdline == "/webqueue":
-                done, attempted = state.webqueue(limit=WEBQUEUE_LIMIT_PER_RUN)
-                safe_print(f"Web queue run complete. Learned {done} out of {attempted} attempted (limit {WEBQUEUE_LIMIT_PER_RUN}).")
-                continue
-
-            if cmdline == "/sources":
-                if not state.last_web_sources:
-                    safe_print("No web sources recorded yet.")
-                    continue
-                safe_print("Last web sources:")
-                for u in state.last_web_sources:
-                    safe_print(f"- {u}")
-                continue
-
-            if cmdline.startswith("/curiosity"):
-                rest = cmdline[len("/curiosity"):].strip()
-                n = CURIOSITY_DEFAULT_N
-                if rest:
-                    try:
-                        n = int(rest)
-                    except Exception:
-                        n = CURIOSITY_DEFAULT_N
-                added, topics, msg = state.curiosity_queue(n=n)
-                safe_print(f"{msg} added={added}")
-                for t in topics:
-                    safe_print(f"- {t}")
-                continue
-
-            safe_print("Unknown command. Type /help.")
-            continue
-
-        response = state.answer_query(raw)
-        safe_print(f"{APP_NAME}: {response}")
+    return out
 
 
 if __name__ == "__main__":
-    configure_stdio()
+    ensure_dirs()
+    args = parse_args(sys.argv)
 
-    if "--webqueue" in sys.argv:
-        limit = WEBQUEUE_LIMIT_PER_RUN
-        if "--limit" in sys.argv:
-            try:
-                i = sys.argv.index("--limit")
-                limit = int(sys.argv[i + 1])
-            except Exception:
-                limit = WEBQUEUE_LIMIT_PER_RUN
-        sys.exit(run_headless_webqueue(limit=limit))
+    if args["mode"] == "webqueue":
+        rc = run_headless_webqueue(limit=max(1, min(25, int(args.get("limit", WEBQUEUE_DEFAULT_LIMIT)))))
+        sys.exit(rc)
 
-    if "--curiosity" in sys.argv:
-        n = CURIOSITY_DEFAULT_N
-        if "--n" in sys.argv:
-            try:
-                i = sys.argv.index("--n")
-                n = int(sys.argv[i + 1])
-            except Exception:
-                n = CURIOSITY_DEFAULT_N
-        sys.exit(run_headless_curiosity(n=n))
+    if args["mode"] == "curiosity":
+        rc = run_headless_curiosity()
+        sys.exit(rc)
 
-    main()
+    sys.exit(main_interactive())
