@@ -1,79 +1,29 @@
-data/exports/
-data/backups/
-data/auto_ingest_state.json
-
-# ---- MachineSpirit runtime ignores ----
-data/exports/
-data/backups/
-data/auto_ingest_state.json
-
-# Python
+# ---- Python ----
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
-.venv/
-venv/
 
-# OS junk
-.DS_Store
-Thumbs.db
+# ---- Runtime / learning state (DO NOT COMMIT) ----
+data/
+!data/.gitkeep
 
-# ---- MachineSpirit runtime state ----
-.env
-.env.bak
+# If you want to keep a folder structure but not contents, add .gitkeep files
+# Example: data/.gitkeep, data/research_notes/.gitkeep, etc.
 
-# Logs
-*.log
-logs/
+# ---- Explicit runtime folders (redundant but clear) ----
+data/exports/
+data/backups/
+data/web_cache/
+data/logs/
+data/auto_ingest/
+data/auto_import/
 
-# Backups / old versions
-*.bak
-backup_pre_reset/
-backups/
+# ---- Runtime state files ----
+data/*.json
+data/*.tmp
 
-# Runtime data (learned / generated)
-data/local_knowledge.json
-data/memory.json
-data/memory/
-data/night_learner.log
-data/chatlog.json
-data/knowledge/
-data/knowledge_tools_log.json
-data/research_queue.json
-data/research_notes.json
+# ---- Research notes are runtime-generated (do not commit) ----
+data/research_notes/
 
-# Large / external
-llama.cpp/
-
-# ---- MachineSpirit runtime state ----
-.env
-.env.bak
-
-# Logs
-*.log
-logs/
-
-# Backups / old versions
-*.bak
-backup_pre_reset/
-backups/
-
-# Runtime data (learned / generated)
-data/chatlog.json
-data/local_knowledge.json
-data/memory.json
-data/memory/
-data/night_learner.log
-data/knowledge/
-data/knowledge_tools_log.json
-data/research_queue.json
-data/research_notes.json
-
-# Large / external
-llama.cpp/
-
-# ---- Auto-import runtime ----
-data/imports/
-data/auto_import_state.json
-auto_import_state.json
+# ---- Optional local junk ----
+memory.json

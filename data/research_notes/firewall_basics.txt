@@ -1,9 +1,0 @@
-Firewall Basics - Research Note
-
-A firewall controls network traffic using rules based on IP addresses, ports, protocols, and direction.
-
-Stateful firewalls track active connections and automatically allow return traffic.
-
-Stateless firewalls evaluate each packet independently without tracking connections.
-
-Firewalls commonly use a default deny approach and are placed at network boundaries to improve security.
