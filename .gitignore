@@ -27,3 +27,25 @@ data/research_notes/
 
 # ---- Optional local junk ----
 memory.json
+
+# --- secrets ---
+.env
+.env.*
+
+# --- venvs ---
+venv/
+.venv/
+
+# --- logs / runtime ---
+logs/
+backups/
+backup_pre_reset/
+interactions.log
+
+# --- backups / scratch / old copies ---
+*.bak
+*.save
+*.tmp
+
+# --- big vendor/build dirs ---
+llama.cpp/

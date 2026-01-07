@@ -62,15 +62,13 @@ WEBLEARN_TIMEOUT_SEC = 14
 WEBLEARN_PER_SOURCE_CHAR_LIMIT = 14000
 WEBLEARN_SLEEP_BETWEEN_FETCH_SEC = 1.0
 
-# NEW: direct URL ingestion (user-supplied URLs)
-WEBINGEST_TIMEOUT_SEC = 16
-WEBINGEST_MAX_BYTES = 2_000_000  # hard cap on raw download
-WEBINGEST_TEXT_LIMIT = 18000     # cap on extracted text saved to note
-WEBINGEST_MIN_TEXT_CHARS = 500   # ignore tiny pages
-
 CURIOSITY_DEFAULT_N = 3
 CURIOSITY_MAX_N = 10
 CURIOSITY_LOW_CONF_THRESHOLD = 0.70
+
+# URL/domain-ish topic filtering
+TOPIC_MIN_LEN_FOR_AUTOQUEUE = 3
+BLOCK_TOPIC_IF_LOOKS_LIKE_URL = True
 
 
 # -------------------------
@@ -148,8 +146,6 @@ def save_json(path: str, obj) -> None:
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, obj if False else tmp)  # keep behavior stable in weird envs
-    # NOTE: Immediately fix to correct replace
     os.replace(tmp, path)
 
 
@@ -161,7 +157,7 @@ def read_text_file(path: str) -> str:
 def write_text_file(path: str, text: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8", errors="replace") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
     os.replace(tmp, path)
 
@@ -174,6 +170,57 @@ def normalize_topic(s: str) -> str:
 
 def clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
+
+
+# -------------------------
+# Topic safety / hygiene
+# -------------------------
+
+def looks_like_url_or_domain(text: str) -> bool:
+    """
+    True if it looks like a URL, domain, file download, or a raw hostname-like string.
+    We do NOT want Curiosity/auto-queue to treat these as topics.
+    """
+    t = normalize_topic(text)
+    if not t:
+        return False
+
+    if "://" in t:
+        return True
+    if t.startswith("www."):
+        return True
+    if t.startswith("http "):
+        return True
+    if t.startswith("https "):
+        return True
+
+    # contains a slash like a URL path
+    if "/" in t and not t.startswith("/"):
+        # allow things like "tcp/ip" as a legit concept
+        if t not in ("tcp/ip", "ip/tcp"):
+            return True
+
+    # ends with common file types or looks like a download
+    if re.search(r"\.(pdf|zip|tar|gz|tgz|exe|dmg|apk|iso|bin)\b", t):
+        return True
+
+    # domain-like: has dot + TLD-ish
+    if re.search(r"\b[a-z0-9-]+\.(com|org|net|edu|gov|mil|io|co|us|uk|de|jp|fr|au|ca)\b", t):
+        return True
+
+    return False
+
+
+def is_ok_for_autoqueue(topic: str) -> Tuple[bool, str]:
+    t = normalize_topic(topic)
+
+    if len(t) < TOPIC_MIN_LEN_FOR_AUTOQUEUE:
+        return False, "Too short to auto-queue."
+
+    if BLOCK_TOPIC_IF_LOOKS_LIKE_URL and looks_like_url_or_domain(t):
+        return False, "Looks like a URL/domain, not a topic."
+
+    return True, ""
 
 
 def topic_to_notes_filename(topic: str) -> str:
@@ -214,26 +261,21 @@ def is_probably_terminal_command(text: str) -> bool:
     if not t:
         return False
 
-    # Questions are not terminal commands
     if t.endswith("?"):
         return False
 
     lower = t.lower()
 
-    # If it starts like a question, treat as normal language
     for qword in ("what is", "what does", "how do", "how to", "why does", "explain", "help me"):
         if lower.startswith(qword):
             return False
 
-    # Shell operators usually mean command
     if any(ch in t for ch in ["|", "&&", "||", ";", ">", "<", "$(", "`"]):
         return True
 
-    # Looks like a shell prompt pasted in
     if re.search(r"^[\w-]+@[\w-]+:.*\$\s+", t):
         return True
 
-    # Handle sudo
     if lower.startswith("sudo "):
         rest = lower[5:].lstrip()
         if not rest:
@@ -261,11 +303,9 @@ def is_probably_terminal_command(text: str) -> bool:
     if first in common_cmds:
         return True
 
-    # Direct path or executable style
     if t.startswith("./") or t.startswith("/") or re.match(r"^[A-Za-z]:\\", t):
         return True
 
-    # Looks like flags usage (example: python3 -m something)
     if re.search(r"\s-\w", t) and (" " in t) and not re.search(r"[.!?]$", t):
         return True
 
@@ -327,6 +367,9 @@ def top_keywords(text: str, n: int = 18) -> List[str]:
 def looks_disallowed_for_weblearn(topic: str) -> Tuple[bool, str]:
     t = normalize_topic(topic)
 
+    if BLOCK_TOPIC_IF_LOOKS_LIKE_URL and looks_like_url_or_domain(t):
+        return True, "That looks like a URL/domain, not a topic. Use a plain topic like: 'rfc 1918 private ip ranges'."
+
     bad_markers = [
         "hack", "exploit", "bypass", "crack", "keylogger", "phishing", "malware",
         "ddos", "steal", "credential", "password dump", "ransomware",
@@ -348,11 +391,6 @@ def looks_disallowed_for_weblearn(topic: str) -> Tuple[bool, str]:
     return False, ""
 
 
-def _is_http_url(s: str) -> bool:
-    ss = (s or "").strip()
-    return ss.lower().startswith("http://") or ss.lower().startswith("https://")
-
-
 def domain_from_url(url: str) -> str:
     m = re.match(r"^https?://([^/]+)", url.strip().lower())
     return m.group(1) if m else ""
@@ -364,7 +402,7 @@ def source_quality_score(url: str) -> float:
         return 0.2
     if d.endswith(".gov") or d.endswith(".edu"):
         return 0.95
-    if "nist.gov" in d or "ietf.org" in d or "iso.org" in d:
+    if "nist.gov" in d or "ietf.org" in d or "iso.org" in d or "rfc-editor.org" in d:
         return 0.95
     if "wikipedia.org" in d:
         return 0.80
@@ -373,6 +411,17 @@ def source_quality_score(url: str) -> float:
     if any(x in d for x in ["medium.com", "blogspot.", "wordpress."]):
         return 0.35
     return 0.55
+
+
+def is_bad_source_url(url: str) -> bool:
+    u = url.lower().strip()
+    if not u.startswith("http"):
+        return True
+    if any(x in u for x in ["youtube.com", "facebook.com", "instagram.com", "tiktok.com", "reddit.com"]):
+        return True
+    if re.search(r"\.(pdf|zip|tar|gz|tgz|exe|dmg|apk|iso|bin)\b", u):
+        return True
+    return False
 
 
 def ddg_lite_search(query: str, max_results: int = 8) -> List[str]:
@@ -400,6 +449,8 @@ def ddg_lite_search(query: str, max_results: int = 8) -> List[str]:
         if "duckduckgo.com" in u:
             continue
         if "javascript:" in u.lower():
+            continue
+        if is_bad_source_url(u):
             continue
         if u not in cleaned:
             cleaned.append(u)
@@ -430,7 +481,7 @@ def strip_html_to_text(html: str) -> str:
     return text.strip()
 
 
-def fetch_url_text(url: str, timeout_sec: int = WEBLEARN_TIMEOUT_SEC, max_bytes: Optional[int] = None) -> str:
+def fetch_url_text(url: str) -> str:
     if urllib is None:
         return ""
 
@@ -440,13 +491,8 @@ def fetch_url_text(url: str, timeout_sec: int = WEBLEARN_TIMEOUT_SEC, max_bytes:
     }
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
-            if max_bytes is None:
-                raw = resp.read()
-            else:
-                raw = resp.read(max_bytes + 1)
-                if len(raw) > max_bytes:
-                    return ""
+        with urllib.request.urlopen(req, timeout=WEBLEARN_TIMEOUT_SEC) as resp:
+            raw = resp.read()
             try:
                 html = raw.decode("utf-8", errors="ignore")
             except Exception:
@@ -455,6 +501,8 @@ def fetch_url_text(url: str, timeout_sec: int = WEBLEARN_TIMEOUT_SEC, max_bytes:
         return ""
 
     text = strip_html_to_text(html)
+    if len(text) > WEBLEARN_PER_SOURCE_CHAR_LIMIT:
+        text = text[:WEBLEARN_PER_SOURCE_CHAR_LIMIT]
     return text
 
 
@@ -601,37 +649,6 @@ def heuristic_structured_answer(topic: str, source_urls: List[str], source_texts
 
 def synthesize_answer(topic: str, source_texts: List[str], source_urls: List[str]) -> str:
     return heuristic_structured_answer(topic, source_urls, source_texts)
-
-
-def _guess_topic_from_url(url: str) -> str:
-    # Keep it simple and predictable: domain + last path part
-    d = domain_from_url(url)
-    try:
-        path = urllib.parse.urlparse(url).path if urllib else ""
-    except Exception:
-        path = ""
-    last = ""
-    if path:
-        parts = [p for p in path.split("/") if p]
-        if parts:
-            last = parts[-1]
-    last = re.sub(r"[\?#].*$", "", last)
-    last = re.sub(r"[^a-zA-Z0-9_\-]+", " ", last).strip()
-    if last:
-        return normalize_topic(f"{d} {last}")
-    if d:
-        return normalize_topic(d)
-    return "web_note"
-
-
-def _make_web_note_header(topic: str, url: str) -> str:
-    return (
-        f"WEB INGEST NOTE\n"
-        f"Topic: {normalize_topic(topic)}\n"
-        f"Source: {url.strip()}\n"
-        f"Fetched: {now_date()}\n"
-        f"---\n\n"
-    )
 
 
 # -------------------------
@@ -851,6 +868,10 @@ class BrainState:
         if not t:
             return False
 
+        ok, why = is_ok_for_autoqueue(t)
+        if not ok:
+            return False
+
         for item in self.queue:
             if normalize_topic(item.get("topic", "")) == t and item.get("status", "pending") == "pending":
                 return False
@@ -973,49 +994,6 @@ class BrainState:
                     upgraded += 1
         return upgraded, checked
 
-    # -------- web ingest (NEW) --------
-
-    def web_ingest_url(self, url: str, topic: Optional[str] = None) -> Tuple[bool, str]:
-        if urllib is None:
-            return False, "Web ingestion is unavailable (urllib missing)."
-
-        url = (url or "").strip()
-        if not _is_http_url(url):
-            return False, "Usage: /web <url>  OR  /web <topic> | <url> (must start with http:// or https://)"
-
-        t = normalize_topic(topic) if topic else ""
-        if not t:
-            t = _guess_topic_from_url(url)
-
-        # use cache if available
-        txt = get_cached_url_text(url)
-        if txt is None:
-            raw_txt = fetch_url_text(url, timeout_sec=WEBINGEST_TIMEOUT_SEC, max_bytes=WEBINGEST_MAX_BYTES)
-            if not raw_txt:
-                return False, "Could not fetch the URL (timeout/refused/too large)."
-            txt = raw_txt
-            set_cached_url_text(url, txt)
-
-        txt = (txt or "").strip()
-        if len(txt) < WEBINGEST_MIN_TEXT_CHARS:
-            return False, "Page fetched, but it did not contain enough readable text to save."
-
-        # final cap
-        if len(txt) > WEBINGEST_TEXT_LIMIT:
-            txt = txt[:WEBINGEST_TEXT_LIMIT]
-
-        note_path = os.path.join(RESEARCH_NOTES_DIR, topic_to_notes_filename(t))
-        out = _make_web_note_header(t, url) + txt.strip() + "\n"
-        write_text_file(note_path, out)
-
-        # queue the topic so your normal pipeline can promote/learn it
-        self.queue_topic(t, reason=f"Web ingested source note ({domain_from_url(url)})", confidence=0.35)
-
-        # record sources for /sources command too
-        self.last_web_sources = [url]
-
-        return True, f"Saved web note to: data/research_notes/{os.path.basename(note_path)} and queued topic: {t}"
-
     # -------- web learn --------
 
     def weblearn_topic(self, topic: str) -> Tuple[bool, str]:
@@ -1032,8 +1010,7 @@ class BrainState:
 
         filtered = []
         for u in urls:
-            lu = u.lower()
-            if any(b in lu for b in ["youtube.com", "facebook.com", "instagram.com", "tiktok.com"]):
+            if is_bad_source_url(u):
                 continue
             filtered.append(u)
 
@@ -1056,8 +1033,6 @@ class BrainState:
             if cached is None:
                 txt = fetch_url_text(u)
                 if txt:
-                    if len(txt) > WEBLEARN_PER_SOURCE_CHAR_LIMIT:
-                        txt = txt[:WEBLEARN_PER_SOURCE_CHAR_LIMIT]
                     set_cached_url_text(u, txt)
                 time.sleep(WEBLEARN_SLEEP_BETWEEN_FETCH_SEC)
             else:
@@ -1066,9 +1041,6 @@ class BrainState:
             txt = (txt or "").strip()
             if len(txt) < 400:
                 continue
-
-            if len(txt) > WEBLEARN_PER_SOURCE_CHAR_LIMIT:
-                txt = txt[:WEBLEARN_PER_SOURCE_CHAR_LIMIT]
 
             texts.append(txt)
             used.append(u)
@@ -1112,6 +1084,15 @@ class BrainState:
             topic = item.get("topic", "")
             if not topic:
                 continue
+
+            # Skip garbage URL-like topics that got into queue from older versions
+            if looks_like_url_or_domain(topic):
+                item["status"] = "done"
+                item["completed_on"] = now_date()
+                item["worker_note"] = (item.get("worker_note", "") + " | auto-skipped: url-like topic").strip()
+                self.save_all()
+                continue
+
             attempted += 1
             ok, _msg = self.weblearn_topic(topic)
             if ok:
@@ -1145,8 +1126,17 @@ class BrainState:
                 c = float(e.get("confidence", 0.0))
             except Exception:
                 c = 0.0
-            if c < CURIOSITY_LOW_CONF_THRESHOLD and t not in pending:
-                candidates.append((t, c))
+
+            if c >= CURIOSITY_LOW_CONF_THRESHOLD:
+                continue
+            if t in pending:
+                continue
+
+            ok, _why = is_ok_for_autoqueue(t)
+            if not ok:
+                continue
+
+            candidates.append((t, c))
 
         candidates.sort(key=lambda x: x[1])
 
@@ -1287,20 +1277,17 @@ class BrainState:
         if not q:
             return "Say something, or type /help."
 
-        # Exact match
         if q in self.knowledge:
             entry = self.knowledge[q]
             self.last_why = {"type": "exact", "topic": q, "confidence": float(entry.get("confidence", 0.0))}
             return entry.get("answer", "")
 
-        # Alias
         alias_target = self.resolve_alias(q)
         if alias_target and alias_target in self.knowledge:
             entry = self.knowledge[alias_target]
             self.last_why = {"type": "alias", "alias": q, "target": alias_target, "confidence": float(entry.get("confidence", 0.0))}
             return entry.get("answer", "")
 
-        # Notes autoupgrade
         note_path = find_research_note_path(q)
         if note_path:
             if self.upsert_from_notes(q, note_path):
@@ -1313,7 +1300,6 @@ class BrainState:
                 }
                 return entry.get("answer", "")
 
-        # Suggestions and fuzzy
         suggestions = self.compute_suggestions(q)
         self.last_suggestions = suggestions
 
@@ -1334,15 +1320,16 @@ class BrainState:
                 "auto_alias_created": auto_aliased,
             }
 
-            # If it is a pretty strong match, answer directly
             if best_ratio >= 0.84 and "answer" in entry:
                 return entry.get("answer", "")
 
-        # Queue hygiene
-        if len(q) >= 3:
+        # Queue hygiene: avoid auto-queueing URLs/domains and short junk
+        if len(q) >= TOPIC_MIN_LEN_FOR_AUTOQUEUE:
             top_sug = suggestions[0][1] if suggestions else 0.0
             if (top_sug < 0.84) and (top_sug >= QUEUE_THRESHOLD) and re.search(r"[a-z0-9]", q):
-                self.queue_topic(q, reason="No taught answer yet", confidence=0.3)
+                ok, _why = is_ok_for_autoqueue(q)
+                if ok:
+                    self.queue_topic(q, reason="No taught answer yet", confidence=0.3)
 
         return "I do not have a taught answer for that yet. If my reply is wrong or weak, correct me in your own words and I will remember it."
 
@@ -1368,9 +1355,6 @@ Commands:
   /clearpending
   /promote <topic>
 
-  /web <url>
-  /web <topic> | <url>
-
   /weblearn <topic>
   /webqueue
   /sources
@@ -1391,7 +1375,6 @@ Commands:
 Notes:
 - Terminal-like inputs are ignored by alias and queue logic.
 - /weblearn uses web search plus local synthesis only.
-- /web saves a direct URL as a research note and queues the topic.
 """.strip()
 
 
@@ -1566,23 +1549,6 @@ def main():
                 safe_print("Promoted." if changed else "No matching queue item found.")
                 continue
 
-            if cmdline.startswith("/web "):
-                rest = cmdline[len("/web "):].strip()
-                if not rest:
-                    safe_print("Usage: /web <url>  OR  /web <topic> | <url>")
-                    continue
-                left, right = parse_pipe_args(rest)
-                # if no pipe: left is the url
-                if right:
-                    topic = left
-                    url = right
-                else:
-                    topic = ""
-                    url = left
-                ok, msg = state.web_ingest_url(url, topic=topic if topic else None)
-                safe_print(msg)
-                continue
-
             if cmdline.startswith("/confidence "):
                 rest = cmdline[len("/confidence "):].strip()
                 parts = rest.split()
@@ -1737,7 +1703,6 @@ def main():
             safe_print("Unknown command. Type /help.")
             continue
 
-        # Normal input
         response = state.answer_query(raw)
         safe_print(f"{APP_NAME}: {response}")
 
