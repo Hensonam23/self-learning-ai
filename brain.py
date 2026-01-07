@@ -4,6 +4,7 @@
 # Phase 1: queuehealth + retry/backoff + clearer logs
 # Phase 2: structured synthesis + source ranking + topic expansion + /weburl
 # Phase 3: /merge /dedupe /prune (safe) + /selftest
+# Phase 4: controlled autonomy (daily + weekly) with guardrails
 
 import os
 import re
@@ -44,6 +45,8 @@ ALIASES_PATH = os.path.join(DATA_DIR, "aliases.json")
 QUEUE_PATH = os.path.join(DATA_DIR, "research_queue.json")
 PENDING_PATH = os.path.join(DATA_DIR, "pending_promotions.json")
 
+AUTONOMY_PATH = os.path.join(DATA_DIR, "autonomy.json")
+
 LOGS_DIR = os.path.join(DATA_DIR, "logs")
 EXPORTS_DIR = os.path.join(DATA_DIR, "exports")
 BACKUPS_DIR = os.path.join(DATA_DIR, "backups")
@@ -51,6 +54,7 @@ BACKUPS_DIR = os.path.join(DATA_DIR, "backups")
 WEBQUEUE_LOG = os.path.join(LOGS_DIR, "webqueue.log")
 CURIOSITY_LOG = os.path.join(LOGS_DIR, "curiosity.log")
 BRAIN_LOG = os.path.join(LOGS_DIR, "brain.log")
+AUTONOMY_LOG = os.path.join(LOGS_DIR, "autonomy.log")
 
 DEFAULT_MAX_QUEUE_ATTEMPTS = 3
 DEFAULT_COOLDOWN_SECONDS = 6 * 60 * 60  # 6 hours
@@ -70,6 +74,51 @@ TOPIC_EXPANSIONS: Dict[str, List[str]] = {
 MAX_EXPANSIONS_PER_TRIGGER = 3
 
 # -----------------------------
+# Phase 4: Controlled autonomy defaults
+# -----------------------------
+
+AUTONOMY_DEFAULTS: Dict[str, Any] = {
+    "enabled": True,
+
+    # Guardrails
+    "max_queue_size_total": 250,        # total queue entries allowed (all statuses)
+    "max_pending_plus_failed": 80,      # pending + failed allowed before autonomy refuses to add more
+    "daily_seed_limit": 3,              # how many new topics autonomy may add per daily run
+    "weekly_seed_limit": 6,             # how many new topics autonomy may add per weekly run
+
+    # When autonomy runs, optionally also runs webqueue with a small limit
+    "daily_autolearn_limit": 2,
+    "weekly_autolearn_limit": 3,
+
+    # Never overwrite user-taught high-confidence answers (already enforced in webqueue),
+    # and additionally avoid overwriting ANY very-high-confidence entry (extra safety).
+    "protect_confidence_threshold": 0.85,
+
+    # Bookkeeping
+    "last_daily_ymd": "",
+    "last_weekly_ymd": "",
+
+    # Themes (simple, stable)
+    # These are "seed topics" lists; autonomy rotates per day-of-week and weekly deep dive.
+    "daily_themes": {
+        "mon": ["osi model", "tcp vs udp", "encapsulation"],
+        "tue": ["subnetting", "cidr", "vlsm"],
+        "wed": ["dns", "dhcp", "nat"],
+        "thu": ["routing vs switching", "static routing", "default gateway"],
+        "fri": ["vlan", "trunking", "spanning tree protocol"],
+        "sat": ["firewall basics", "acl", "least privilege"],
+        "sun": ["ipv6 basics", "icmp", "arp"],
+    },
+    "weekly_themes": [
+        # weekly “deep dive” buckets (run chooses one bucket that’s least covered)
+        ["rfc 1918", "rfc 6890", "ipv4 address space", "nat"],
+        ["tls basics", "https", "certificates", "public key cryptography"],
+        ["bgp basics", "as number", "route selection", "prefix"],
+        ["tcp congestion control", "three-way handshake", "window size", "retransmission"],
+    ],
+}
+
+# -----------------------------
 # Small utilities
 # -----------------------------
 
@@ -78,6 +127,13 @@ def now_ts() -> int:
 
 def iso_now() -> str:
     return datetime.datetime.now().isoformat(timespec="seconds")
+
+def today_ymd() -> str:
+    return datetime.datetime.now().strftime("%Y-%m-%d")
+
+def weekday_key() -> str:
+    # mon..sun
+    return ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][datetime.datetime.now().weekday()]
 
 def ensure_dirs() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -293,6 +349,25 @@ def load_pending_promotions() -> List[Dict[str, Any]]:
 def save_pending_promotions(p: List[Dict[str, Any]]) -> None:
     backup_file(PENDING_PATH)
     atomic_write_json(PENDING_PATH, p)
+
+def load_autonomy() -> Dict[str, Any]:
+    cfg = read_json(AUTONOMY_PATH, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    # merge defaults
+    merged = json.loads(json.dumps(AUTONOMY_DEFAULTS))
+    for k, v in cfg.items():
+        merged[k] = v
+    # also merge nested daily_themes if partially present
+    if isinstance(cfg.get("daily_themes"), dict):
+        merged_dt = dict(AUTONOMY_DEFAULTS["daily_themes"])
+        merged_dt.update(cfg["daily_themes"])
+        merged["daily_themes"] = merged_dt
+    return merged
+
+def save_autonomy(cfg: Dict[str, Any]) -> None:
+    backup_file(AUTONOMY_PATH)
+    atomic_write_json(AUTONOMY_PATH, cfg)
 
 # -----------------------------
 # Alias (fuzzy suggestion + accept)
@@ -708,11 +783,34 @@ def queue_find_item(q: List[Dict[str, Any]], topic: str) -> Optional[Dict[str, A
             return item
     return None
 
+def queue_stats(q: Optional[List[Dict[str, Any]]] = None) -> Dict[str, int]:
+    q = q if q is not None else load_queue()
+    counts = {"total": 0, "pending": 0, "failed": 0, "running": 0, "done": 0, "failed_final": 0, "other": 0}
+    counts["total"] = len(q)
+    for item in q:
+        st = item.get("status", "pending")
+        if st in counts:
+            counts[st] += 1
+        else:
+            counts["other"] += 1
+    return counts
+
+def autonomy_queue_guard_ok() -> Tuple[bool, str]:
+    cfg = load_autonomy()
+    q = load_queue()
+    stats = queue_stats(q)
+    if stats["total"] >= int(cfg.get("max_queue_size_total", 250)):
+        return False, f"queue_total_limit_reached:{stats['total']}"
+    if (stats["pending"] + stats["failed"]) >= int(cfg.get("max_pending_plus_failed", 80)):
+        return False, f"queue_pending_failed_limit_reached:{stats['pending'] + stats['failed']}"
+    return True, "ok"
+
 def queue_add(topic: str, reason: str = "", confidence: float = 0.35, source_url: str = "") -> Tuple[bool, str]:
     topic_n = normalize_topic(topic)
     junk, why = is_junk_topic(topic_n)
     if junk:
         return False, f"Not queued (junk): {why}"
+
     q = load_queue()
     existing = queue_find_item(q, topic_n)
     if existing:
@@ -722,6 +820,7 @@ def queue_add(topic: str, reason: str = "", confidence: float = 0.35, source_url
             existing["source_url"] = source_url
         save_queue(q)
         return False, "Already queued."
+
     item = {
         "topic": topic_n,
         "reason": reason or "",
@@ -856,6 +955,9 @@ def run_webqueue(limit: int = 3, autoupgrade: bool = True) -> Dict[str, Any]:
     skipped = 0
     finalized = 0
 
+    cfg = load_autonomy()
+    protect_conf = float(cfg.get("protect_confidence_threshold", 0.85))
+
     for item in q:
         if attempted >= limit:
             break
@@ -883,7 +985,6 @@ def run_webqueue(limit: int = 3, autoupgrade: bool = True) -> Dict[str, Any]:
         topic = item.get("topic", "")
         safe_log(WEBQUEUE_LOG, f"webqueue: attempt {item['attempts']}/{item.get('max_attempts',DEFAULT_MAX_QUEUE_ATTEMPTS)} topic='{topic}'")
 
-        # If a source_url was provided (from /weburl style queueing), use it directly.
         forced = (item.get("source_url") or "").strip()
         ok2, answer, sources, chosen_url = web_learn_topic(topic, forced_url=forced)
         if not ok2:
@@ -901,9 +1002,16 @@ def run_webqueue(limit: int = 3, autoupgrade: bool = True) -> Dict[str, Any]:
             existing_conf = float(existing.get("confidence", 0.0)) if isinstance(existing, dict) else 0.0
             taught_by_user = bool(existing.get("taught_by_user", False)) if isinstance(existing, dict) else False
 
+            # Hard protection: never overwrite user-taught high confidence
             if taught_by_user and existing_conf >= 0.75:
                 mark_done(item, note="Skipped upgrade: user-taught answer is high confidence.")
                 safe_log(WEBQUEUE_LOG, f"webqueue: done (skipped overwrite) topic='{topic}' taught_by_user=True conf={existing_conf}")
+                continue
+
+            # Extra Phase 4 protection: avoid overwriting any very-high-confidence entry
+            if existing_conf >= protect_conf and isinstance(existing, dict) and (existing.get("answer") or "").strip():
+                mark_done(item, note=f"Skipped upgrade: existing confidence >= {protect_conf}.")
+                safe_log(WEBQUEUE_LOG, f"webqueue: done (skipped overwrite) topic='{topic}' conf={existing_conf} protect_threshold={protect_conf}")
                 continue
 
             new_conf = max(float(item.get("current_confidence", 0.35)), 0.45)
@@ -917,6 +1025,10 @@ def run_webqueue(limit: int = 3, autoupgrade: bool = True) -> Dict[str, Any]:
             expansions = expand_topic_if_needed(topic)
             if expansions:
                 for ex in expansions:
+                    okg, whyg = autonomy_queue_guard_ok()
+                    if not okg:
+                        safe_log(WEBQUEUE_LOG, f"webqueue: expansion blocked guard='{whyg}' ex='{ex}' from='{topic}'")
+                        continue
                     okq, _msgq = queue_add(ex, reason=f"Expanded from '{topic}'", confidence=0.35)
                     if okq:
                         safe_log(WEBQUEUE_LOG, f"webqueue: expanded queued topic='{ex}' from='{topic}'")
@@ -937,7 +1049,7 @@ def run_webqueue(limit: int = 3, autoupgrade: bool = True) -> Dict[str, Any]:
     return {"learned": learned, "attempted": attempted, "skipped": skipped, "finalized": finalized, "limit": limit}
 
 # -----------------------------
-# Curiosity
+# Curiosity (Phase 1-3)
 # -----------------------------
 
 def curiosity_tick(limit: int = 3) -> Dict[str, Any]:
@@ -957,6 +1069,10 @@ def curiosity_tick(limit: int = 3) -> Dict[str, Any]:
         if queued >= limit:
             break
         considered += 1
+        okg, whyg = autonomy_queue_guard_ok()
+        if not okg:
+            safe_log(CURIOSITY_LOG, f"curiosity: blocked by guard='{whyg}'")
+            break
         ok, _msg = queue_add(topic, reason="Curiosity: low confidence topic", confidence=max(conf, 0.35))
         if ok:
             queued += 1
@@ -965,15 +1081,143 @@ def curiosity_tick(limit: int = 3) -> Dict[str, Any]:
     return {"considered": considered, "queued": queued, "limit": limit}
 
 # -----------------------------
+# Phase 4: Controlled autonomy
+# -----------------------------
+
+def autonomy_pick_daily_topics(cfg: Dict[str, Any]) -> List[str]:
+    dt = cfg.get("daily_themes") or {}
+    if not isinstance(dt, dict):
+        dt = {}
+    key = weekday_key()
+    topics = dt.get(key) or []
+    if not isinstance(topics, list):
+        topics = []
+    return [normalize_topic(t) for t in topics if normalize_topic(t)]
+
+def autonomy_pick_weekly_bucket(cfg: Dict[str, Any]) -> List[str]:
+    buckets = cfg.get("weekly_themes") or []
+    if not isinstance(buckets, list) or not buckets:
+        return []
+
+    # Pick the bucket with the lowest “coverage” in current knowledge (simple heuristic)
+    k = load_knowledge()
+    best_bucket = None
+    best_score = None
+    for bucket in buckets:
+        if not isinstance(bucket, list):
+            continue
+        bnorm = [normalize_topic(x) for x in bucket if normalize_topic(x)]
+        if not bnorm:
+            continue
+        covered = 0
+        for t in bnorm:
+            if t in k and isinstance(k[t], dict) and (k[t].get("answer") or "").strip():
+                covered += 1
+        # lower covered is better (we want to fill gaps)
+        score = covered
+        if best_score is None or score < best_score:
+            best_score = score
+            best_bucket = bnorm
+
+    return best_bucket or []
+
+def autonomy_seed_topics(topics: List[str], reason: str, limit: int) -> Dict[str, Any]:
+    added = 0
+    skipped = 0
+    blocked = 0
+    msgs = []
+
+    for t in topics:
+        if added >= limit:
+            break
+        okg, whyg = autonomy_queue_guard_ok()
+        if not okg:
+            blocked += 1
+            msgs.append(f"blocked:{whyg}")
+            break
+
+        ok, msg = queue_add(t, reason=reason, confidence=0.35)
+        if ok:
+            added += 1
+        else:
+            skipped += 1
+
+    return {"added": added, "skipped": skipped, "blocked": blocked, "notes": msgs}
+
+def autonomy_run_daily(force: bool = False) -> Dict[str, Any]:
+    cfg = load_autonomy()
+    if not bool(cfg.get("enabled", True)):
+        return {"ok": False, "msg": "Autonomy is disabled."}
+
+    ymd = today_ymd()
+    if (not force) and cfg.get("last_daily_ymd") == ymd:
+        return {"ok": True, "msg": f"Daily autonomy already ran today ({ymd})."}
+
+    topics = autonomy_pick_daily_topics(cfg)
+    if not topics:
+        return {"ok": False, "msg": "No daily topics configured."}
+
+    limit = int(cfg.get("daily_seed_limit", 3))
+    res_seed = autonomy_seed_topics(topics, reason="Autonomy daily seed", limit=limit)
+
+    # Optional small learn pass
+    learn_limit = int(cfg.get("daily_autolearn_limit", 2))
+    res_learn = {"learned": 0, "attempted": 0}
+    if learn_limit > 0:
+        res_learn = run_webqueue(limit=learn_limit, autoupgrade=True)
+
+    cfg["last_daily_ymd"] = ymd
+    save_autonomy(cfg)
+
+    safe_log(AUTONOMY_LOG, f"daily: ymd={ymd} seed={res_seed} learn={res_learn}")
+    return {"ok": True, "msg": f"Daily autonomy ran ({ymd}).", "seed": res_seed, "learn": res_learn}
+
+def autonomy_run_weekly(force: bool = False) -> Dict[str, Any]:
+    cfg = load_autonomy()
+    if not bool(cfg.get("enabled", True)):
+        return {"ok": False, "msg": "Autonomy is disabled."}
+
+    ymd = today_ymd()
+    # weekly rule: run once per 7 days (based on last_weekly_ymd)
+    last = (cfg.get("last_weekly_ymd") or "").strip()
+    if (not force) and last:
+        try:
+            last_dt = datetime.datetime.strptime(last, "%Y-%m-%d")
+            now_dt = datetime.datetime.strptime(ymd, "%Y-%m-%d")
+            if (now_dt - last_dt).days < 7:
+                return {"ok": True, "msg": f"Weekly autonomy last ran on {last} (less than 7 days ago)."}
+        except Exception:
+            pass
+
+    bucket = autonomy_pick_weekly_bucket(cfg)
+    if not bucket:
+        return {"ok": False, "msg": "No weekly topics configured."}
+
+    limit = int(cfg.get("weekly_seed_limit", 6))
+    res_seed = autonomy_seed_topics(bucket, reason="Autonomy weekly deep dive", limit=limit)
+
+    learn_limit = int(cfg.get("weekly_autolearn_limit", 3))
+    res_learn = {"learned": 0, "attempted": 0}
+    if learn_limit > 0:
+        res_learn = run_webqueue(limit=learn_limit, autoupgrade=True)
+
+    cfg["last_weekly_ymd"] = ymd
+    save_autonomy(cfg)
+
+    safe_log(AUTONOMY_LOG, f"weekly: ymd={ymd} bucket={bucket} seed={res_seed} learn={res_learn}")
+    return {"ok": True, "msg": f"Weekly autonomy ran ({ymd}).", "bucket": bucket, "seed": res_seed, "learn": res_learn}
+
+# -----------------------------
 # Phase 3: Maintenance tools (safe)
 # -----------------------------
 
+def split_pipe(cmd: str) -> Tuple[str, str]:
+    if "|" not in cmd:
+        return cmd.strip(), ""
+    left, right = cmd.split("|", 1)
+    return left.strip(), right.strip()
+
 def cmd_merge(arg: str) -> None:
-    """
-    /merge <from> | <to>
-    Safe: merges 'from' entry into 'to' entry (does NOT delete 'from' unless user later prunes).
-    Also updates aliases: from -> to
-    """
     left, right = split_pipe(arg)
     frm = normalize_topic(left.replace("/merge", "", 1).strip())
     to = normalize_topic(right)
@@ -992,13 +1236,11 @@ def cmd_merge(arg: str) -> None:
     from_entry = ensure_entry_shape(k.get(frm, {})) if isinstance(k.get(frm, {}), dict) else ensure_entry_shape({"answer": str(k.get(frm, ""))})
     to_entry = ensure_entry_shape(k.get(to, {})) if isinstance(k.get(to, {}), dict) else ensure_entry_shape({"answer": str(k.get(to, ""))})
 
-    # Merge logic: keep better confidence, combine sources, prefer longer answer if to is empty
     merged = dict(to_entry)
 
     if (not merged.get("answer")) and from_entry.get("answer"):
         merged["answer"] = from_entry.get("answer")
 
-    # If both have answers, append from_entry to notes (safe, no overwrite)
     if to_entry.get("answer") and from_entry.get("answer") and to_entry.get("answer") != from_entry.get("answer"):
         merged["notes"] = (merged.get("notes", "") + "\n\n" + f"Merged from '{frm}' on {iso_now()}:\n" + from_entry.get("answer", "")).strip()
 
@@ -1013,14 +1255,12 @@ def cmd_merge(arg: str) -> None:
             srcs.append(s)
     merged["sources"] = srcs
 
-    # taught_by_user if either is true
     merged["taught_by_user"] = bool(to_entry.get("taught_by_user", False) or from_entry.get("taught_by_user", False))
     merged["updated"] = iso_now()
 
     k[to] = merged
     save_knowledge(k)
 
-    # add alias from -> to
     a = load_aliases()
     a[frm] = to
     save_aliases(a)
@@ -1028,17 +1268,11 @@ def cmd_merge(arg: str) -> None:
     print(f"Merged '{frm}' into '{to}'. (Safe: '{frm}' not deleted). Added alias {frm} -> {to}.")
 
 def cmd_dedupe(_arg: str) -> None:
-    """
-    /dedupe
-    Safe: finds exact duplicate answers across topics and suggests merges.
-    It does NOT modify data.
-    """
     k = load_knowledge()
     if not k:
         print("No knowledge entries to dedupe.")
         return
 
-    # map answer -> topics
     bucket: Dict[str, List[str]] = {}
     for topic, entry in k.items():
         if not isinstance(entry, dict):
@@ -1056,7 +1290,7 @@ def cmd_dedupe(_arg: str) -> None:
 
     print("Exact duplicate answers found (safe suggestions):")
     shown = 0
-    for ans, topics in sorted(dups, key=lambda x: len(x[1]), reverse=True):
+    for _ans, topics in sorted(dups, key=lambda x: len(x[1]), reverse=True):
         shown += 1
         if shown > 10:
             print("...more duplicates exist. Run /dedupe again after cleaning some.")
@@ -1071,13 +1305,6 @@ def cmd_dedupe(_arg: str) -> None:
             print(f"  /merge {t} | {keep}")
 
 def cmd_prune(arg: str) -> None:
-    """
-    /prune [dryrun|apply]
-    Default is dryrun.
-    Safe behavior:
-      - dryrun: reports which entries are considered safe to prune (ex: empty answers, or topics that are alias-only duplicates)
-      - apply: actually deletes ONLY empty-answer entries and alias-only shadow entries with zero unique data
-    """
     mode = arg.replace("/prune", "", 1).strip().lower()
     if not mode:
         mode = "dryrun"
@@ -1089,7 +1316,6 @@ def cmd_prune(arg: str) -> None:
     a = load_aliases()
 
     empty = []
-    # Alias shadow: topic exists but is fully redundant and has no meaningful data vs its alias target
     shadows = []
 
     for topic, entry in k.items():
@@ -1108,7 +1334,6 @@ def cmd_prune(arg: str) -> None:
             target = a[topic]
             target_entry = k.get(target)
             if isinstance(target_entry, dict):
-                # shadow if it has no answer and no sources and no notes and isn't user-taught
                 if (not ans) and (not notes) and (not srcs) and (not taught):
                     shadows.append(topic)
 
@@ -1131,7 +1356,6 @@ def cmd_prune(arg: str) -> None:
         print("Dry run only. To apply safe deletions: /prune apply")
         return
 
-    # apply safe deletions
     removed = 0
     for t in empty:
         if t in k:
@@ -1145,21 +1369,7 @@ def cmd_prune(arg: str) -> None:
     save_knowledge(k)
     print(f"Applied prune. Removed {removed} entries (safe set only).")
 
-# -----------------------------
-# Phase 3: Selftest
-# -----------------------------
-
 def cmd_selftest(_arg: str) -> None:
-    """
-    /selftest
-    Checks:
-    - paths exist and are writable
-    - JSON stores load/save
-    - logging works
-    - web fetch minimal
-    - queue retry/cooldown logic sanity
-    - optional systemd user timers status (best-effort)
-    """
     results = []
     ok_all = True
 
@@ -1169,14 +1379,12 @@ def cmd_selftest(_arg: str) -> None:
             ok_all = False
         results.append((name, ok, detail))
 
-    # 1) dirs
     try:
         ensure_dirs()
         add("dirs", True, f"DATA_DIR={DATA_DIR}")
     except Exception as e:
         add("dirs", False, str(e))
 
-    # 2) write test file in data
     try:
         p = os.path.join(DATA_DIR, ".selftest_write.tmp")
         with open(p, "w", encoding="utf-8") as f:
@@ -1186,31 +1394,30 @@ def cmd_selftest(_arg: str) -> None:
     except Exception as e:
         add("data_write", False, str(e))
 
-    # 3) load/save json stores
     try:
         k = load_knowledge()
         a = load_aliases()
         q = load_queue()
         pp = load_pending_promotions()
-        _ = (len(k), len(a), len(q), len(pp))
-        add("json_load", True, f"knowledge={len(k)} aliases={len(a)} queue={len(q)} pending_promos={len(pp)}")
+        cfg = load_autonomy()
+        _ = (len(k), len(a), len(q), len(pp), bool(cfg.get("enabled", True)))
+        add("json_load", True, f"knowledge={len(k)} aliases={len(a)} queue={len(q)} pending_promos={len(pp)} autonomy_enabled={cfg.get('enabled', True)}")
     except Exception as e:
         add("json_load", False, str(e))
 
     try:
         safe_log(BRAIN_LOG, "selftest: log write check")
-        add("logging", True, f"wrote to {BRAIN_LOG}")
+        safe_log(AUTONOMY_LOG, "selftest: autonomy log write check")
+        add("logging", True, f"wrote to {BRAIN_LOG} and {AUTONOMY_LOG}")
     except Exception as e:
         add("logging", False, str(e))
 
-    # 4) web fetch minimal
     if urllib is None:
         add("web_stack", False, "urllib not available")
     else:
         code, _txt = http_get("https://en.wikipedia.org/wiki/Main_Page", timeout=10)
         add("web_fetch", (code == 200), f"status={code}")
 
-    # 5) queue logic sanity (cooldown)
     try:
         dummy = {
             "topic": "selftest_dummy",
@@ -1225,7 +1432,7 @@ def cmd_selftest(_arg: str) -> None:
     except Exception as e:
         add("queue_cooldown", False, str(e))
 
-    # 6) systemd user timers best-effort (no hard fail)
+    # systemd user timers best-effort
     try:
         import subprocess
         def run(cmd: List[str]) -> str:
@@ -1237,7 +1444,6 @@ def cmd_selftest(_arg: str) -> None:
     except Exception as e:
         add("timers_enabled", True, f"skipped (no systemctl access): {e}")
 
-    # print results
     print("Selftest results:")
     for name, ok, detail in results:
         mark = "OK" if ok else "FAIL"
@@ -1251,53 +1457,7 @@ def cmd_selftest(_arg: str) -> None:
         print("Selftest overall: FAIL (see above)")
 
 # -----------------------------
-# Command parsing helpers
-# -----------------------------
-
-def split_pipe(cmd: str) -> Tuple[str, str]:
-    if "|" not in cmd:
-        return cmd.strip(), ""
-    left, right = cmd.split("|", 1)
-    return left.strip(), right.strip()
-
-def print_help() -> None:
-    print(f"""{APP_NAME} commands:
-
-/teach <topic> | <answer>
-/teachfile <topic> | <path>
-/import <path>
-/importfolder <folder>
-/ingest <topic> | <text>
-/export
-/queue
-/clearpending
-/purgejunk
-/promote
-/confidence <topic>
-/lowest [n]
-/alias <from> | <to>
-/aliases
-/unalias <from>
-/why <topic>
-/accept
-/suggest
-/weblearn <topic>
-/weburl <topic> | <url>
-/webqueue [limit]
-/queuehealth
-/curiosity [limit]
-
-# Phase 3 maintenance:
-/merge <from> | <to>
-/dedupe
-/prune [dryrun|apply]
-/selftest
-
-Type a normal topic name (example: "subnetting") to get an answer.
-""")
-
-# -----------------------------
-# Core interaction
+# Core interaction + help
 # -----------------------------
 
 def resolve_topic(topic: str, aliases: Dict[str, str]) -> str:
@@ -1332,13 +1492,62 @@ def show_topic(topic: str) -> None:
         entry = ensure_entry_shape(entry)
         print(entry["answer"])
         if float(entry.get("confidence", 0.0)) < 0.60:
-            ok, _ = queue_add(resolved, reason="Answer exists but confidence is low", confidence=float(entry["confidence"]))
-            if ok:
-                safe_log(BRAIN_LOG, f"autoqueue: topic='{resolved}' reason='low_confidence'")
+            okg, whyg = autonomy_queue_guard_ok()
+            if okg:
+                ok, _ = queue_add(resolved, reason="Answer exists but confidence is low", confidence=float(entry["confidence"]))
+                if ok:
+                    safe_log(BRAIN_LOG, f"autoqueue: topic='{resolved}' reason='low_confidence'")
+            else:
+                safe_log(BRAIN_LOG, f"autoqueue: blocked guard='{whyg}' topic='{resolved}'")
         return
 
     print("Machine Spirit: I do not have a taught answer for that yet. If my reply is wrong or weak, correct me in your own words and I will remember it. My analysis may be incomplete. If this seems wrong, correct me and I will update my understanding. I have also marked this topic for deeper research so I can improve my answer over time.")
-    queue_add(topic_n, reason="No taught answer yet", confidence=0.35)
+    okg, _whyg = autonomy_queue_guard_ok()
+    if okg:
+        queue_add(topic_n, reason="No taught answer yet", confidence=0.35)
+
+def print_help() -> None:
+    print(f"""{APP_NAME} commands:
+
+/teach <topic> | <answer>
+/teachfile <topic> | <path>
+/import <path>
+/importfolder <folder>
+/ingest <topic> | <text>
+/export
+/queue
+/clearpending
+/purgejunk
+/promote
+/confidence <topic>
+/lowest [n]
+/alias <from> | <to>
+/aliases
+/unalias <from>
+/why <topic>
+/accept
+/suggest
+/weblearn <topic>
+/weburl <topic> | <url>
+/webqueue [limit]
+/queuehealth
+/curiosity [limit]
+
+# Phase 3 maintenance:
+/merge <from> | <to>
+/dedupe
+/prune [dryrun|apply]
+/selftest
+
+# Phase 4 controlled autonomy:
+/autonomy status
+/autonomy on
+/autonomy off
+/autonomy daily        (runs daily seed now + small learn pass)
+/autonomy weekly       (runs weekly deep dive now + small learn pass)
+
+Type a normal topic name (example: "subnetting") to get an answer.
+""")
 
 # -----------------------------
 # Commands
@@ -1648,11 +1857,15 @@ def cmd_weblearn(arg: str) -> None:
 
     set_knowledge(topic, answer.strip(), confidence=0.55, sources=sources, notes="Learned via /weblearn (Phase 2)", taught_by_user=False)
     print("Learned.")
-    queue_add(topic, reason="Learned via /weblearn (Phase 2) - deepen later", confidence=0.55)
+    okg, _whyg = autonomy_queue_guard_ok()
+    if okg:
+        queue_add(topic, reason="Learned via /weblearn (Phase 2) - deepen later", confidence=0.55)
 
     expansions = expand_topic_if_needed(topic)
     for ex in expansions:
-        queue_add(ex, reason=f"Expanded from '{topic}'", confidence=0.35)
+        okg2, _ = autonomy_queue_guard_ok()
+        if okg2:
+            queue_add(ex, reason=f"Expanded from '{topic}'", confidence=0.35)
 
 def cmd_weburl(arg: str) -> None:
     left, right = split_pipe(arg)
@@ -1675,7 +1888,9 @@ def cmd_weburl(arg: str) -> None:
 
     expansions = expand_topic_if_needed(topic)
     for ex in expansions:
-        queue_add(ex, reason=f"Expanded from '{topic}'", confidence=0.35)
+        okg, _ = autonomy_queue_guard_ok()
+        if okg:
+            queue_add(ex, reason=f"Expanded from '{topic}'", confidence=0.35)
 
 def cmd_webqueue(arg: str) -> None:
     rest = arg.replace("/webqueue", "", 1).strip()
@@ -1699,6 +1914,58 @@ def cmd_curiosity(arg: str) -> None:
     res = curiosity_tick(limit=limit)
     print(f"Curiosity complete. Queued {res['queued']} out of {res['considered']} considered (limit {res['limit']}).")
 
+def cmd_autonomy(arg: str) -> None:
+    rest = arg.replace("/autonomy", "", 1).strip().lower()
+    cfg = load_autonomy()
+
+    if not rest or rest == "status":
+        q = load_queue()
+        stats = queue_stats(q)
+        print("Autonomy status:")
+        print(f"- enabled: {bool(cfg.get('enabled', True))}")
+        print(f"- last_daily_ymd: {cfg.get('last_daily_ymd','')}")
+        print(f"- last_weekly_ymd: {cfg.get('last_weekly_ymd','')}")
+        print(f"- queue totals: total={stats['total']} pending={stats['pending']} failed={stats['failed']} running={stats['running']}")
+        print(f"- daily seed limit: {cfg.get('daily_seed_limit', 3)} (autolearn {cfg.get('daily_autolearn_limit', 2)})")
+        print(f"- weekly seed limit: {cfg.get('weekly_seed_limit', 6)} (autolearn {cfg.get('weekly_autolearn_limit', 3)})")
+        okg, whyg = autonomy_queue_guard_ok()
+        print(f"- guard: {whyg}" if not okg else "- guard: ok")
+        return
+
+    if rest == "on":
+        cfg["enabled"] = True
+        save_autonomy(cfg)
+        print("Autonomy enabled.")
+        return
+
+    if rest == "off":
+        cfg["enabled"] = False
+        save_autonomy(cfg)
+        print("Autonomy disabled.")
+        return
+
+    if rest == "daily":
+        res = autonomy_run_daily(force=True)
+        print(res.get("msg", ""))
+        if res.get("seed"):
+            print(f"- seeded: {res['seed']}")
+        if res.get("learn"):
+            print(f"- learned: {res['learn']}")
+        return
+
+    if rest == "weekly":
+        res = autonomy_run_weekly(force=True)
+        print(res.get("msg", ""))
+        if res.get("bucket"):
+            print(f"- bucket: {res['bucket']}")
+        if res.get("seed"):
+            print(f"- seeded: {res['seed']}")
+        if res.get("learn"):
+            print(f"- learned: {res['learn']}")
+        return
+
+    print("Usage: /autonomy status|on|off|daily|weekly")
+
 # -----------------------------
 # Main loop
 # -----------------------------
@@ -1721,6 +1988,8 @@ def main() -> None:
         atomic_write_json(QUEUE_PATH, [])
     if not os.path.exists(PENDING_PATH):
         atomic_write_json(PENDING_PATH, [])
+    if not os.path.exists(AUTONOMY_PATH):
+        atomic_write_json(AUTONOMY_PATH, load_autonomy())
 
     print(f"{APP_NAME} brain online. Type a message, or /help for commands. Ctrl+C to exit.")
 
@@ -1800,6 +2069,10 @@ def main() -> None:
                 cmd_prune(user); continue
             if user.startswith("/selftest"):
                 cmd_selftest(user); continue
+
+            # Phase 4 command
+            if user.startswith("/autonomy"):
+                cmd_autonomy(user); continue
 
             print("Unknown command. Type /help.")
             continue
