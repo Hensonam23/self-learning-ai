@@ -49,3 +49,6 @@ interactions.log
 
 # --- big vendor/build dirs ---
 llama.cpp/
+
+# local backups
+brain.py.bak_*

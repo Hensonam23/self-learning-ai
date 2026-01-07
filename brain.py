@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # MachineSpirit brain.py
-# NOTE: This file is intentionally self-contained (single file) and file-backed (JSON in ./data).
-# It preserves the command set you listed and extends Phase 1 (queuehealth + retry/backoff + clearer headless logs).
+# Single-file, file-backed (JSON in ./data).
+# Phase 1: queuehealth + retry/backoff + clearer logs (already added)
+# Phase 2: structured synthesis + source ranking + topic expansion + /weburl
 
 import os
 import re
@@ -12,7 +13,6 @@ import shutil
 import signal
 import difflib
 import datetime
-import threading
 from typing import Dict, Any, List, Tuple, Optional
 
 try:
@@ -22,6 +22,20 @@ except Exception:
     urllib = None
 
 APP_NAME = "Machine Spirit"
+
+# -----------------------------
+# UTF-8 safety: prevent terminal/systemd encoding crashes (smart quotes, etc.)
+# -----------------------------
+try:
+    # Python 3.7+
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -42,6 +56,20 @@ BRAIN_LOG = os.path.join(LOGS_DIR, "brain.log")
 
 DEFAULT_MAX_QUEUE_ATTEMPTS = 3
 DEFAULT_COOLDOWN_SECONDS = 6 * 60 * 60  # 6 hours
+
+# -----------------------------
+# Phase 2: Topic expansion (guardrailed)
+# -----------------------------
+
+TOPIC_EXPANSIONS: Dict[str, List[str]] = {
+    "subnet": ["subnetting", "cidr", "subnet mask", "network address", "broadcast address"],
+    "subnetting": ["cidr", "subnet mask", "network address", "broadcast address", "vlsm"],
+    "private ip addressing": ["rfc 1918", "nat", "cidr", "ipv4 address space"],
+    "nat": ["port forwarding", "snat vs dnat", "pat", "private ip addressing"],
+    "dns": ["dns record types", "recursive vs authoritative dns", "dns caching", "ttl dns"],
+}
+
+MAX_EXPANSIONS_PER_TRIGGER = 3
 
 # -----------------------------
 # Small utilities
@@ -109,7 +137,6 @@ def is_urlish(s: str) -> bool:
     if re.search(r"\bwww\.", s, re.IGNORECASE):
         return True
     if re.search(r"\b[a-z0-9-]+\.[a-z]{2,}\b", s, re.IGNORECASE):
-        # domain-ish (but keep it conservative)
         return True
     return False
 
@@ -126,10 +153,8 @@ def looks_like_terminal_command(s: str) -> bool:
     s = (s or "").strip()
     if not s:
         return False
-    # Very common command starters / patterns that we saw polluting queue
     if s.startswith((">", "$", "#", "sudo ", "ssh ", "cd ", "ls", "cat ", "tail ", "grep ", "nano ", "rm ", "python", "./")):
         return True
-    # Pipe / redirect heavy (likely shell)
     if (" | " in s) or (" >" in s) or ("< " in s) or (" && " in s) or (" || " in s):
         return True
     return False
@@ -138,7 +163,6 @@ def looks_like_transcript_prompt(s: str) -> bool:
     s = (s or "").strip().lower()
     if not s:
         return False
-    # Examples: "copy and paste", "new chat handoff", "type a message", etc.
     bad = [
         "copy and paste",
         "new chat handoff",
@@ -147,14 +171,10 @@ def looks_like_transcript_prompt(s: str) -> bool:
         "shutting down",
         "machine spirit brain online",
         "usage:",
-        "open in gmail",
     ]
     return any(b in s for b in bad)
 
 def is_junk_topic(s: str) -> Tuple[bool, str]:
-    """
-    Strict junk blocking for queue pollution.
-    """
     if s is None:
         return True, "empty"
     s0 = s
@@ -171,7 +191,6 @@ def is_junk_topic(s: str) -> Tuple[bool, str]:
         return True, "terminal_command"
     if looks_like_transcript_prompt(s0):
         return True, "transcript_prompt"
-    # avoid raw slash commands being queued as topics
     if s.startswith("/"):
         return True, "slash_command"
     return False, ""
@@ -189,6 +208,28 @@ def human_age(seconds: int) -> str:
     if m > 0:
         return f"{m}m {s}s"
     return f"{s}s"
+
+def parse_iso_to_ts(s: str) -> Optional[int]:
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(s)
+        return int(dt.timestamp())
+    except Exception:
+        return None
+
+def get_domain(url: str) -> str:
+    url = (url or "").strip()
+    if not url:
+        return ""
+    try:
+        if urllib is None:
+            return ""
+        p = urllib.parse.urlparse(url)
+        return (p.netloc or "").lower()
+    except Exception:
+        return ""
 
 # -----------------------------
 # Persistent stores
@@ -212,7 +253,6 @@ def load_queue() -> List[Dict[str, Any]]:
     q = read_json(QUEUE_PATH, [])
     if not isinstance(q, list):
         return []
-    # Phase 1: ensure new fields exist (non-destructive)
     changed = False
     for item in q:
         if not isinstance(item, dict):
@@ -234,6 +274,9 @@ def load_queue() -> List[Dict[str, Any]]:
             changed = True
         if "status" not in item:
             item["status"] = "pending"
+            changed = True
+        if "source_url" not in item:
+            item["source_url"] = ""
             changed = True
     if changed:
         save_queue(q)
@@ -258,31 +301,19 @@ def save_pending_promotions(p: List[Dict[str, Any]]) -> None:
 # -----------------------------
 
 def suggest_alias(topic: str, knowledge: Dict[str, Any], aliases: Dict[str, str]) -> Optional[str]:
-    """
-    Suggest best match in knowledge keys for topic.
-    """
     t = normalize_topic(topic)
     if not t:
         return None
-
-    # already alias?
     if t in aliases:
         return aliases[t]
-
     keys = list(knowledge.keys())
     if not keys:
         return None
-
-    # strong exact-ish candidates
     if t in knowledge:
         return None
-
-    # difflib best match
     match = difflib.get_close_matches(t, keys, n=1, cutoff=0.70)
     if match:
         return match[0]
-
-    # substring fallback
     for k in keys:
         if t in k or k in t:
             return k
@@ -325,10 +356,10 @@ def set_knowledge(topic: str, answer: str, confidence: float, sources: Optional[
     save_knowledge(k)
 
 # -----------------------------
-# Web fetch/search (fallback chain)
+# Web fetch/search + Phase 2 ranking
 # -----------------------------
 
-def http_get(url: str, timeout: int = 12, headers: Optional[Dict[str, str]] = None) -> Tuple[int, str]:
+def http_get(url: str, timeout: int = 15, headers: Optional[Dict[str, str]] = None) -> Tuple[int, str]:
     if urllib is None:
         return 0, ""
     req = urllib.request.Request(url, headers=headers or {
@@ -349,21 +380,14 @@ def http_get(url: str, timeout: int = 12, headers: Optional[Dict[str, str]] = No
 def strip_html(html: str) -> str:
     if not html:
         return ""
-    # Remove scripts/styles
     html = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", html)
-    # Remove tags
     html = re.sub(r"(?is)<.*?>", " ", html)
-    # Decode a few common entities (minimal)
     html = html.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
     html = html.replace("&#39;", "'").replace("&quot;", '"')
-    # Collapse whitespace
     html = re.sub(r"\s+", " ", html).strip()
     return html
 
-def wiki_opensearch(query: str) -> Optional[Tuple[str, str]]:
-    """
-    Returns (title, snippet-ish text) from Wikipedia OpenSearch.
-    """
+def wiki_opensearch_title(query: str) -> Optional[str]:
     if urllib is None:
         return None
     q = urllib.parse.quote(query)
@@ -373,95 +397,360 @@ def wiki_opensearch(query: str) -> Optional[Tuple[str, str]]:
         return None
     try:
         data = json.loads(text)
-        # [searchterm, [titles], [descriptions], [links]]
         titles = data[1] if len(data) > 1 else []
-        descs = data[2] if len(data) > 2 else []
         if titles:
-            title = titles[0]
-            desc = descs[0] if descs else ""
-            return title, desc
+            return titles[0]
     except Exception:
         return None
     return None
 
-def ddg_html_search(query: str) -> Optional[Tuple[str, str]]:
-    """
-    DuckDuckGo HTML results (light parsing).
-    """
+def wiki_summary(title: str) -> Optional[Tuple[str, str]]:
     if urllib is None:
         return None
+    t = (title or "").strip()
+    if not t:
+        return None
+    safe = urllib.parse.quote(t.replace(" ", "_"))
+    url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{safe}"
+    code, text = http_get(url)
+    if code != 200 or not text:
+        return None
+    try:
+        data = json.loads(text)
+        extract = (data.get("extract") or "").strip()
+        page_url = ""
+        content_urls = data.get("content_urls") or {}
+        desktop = content_urls.get("desktop") or {}
+        page_url = desktop.get("page") or ""
+        if extract:
+            return extract, page_url
+    except Exception:
+        return None
+    return None
+
+def ddg_html_results(query: str, max_results: int = 5) -> List[Dict[str, str]]:
+    """
+    Return list of {title,url,snippet} from DDG HTML.
+    """
+    out: List[Dict[str, str]] = []
+    if urllib is None:
+        return out
     q = urllib.parse.quote(query)
     url = f"https://duckduckgo.com/html/?q={q}"
     code, html = http_get(url)
     if code != 200 or not html:
-        return None
-    # first result link + snippet
-    m = re.search(r'(?is)<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html)
-    if not m:
-        return None
-    link = m.group(1)
-    title = strip_html(m.group(2))
-    # snippet
-    sm = re.search(r'(?is)<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', html)
-    snippet = strip_html(sm.group(1)) if sm else ""
-    return f"{title} ({link})", snippet
+        return out
 
-def ddg_lite_search(query: str) -> Optional[Tuple[str, str]]:
-    """
-    DuckDuckGo lite results.
-    """
+    # Find multiple result blocks
+    # title link: <a class="result__a" href="...">...</a>
+    for m in re.finditer(r'(?is)<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html):
+        if len(out) >= max_results:
+            break
+        link = m.group(1).strip()
+        title = strip_html(m.group(2))
+        out.append({"title": title, "url": link, "snippet": ""})
+
+    # Try to attach snippets (best-effort, same-order)
+    snippets = []
+    for sm in re.finditer(r'(?is)<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', html):
+        snippets.append(strip_html(sm.group(1)))
+    for i in range(min(len(out), len(snippets))):
+        out[i]["snippet"] = snippets[i]
+
+    return out
+
+def ddg_lite_results(query: str, max_results: int = 5) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
     if urllib is None:
-        return None
+        return out
     q = urllib.parse.quote(query)
     url = f"https://lite.duckduckgo.com/lite/?q={q}"
     code, html = http_get(url)
     if code != 200 or not html:
-        return None
-    # crude: find first result link
-    m = re.search(r'(?is)<a rel="nofollow" class="result-link" href="([^"]+)".*?>(.*?)</a>', html)
-    if not m:
-        # alternate pattern
-        m = re.search(r'(?is)<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html)
-    if not m:
-        return None
-    link = m.group(1)
-    title = strip_html(m.group(2))
-    return f"{title} ({link})", ""
+        return out
 
-def web_search_fallback(query: str) -> Tuple[bool, str, List[str]]:
+    for m in re.finditer(r'(?is)<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html):
+        if len(out) >= max_results:
+            break
+        link = m.group(1).strip()
+        title = strip_html(m.group(2))
+        # crude filter: skip nav links
+        if not link.startswith("http"):
+            continue
+        if not title or len(title) < 3:
+            continue
+        out.append({"title": title, "url": link, "snippet": ""})
+    return out
+
+def source_score(url: str, title: str = "") -> int:
     """
-    Returns (ok, synthesized_short, sources)
-    Phase 1 keeps this simple; Phase 2 will do structured synthesis.
+    Prefer RFC/IETF/NIST/.gov/.edu/vendor docs.
+    Downrank obvious blogs.
+    """
+    d = get_domain(url)
+    t = (title or "").lower()
+
+    score = 0
+
+    # High-authority / primary-ish sources
+    if "rfc-editor.org" in d:
+        score += 120
+    if "ietf.org" in d:
+        score += 100
+    if d.endswith(".gov"):
+        score += 95
+    if d.endswith(".edu"):
+        score += 85
+    if "nist.gov" in d:
+        score += 110
+
+    # Major reference sources (not perfect but often decent)
+    if "wikipedia.org" in d:
+        score += 55
+
+    # Vendor docs signals
+    vendor_signals = ["docs.", "support.", "developer.", "learn.", "kb."]
+    if any(v in d for v in vendor_signals):
+        score += 25
+
+    # Downrank bloggy stuff (not banned, just lower)
+    blog_signals = ["blog", "medium.com", "wordpress", "blogspot", "substack"]
+    if any(b in d for b in blog_signals):
+        score -= 35
+
+    # Downrank “opinion/tutorial” title vibe a bit (very light)
+    if any(w in t for w in ["opinion", "my experience", "top 10", "best", "review"]):
+        score -= 15
+
+    # slight preference for HTTPS
+    if url.startswith("https://"):
+        score += 5
+
+    return score
+
+def choose_best_source(candidates: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    if not candidates:
+        return None
+    scored = []
+    for c in candidates:
+        url = c.get("url", "")
+        title = c.get("title", "")
+        scored.append((source_score(url, title), c))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[0][1]
+
+def fetch_page_text(url: str, max_chars: int = 12000) -> Tuple[bool, str]:
+    code, body = http_get(url)
+    if code != 200 or not body:
+        return False, ""
+    text = strip_html(body)
+    if not text:
+        return False, ""
+    if len(text) > max_chars:
+        text = text[:max_chars]
+    return True, text
+
+def pick_definition_sentence(topic: str, text: str) -> str:
+    """
+    Best-effort: first sentence containing the topic (or fallback first sentence).
+    """
+    topic_n = normalize_topic(topic)
+    sentences = re.split(r"(?<=[\.\!\?])\s+", text)
+    # find first sentence mentioning topic words
+    for s in sentences[:40]:
+        s2 = s.strip()
+        if not s2:
+            continue
+        if topic_n and topic_n in s2.lower():
+            return s2
+    for s in sentences[:10]:
+        s2 = s.strip()
+        if s2:
+            return s2
+    return ""
+
+def bullets_from_text(text: str, max_bullets: int = 6) -> List[str]:
+    sentences = re.split(r"(?<=[\.\!\?])\s+", text)
+    bullets = []
+    for s in sentences:
+        s2 = s.strip()
+        if not s2:
+            continue
+        # keep mid-length sentences
+        if 40 <= len(s2) <= 160:
+            bullets.append(s2)
+        if len(bullets) >= max_bullets:
+            break
+    if not bullets:
+        # fallback: chunks
+        chunk = text[:700].strip()
+        if chunk:
+            bullets.append(chunk)
+    return bullets[:max_bullets]
+
+def structured_synthesis(topic: str, seed_text: str, source_url: str, source_label: str) -> str:
+    """
+    Phase 2 output format:
+    - Definition
+    - Key points
+    - Examples
+    - Common mistakes
+    - Quick recognition / practice check
+    - Sources
+    """
+    definition = pick_definition_sentence(topic, seed_text)
+    bullets = bullets_from_text(seed_text, max_bullets=6)
+
+    examples = []
+    t = normalize_topic(topic)
+    if "subnet" in t or "cidr" in t:
+        examples = [
+            "Example: 192.168.1.0/24 has 256 total addresses (0-255), with usable hosts typically .1 to .254 (depends on context).",
+            "Example: /26 splits a /24 into 4 subnets (each block size 64).",
+        ]
+    elif "dns" in t:
+        examples = [
+            "Example: A record maps a name to an IPv4 address.",
+            "Example: CNAME is an alias pointing one name to another name.",
+        ]
+    elif "rfc 1918" in t or "private ip" in t:
+        examples = [
+            "Example private IPv4 blocks: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16.",
+            "Example: home routers typically use NAT so private addresses can reach the public internet.",
+        ]
+
+    mistakes = []
+    if "subnet" in t or "cidr" in t:
+        mistakes = [
+            "Mistake: confusing the subnet mask with the network address.",
+            "Mistake: forgetting that network + broadcast addresses are usually not usable host addresses in IPv4.",
+        ]
+    elif "dns" in t:
+        mistakes = [
+            "Mistake: assuming DNS changes apply instantly (caching/TTL can delay).",
+            "Mistake: mixing up authoritative vs recursive DNS roles.",
+        ]
+    elif "rfc 1918" in t or "private ip" in t:
+        mistakes = [
+            "Mistake: thinking private IPs are routable on the public internet (they are not).",
+            "Mistake: assuming NAT is security by itself (it helps, but it’s not a firewall).",
+        ]
+
+    quick = []
+    if "subnet" in t or "cidr" in t:
+        quick = [
+            "Quick check: /24 = 255.255.255.0, /16 = 255.255.0.0, /8 = 255.0.0.0.",
+            "Quick check: block size = 256 - last mask octet (when the split is in the last octet).",
+        ]
+    elif "dns" in t:
+        quick = [
+            "Quick check: if a name resolves sometimes but not others, suspect caching/TTL or split-horizon DNS.",
+        ]
+    elif "rfc 1918" in t or "private ip" in t:
+        quick = [
+            "Quick check: if the IP starts with 10., 192.168., or 172.16-172.31, it’s likely private RFC1918 space.",
+        ]
+
+    out = []
+    out.append(f"{topic.upper()}")
+    out.append("")
+    if definition:
+        out.append("Definition:")
+        out.append(f"- {definition}")
+        out.append("")
+    out.append("Key points:")
+    for b in bullets:
+        out.append(f"- {b}")
+    out.append("")
+    if examples:
+        out.append("Examples:")
+        for e in examples:
+            out.append(f"- {e}")
+        out.append("")
+    if mistakes:
+        out.append("Common mistakes:")
+        for m in mistakes:
+            out.append(f"- {m}")
+        out.append("")
+    if quick:
+        out.append("Practice recognition:")
+        for q in quick:
+            out.append(f"- {q}")
+        out.append("")
+    out.append("Sources:")
+    if source_url:
+        out.append(f"- {source_label}: {source_url}")
+    else:
+        out.append(f"- {source_label}")
+    return "\n".join(out).strip()
+
+def expand_topic_if_needed(topic: str) -> List[str]:
+    topic_n = normalize_topic(topic)
+    expansions = TOPIC_EXPANSIONS.get(topic_n, [])
+    if not expansions:
+        return []
+    return expansions[:MAX_EXPANSIONS_PER_TRIGGER]
+
+def web_learn_topic(topic: str, forced_url: str = "") -> Tuple[bool, str, List[str], str]:
+    """
+    Phase 2 unified learning:
+    - If forced_url provided: fetch it directly.
+    - Else: try Wikipedia summary -> DDG HTML multiple -> DDG Lite multiple.
+    Returns (ok, final_answer, sources_list, chosen_url)
     """
     sources: List[str] = []
-    # 1) Wikipedia OpenSearch
-    w = wiki_opensearch(query)
-    if w:
-        title, desc = w
-        sources.append(f"Wikipedia OpenSearch: {title}")
-        if desc:
-            return True, f"{title}: {desc}", sources
-        return True, f"{title}", sources
+    chosen_url = ""
 
-    # 2) DDG HTML
-    d = ddg_html_search(query)
-    if d:
-        t, snip = d
-        sources.append("DuckDuckGo HTML")
-        if snip:
-            return True, f"{t} — {snip}", sources
-        return True, f"{t}", sources
+    # Forced URL path
+    if forced_url:
+        ok, txt = fetch_page_text(forced_url)
+        if not ok:
+            return False, "Web fetch failed for provided URL.", sources, ""
+        answer = structured_synthesis(topic, txt, forced_url, "Direct URL")
+        sources.append(forced_url)
+        return True, answer, sources, forced_url
 
-    # 3) DDG Lite
-    l = ddg_lite_search(query)
-    if l:
-        t, snip = l
-        sources.append("DuckDuckGo Lite")
-        if snip:
-            return True, f"{t} — {snip}", sources
-        return True, f"{t}", sources
+    # Wikipedia summary path (nice for definitions)
+    wtitle = wiki_opensearch_title(topic)
+    if wtitle:
+        ws = wiki_summary(wtitle)
+        if ws:
+            extract, page_url = ws
+            chosen_url = page_url or ""
+            answer = structured_synthesis(topic, extract, chosen_url, "Wikipedia")
+            sources.append(f"Wikipedia: {page_url}" if page_url else f"Wikipedia: {wtitle}")
+            return True, answer, sources, chosen_url
 
-    return False, "Web search returned no results or could not be fetched.", sources
+    # DDG HTML candidates
+    cands = ddg_html_results(topic, max_results=6)
+    if cands:
+        best = choose_best_source(cands)
+        if best:
+            chosen_url = best.get("url", "")
+            ok, txt = fetch_page_text(chosen_url)
+            if ok:
+                label = get_domain(chosen_url) or "Web"
+                answer = structured_synthesis(topic, txt, chosen_url, label)
+                sources.append(chosen_url)
+                return True, answer, sources, chosen_url
+            sources.append(chosen_url)
+            safe_log(WEBQUEUE_LOG, f"weblearn: fetch failed best_url='{chosen_url}' falling back")
+
+    # DDG lite candidates fallback
+    cands2 = ddg_lite_results(topic, max_results=6)
+    if cands2:
+        best = choose_best_source(cands2)
+        if best:
+            chosen_url = best.get("url", "")
+            ok, txt = fetch_page_text(chosen_url)
+            if ok:
+                label = get_domain(chosen_url) or "Web"
+                answer = structured_synthesis(topic, txt, chosen_url, label)
+                sources.append(chosen_url)
+                return True, answer, sources, chosen_url
+            sources.append(chosen_url)
+
+    return False, "Web search returned no results or could not be fetched.", sources, ""
 
 # -----------------------------
 # Queue logic (Phase 1: retry/backoff + health)
@@ -482,7 +771,6 @@ def queue_add(topic: str, reason: str = "", confidence: float = 0.35) -> Tuple[b
     q = load_queue()
     existing = queue_find_item(q, topic_n)
     if existing:
-        # only bump reason if empty
         if reason and not existing.get("reason"):
             existing["reason"] = reason
             save_queue(q)
@@ -491,10 +779,9 @@ def queue_add(topic: str, reason: str = "", confidence: float = 0.35) -> Tuple[b
         "topic": topic_n,
         "reason": reason or "",
         "requested_on": iso_now(),
-        "status": "pending",  # pending, running, done, failed, failed_final
+        "status": "pending",
         "current_confidence": float(confidence),
 
-        # Phase 1 fields
         "attempts": 0,
         "max_attempts": DEFAULT_MAX_QUEUE_ATTEMPTS,
         "last_attempt_ts": 0,
@@ -502,6 +789,7 @@ def queue_add(topic: str, reason: str = "", confidence: float = 0.35) -> Tuple[b
         "fail_reason": "",
         "completed_on": "",
         "worker_note": "",
+        "source_url": "",
     }
     q.append(item)
     save_queue(q)
@@ -547,7 +835,6 @@ def queue_health_report() -> Dict[str, Any]:
             counts["other"] += 1
 
         if st == "pending":
-            # requested_on is ISO; try to parse
             req = item.get("requested_on", "")
             ts = parse_iso_to_ts(req)
             if ts:
@@ -558,19 +845,10 @@ def queue_health_report() -> Dict[str, Any]:
             r = (item.get("fail_reason") or "unknown").strip() or "unknown"
             failure_reasons[r] = failure_reasons.get(r, 0) + 1
 
-        # Stuck detection
         if st == "running":
             last = int(item.get("last_attempt_ts") or 0)
-            if last > 0 and (now - last) > (60 * 30):  # 30 min since last attempt marked running
+            if last > 0 and (now - last) > (60 * 30):
                 stuck_items.append(item)
-
-        if st == "pending":
-            # if it's pending but cooldown not satisfied and looks "stuck waiting"
-            last = int(item.get("last_attempt_ts") or 0)
-            cd = int(item.get("cooldown_seconds") or DEFAULT_COOLDOWN_SECONDS)
-            if last > 0 and (now - last) < cd and int(item.get("attempts") or 0) > 0:
-                # not truly stuck, but waiting
-                pass
 
     oldest_pending_age = None
     if oldest_pending_ts is not None:
@@ -583,32 +861,12 @@ def queue_health_report() -> Dict[str, Any]:
         "top_failure_reasons": top_reasons,
         "stuck_running_count": len(stuck_items),
         "stuck_running_items": [
-            {
-                "topic": i.get("topic", ""),
-                "last_attempt_age": human_age(now - int(i.get("last_attempt_ts") or 0))
-            } for i in stuck_items[:5]
+            {"topic": i.get("topic", ""), "last_attempt_age": human_age(now - int(i.get("last_attempt_ts") or 0))}
+            for i in stuck_items[:5]
         ],
     }
 
-def parse_iso_to_ts(s: str) -> Optional[int]:
-    s = (s or "").strip()
-    if not s:
-        return None
-    try:
-        # accept "YYYY-MM-DDTHH:MM:SS"
-        dt = datetime.datetime.fromisoformat(s)
-        return int(dt.timestamp())
-    except Exception:
-        return None
-
 def can_attempt(item: Dict[str, Any]) -> Tuple[bool, str]:
-    """
-    Retry/backoff gate:
-    - skip if junk
-    - skip if status not pending/failed
-    - skip if attempts >= max_attempts -> failed_final
-    - skip if cooldown not elapsed since last_attempt_ts
-    """
     topic = item.get("topic", "")
     junk, why = is_junk_topic(topic)
     if junk:
@@ -635,8 +893,8 @@ def can_attempt(item: Dict[str, Any]) -> Tuple[bool, str]:
 def mark_failed(item: Dict[str, Any], reason: str, final: bool = False) -> None:
     item["status"] = "failed_final" if final else "failed"
     item["fail_reason"] = (reason or "").strip()[:200]
-    item["completed_on"] = iso_now() if final else item.get("completed_on", "")
     if final:
+        item["completed_on"] = iso_now()
         item["worker_note"] = (item.get("worker_note") or "") + f" Finalized failure: {reason}"
 
 def mark_done(item: Dict[str, Any], note: str = "") -> None:
@@ -646,24 +904,18 @@ def mark_done(item: Dict[str, Any], note: str = "") -> None:
         item["worker_note"] = note
 
 def run_webqueue(limit: int = 3, autoupgrade: bool = True) -> Dict[str, Any]:
-    """
-    Headless safe runner for systemd timer use.
-    """
     q = load_queue()
     attempted = 0
     learned = 0
     skipped = 0
     finalized = 0
 
-    # work on earliest pending/failed first (stable order)
-    # keep original order but filter by eligibility
     for item in q:
         if attempted >= limit:
             break
 
         ok, why = can_attempt(item)
         if not ok:
-            # If junk: mark failed_final immediately (don’t keep retrying junk)
             if why.startswith("junk:"):
                 mark_failed(item, why, final=True)
                 safe_log(WEBQUEUE_LOG, f"webqueue: finalize junk topic='{item.get('topic','')}' reason='{why}'")
@@ -677,7 +929,6 @@ def run_webqueue(limit: int = 3, autoupgrade: bool = True) -> Dict[str, Any]:
                 safe_log(WEBQUEUE_LOG, f"webqueue: skip topic='{item.get('topic','')}' because {why}")
             continue
 
-        # Attempt
         attempted += 1
         item["status"] = "running"
         item["attempts"] = int(item.get("attempts") or 0) + 1
@@ -686,40 +937,46 @@ def run_webqueue(limit: int = 3, autoupgrade: bool = True) -> Dict[str, Any]:
         topic = item.get("topic", "")
         safe_log(WEBQUEUE_LOG, f"webqueue: attempt {item['attempts']}/{item.get('max_attempts',DEFAULT_MAX_QUEUE_ATTEMPTS)} topic='{topic}'")
 
-        ok2, text, sources = web_search_fallback(topic)
+        ok2, answer, sources, chosen_url = web_learn_topic(topic)
         if not ok2:
-            # transient failure -> failed (not final), will respect cooldown
             item["status"] = "failed"
             item["fail_reason"] = "web_fetch_failed"
             safe_log(WEBQUEUE_LOG, f"webqueue: failed topic='{topic}' reason='web_fetch_failed'")
             continue
 
-        # If we got something back, store it as low-confidence learned note unless user already taught higher confidence.
+        if chosen_url:
+            item["source_url"] = chosen_url
+
         if autoupgrade:
             k = load_knowledge()
             existing = k.get(topic)
             existing_conf = float(existing.get("confidence", 0.0)) if isinstance(existing, dict) else 0.0
             taught_by_user = bool(existing.get("taught_by_user", False)) if isinstance(existing, dict) else False
 
-            # Guardrail: do not overwrite strong user-taught answers
             if taught_by_user and existing_conf >= 0.75:
                 mark_done(item, note="Skipped upgrade: user-taught answer is high confidence.")
                 safe_log(WEBQUEUE_LOG, f"webqueue: done (skipped overwrite) topic='{topic}' taught_by_user=True conf={existing_conf}")
                 continue
 
-            # Write/update entry
-            new_answer = text.strip()
-            new_conf = max(float(item.get("current_confidence", 0.35)), 0.40)
-            note = "Upgraded knowledge using web search fallback chain"
-            set_knowledge(topic, new_answer, new_conf, sources=sources, notes=note, taught_by_user=False)
+            new_conf = max(float(item.get("current_confidence", 0.35)), 0.45)
+            note = "Upgraded knowledge using Phase 2 structured synthesis"
+            set_knowledge(topic, answer.strip(), new_conf, sources=sources, notes=note, taught_by_user=False)
+
             learned += 1
             mark_done(item, note=f"{note}.")
-            safe_log(WEBQUEUE_LOG, f"webqueue: learned topic='{topic}' sources={sources}")
+            safe_log(WEBQUEUE_LOG, f"webqueue: learned topic='{topic}' chosen_url='{chosen_url}' sources={sources}")
+
+            # Phase 2 expansion trigger (guardrailed)
+            expansions = expand_topic_if_needed(topic)
+            if expansions:
+                for ex in expansions:
+                    okq, msgq = queue_add(ex, reason=f"Expanded from '{topic}'", confidence=0.35)
+                    if okq:
+                        safe_log(WEBQUEUE_LOG, f"webqueue: expanded queued topic='{ex}' from='{topic}'")
         else:
             mark_done(item, note="Fetched (autoupgrade disabled).")
             safe_log(WEBQUEUE_LOG, f"webqueue: done topic='{topic}' autoupgrade=False")
 
-    # finalize max attempts now (for items we didn’t touch this run)
     for item in q:
         if item.get("status") in ("pending", "failed"):
             attempts = int(item.get("attempts") or 0)
@@ -741,32 +998,18 @@ def add_pending_promotion(topic: str, why: str = "") -> None:
     topic_n = normalize_topic(topic)
     if not topic_n:
         return
-    # dedupe
     for item in p:
         if normalize_topic(item.get("topic", "")) == topic_n:
             return
     p.append({"topic": topic_n, "why": why or "", "added": iso_now()})
     save_pending_promotions(p)
 
-def pop_pending() -> Optional[Dict[str, Any]]:
-    p = load_pending_promotions()
-    if not p:
-        return None
-    item = p.pop(0)
-    save_pending_promotions(p)
-    return item
-
 # -----------------------------
-# Curiosity (minimal - existing command preserved)
+# Curiosity (existing command preserved)
 # -----------------------------
 
 def curiosity_tick(limit: int = 3) -> Dict[str, Any]:
-    """
-    Basic daily curiosity: look for lowest-confidence topics and queue them.
-    Guardrails are already in place via junk checks and queue dedupe.
-    """
     k = load_knowledge()
-    # sort by confidence asc, then oldest updated
     items = []
     for topic, entry in k.items():
         if not isinstance(entry, dict):
@@ -794,9 +1037,6 @@ def curiosity_tick(limit: int = 3) -> Dict[str, Any]:
 # -----------------------------
 
 def split_pipe(cmd: str) -> Tuple[str, str]:
-    """
-    Split "left | right" once.
-    """
     if "|" not in cmd:
         return cmd.strip(), ""
     left, right = cmd.split("|", 1)
@@ -824,6 +1064,7 @@ def print_help() -> None:
 /accept
 /suggest
 /weblearn <topic>
+/weburl <topic> | <url>
 /webqueue [limit]
 /queuehealth
 /curiosity [limit]
@@ -857,7 +1098,6 @@ def show_topic(topic: str) -> None:
     topic_n = normalize_topic(topic_raw)
     resolved = resolve_topic(topic_n, aliases)
 
-    # If alias suggestion exists, show it (but don't force)
     if resolved == topic_n:
         sug = suggest_alias(topic_n, k, aliases)
         if sug and sug != topic_n:
@@ -867,16 +1107,18 @@ def show_topic(topic: str) -> None:
     if isinstance(entry, dict) and entry.get("answer"):
         entry = ensure_entry_shape(entry)
         print(entry["answer"])
-        # If low confidence, queue it
         if float(entry.get("confidence", 0.0)) < 0.60:
             ok, _ = queue_add(resolved, reason="Answer exists but confidence is low", confidence=float(entry["confidence"]))
             if ok:
                 safe_log(BRAIN_LOG, f"autoqueue: topic='{resolved}' reason='low_confidence'")
         return
 
-    # no answer
     print("Machine Spirit: I do not have a taught answer for that yet. If my reply is wrong or weak, correct me in your own words and I will remember it. My analysis may be incomplete. If this seems wrong, correct me and I will update my understanding. I have also marked this topic for deeper research so I can improve my answer over time.")
     queue_add(topic_n, reason="No taught answer yet", confidence=0.35)
+
+# -----------------------------
+# Commands
+# -----------------------------
 
 def cmd_teach(arg: str) -> None:
     left, right = split_pipe(arg)
@@ -992,7 +1234,6 @@ def cmd_queue() -> None:
     if not q:
         print("Queue is empty.")
         return
-    # Show latest 15
     print("Research queue (latest 15):")
     for item in q[-15:]:
         print(f"- {item.get('topic','')} | {item.get('status','')} | attempts={item.get('attempts',0)}/{item.get('max_attempts',DEFAULT_MAX_QUEUE_ATTEMPTS)} | reason={item.get('reason','')}")
@@ -1094,15 +1335,10 @@ def cmd_unalias(arg: str) -> None:
         print("No such alias.")
 
 def cmd_suggest() -> None:
-    """
-    Suggest an alias for the last typed topic is hard without state.
-    This keeps the command for compatibility: it suggests based on the last pending queue item, if any.
-    """
     q = load_queue()
     k = load_knowledge()
     a = load_aliases()
 
-    # pick last pending item topic
     pending = [i for i in q if i.get("status") == "pending"]
     if not pending:
         print("No pending topics to suggest for.")
@@ -1115,9 +1351,6 @@ def cmd_suggest() -> None:
         print("No good suggestion found.")
 
 def cmd_accept() -> None:
-    """
-    Accept the best alias suggestion for the last pending item.
-    """
     q = load_queue()
     k = load_knowledge()
     a = load_aliases()
@@ -1148,16 +1381,13 @@ def cmd_why(arg: str) -> None:
             print(f"Attempts: {item.get('attempts',0)}/{item.get('max_attempts',DEFAULT_MAX_QUEUE_ATTEMPTS)}")
             if item.get("fail_reason"):
                 print(f"Fail reason: {item.get('fail_reason')}")
+            if item.get("source_url"):
+                print(f"Source URL: {item.get('source_url')}")
             return
     print("Not found in queue.")
 
 def cmd_promote() -> None:
-    """
-    Promote one pending learned item into an explicit 'pending promotions' list.
-    Keeps command for compatibility.
-    """
     q = load_queue()
-    # find a "done" item that was learned, push to pending promotions
     done = [i for i in q if i.get("status") == "done"]
     if not done:
         print("Nothing to promote.")
@@ -1175,15 +1405,42 @@ def cmd_weblearn(arg: str) -> None:
     if junk:
         print(f"Refusing (junk topic): {why}")
         return
-    ok, text, sources = web_search_fallback(topic)
+
+    ok, answer, sources, chosen_url = web_learn_topic(topic)
     if not ok:
-        print(text)
+        print(answer)
         return
-    # store low confidence
-    set_knowledge(topic, text.strip(), confidence=0.45, sources=sources, notes="Learned via /weblearn", taught_by_user=False)
+
+    set_knowledge(topic, answer.strip(), confidence=0.55, sources=sources, notes="Learned via /weblearn (Phase 2)", taught_by_user=False)
     print("Learned.")
-    # also queue for deeper follow-up if still low confidence
-    queue_add(topic, reason="Learned via /weblearn (needs synthesis later)", confidence=0.45)
+    queue_add(topic, reason="Learned via /weblearn (Phase 2) - deepen later", confidence=0.55)
+
+    expansions = expand_topic_if_needed(topic)
+    for ex in expansions:
+        queue_add(ex, reason=f"Expanded from '{topic}'", confidence=0.35)
+
+def cmd_weburl(arg: str) -> None:
+    left, right = split_pipe(arg)
+    topic = normalize_topic(left.replace("/weburl", "", 1).strip())
+    url = (right or "").strip()
+    if not topic or not url:
+        print("Usage: /weburl <topic> | <url>")
+        return
+    if not url.startswith("http://") and not url.startswith("https://"):
+        print("URL must start with http:// or https://")
+        return
+
+    ok, answer, sources, chosen_url = web_learn_topic(topic, forced_url=url)
+    if not ok:
+        print(answer)
+        return
+
+    set_knowledge(topic, answer.strip(), confidence=0.60, sources=sources, notes="Learned via /weburl (Phase 2)", taught_by_user=False)
+    print("Learned.")
+
+    expansions = expand_topic_if_needed(topic)
+    for ex in expansions:
+        queue_add(ex, reason=f"Expanded from '{topic}'", confidence=0.35)
 
 def cmd_webqueue(arg: str) -> None:
     rest = arg.replace("/webqueue", "", 1).strip()
@@ -1221,7 +1478,6 @@ def main() -> None:
     ensure_dirs()
     signal.signal(signal.SIGINT, handle_sigint)
 
-    # ensure base files exist
     if not os.path.exists(KNOWLEDGE_PATH):
         atomic_write_json(KNOWLEDGE_PATH, {})
     if not os.path.exists(ALIASES_PATH):
@@ -1244,12 +1500,10 @@ def main() -> None:
         if not user:
             continue
 
-        # reject raw URL inputs (existing behavior)
         if is_urlish(user) and not user.startswith("/"):
             print("Machine Spirit: That looks like a URL or domain string. Ask using a normal topic name instead (example: 'rfc 1918').")
             continue
 
-        # commands
         if user.startswith("/"):
             if user in ("/help", "/h", "/?"):
                 print_help()
@@ -1315,6 +1569,9 @@ def main() -> None:
             if user.startswith("/weblearn"):
                 cmd_weblearn(user)
                 continue
+            if user.startswith("/weburl"):
+                cmd_weburl(user)
+                continue
             if user.startswith("/webqueue"):
                 cmd_webqueue(user)
                 continue
@@ -1325,7 +1582,6 @@ def main() -> None:
             print("Unknown command. Type /help.")
             continue
 
-        # normal topic
         show_topic(user)
 
     print("Shutting down.")
