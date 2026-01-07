@@ -1,9 +1,40 @@
-The OSI (Open Systems Interconnection) Model is a conceptual framework that standardizes network communication into seven distinct layers, each with specific functions, allowing different systems to communicate seamlessly, acting as a universal language for data exchange, and making troubleshooting easier by isolating problems to a specific layer. Created by ISO, it details the journey of data from user applications down through physical hardware and back up, even though the modern internet uses the simpler TCP/IP model, it remains crucial for understanding networking principles. 
-The Seven Layers of the OSI Model (Top to Bottom)
-Application Layer (Layer 7): User-facing, provides network services to applications (e.g., web browsers, email clients).
-Presentation Layer (Layer 6): Data formatting, encryption, and compression (e.g., converting data to a standard format like ASCII).
-Session Layer (Layer 5): Manages communication sessions between applications, establishing, coordinating, and terminating connections.
-Transport Layer (Layer 4): Ensures reliable end-to-end data delivery, segmentation, and flow control (e.g., TCP, UDP).
-Network Layer (Layer 3): Handles logical addressing (IP addresses) and routing packets between different networks.
-Data Link Layer (Layer 2): Manages error-free transfer of data frames across a physical link, using physical addresses (MAC addresses).
-Physical Layer (Layer 1): Defines physical connections, cables, and electrical signals for transmitting raw bits over media. 
+osi model (synthesized)
+
+Definition:
+- The data to be transmitted is composed at the topmost layer of the transmitting device (layer N ) into a protocol data unit ( PDU ).
+- The PDU is passed to layer N−1 , where it is known as the service data unit ( SDU ).
+- At layer N−1 the SDU is concatenated with a header, a footer, or both, producing a layer N−1 PDU . It is then passed to layer N−2 .
+
+How it works:
+- Break it into the main components or layers.
+- For each component, say what it is responsible for, and what it is not responsible for.
+- When troubleshooting, map the symptom to the layer or component that most likely owns it.
+
+Examples:
+- Write one simple example first, then one realistic example you might see at work.
+- If it is a model or standard, explain what changes when you move between layers or parts.
+
+Common mistakes:
+- Mixing up similar sounding terms.
+- Memorizing lists without understanding what actually changes in real systems.
+- Using the wrong layer or component when troubleshooting.
+
+Related keywords (from sources):
+- layer
+- model
+- osi
+- networking
+- iso
+- data
+- standards
+- 160
+- reference
+- network
+
+Quick check (answer these to prove you understand it):
+- What problem does osi model solve?
+- What are the main parts or layers of osi model?
+- How does osi model relate to layer and model?
+
+Sources used:
+- https://en.wikipedia.org/wiki/OSI_model

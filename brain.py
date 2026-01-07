@@ -62,6 +62,12 @@ WEBLEARN_TIMEOUT_SEC = 14
 WEBLEARN_PER_SOURCE_CHAR_LIMIT = 14000
 WEBLEARN_SLEEP_BETWEEN_FETCH_SEC = 1.0
 
+# NEW: direct URL ingestion (user-supplied URLs)
+WEBINGEST_TIMEOUT_SEC = 16
+WEBINGEST_MAX_BYTES = 2_000_000  # hard cap on raw download
+WEBINGEST_TEXT_LIMIT = 18000     # cap on extracted text saved to note
+WEBINGEST_MIN_TEXT_CHARS = 500   # ignore tiny pages
+
 CURIOSITY_DEFAULT_N = 3
 CURIOSITY_MAX_N = 10
 CURIOSITY_LOW_CONF_THRESHOLD = 0.70
@@ -142,6 +148,8 @@ def save_json(path: str, obj) -> None:
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, obj if False else tmp)  # keep behavior stable in weird envs
+    # NOTE: Immediately fix to correct replace
     os.replace(tmp, path)
 
 
@@ -153,7 +161,7 @@ def read_text_file(path: str) -> str:
 def write_text_file(path: str, text: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    with open(tmp, "w", encoding="utf-8", errors="replace") as f:
         f.write(text)
     os.replace(tmp, path)
 
@@ -340,6 +348,11 @@ def looks_disallowed_for_weblearn(topic: str) -> Tuple[bool, str]:
     return False, ""
 
 
+def _is_http_url(s: str) -> bool:
+    ss = (s or "").strip()
+    return ss.lower().startswith("http://") or ss.lower().startswith("https://")
+
+
 def domain_from_url(url: str) -> str:
     m = re.match(r"^https?://([^/]+)", url.strip().lower())
     return m.group(1) if m else ""
@@ -417,7 +430,7 @@ def strip_html_to_text(html: str) -> str:
     return text.strip()
 
 
-def fetch_url_text(url: str) -> str:
+def fetch_url_text(url: str, timeout_sec: int = WEBLEARN_TIMEOUT_SEC, max_bytes: Optional[int] = None) -> str:
     if urllib is None:
         return ""
 
@@ -427,8 +440,13 @@ def fetch_url_text(url: str) -> str:
     }
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=WEBLEARN_TIMEOUT_SEC) as resp:
-            raw = resp.read()
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            if max_bytes is None:
+                raw = resp.read()
+            else:
+                raw = resp.read(max_bytes + 1)
+                if len(raw) > max_bytes:
+                    return ""
             try:
                 html = raw.decode("utf-8", errors="ignore")
             except Exception:
@@ -437,8 +455,6 @@ def fetch_url_text(url: str) -> str:
         return ""
 
     text = strip_html_to_text(html)
-    if len(text) > WEBLEARN_PER_SOURCE_CHAR_LIMIT:
-        text = text[:WEBLEARN_PER_SOURCE_CHAR_LIMIT]
     return text
 
 
@@ -585,6 +601,37 @@ def heuristic_structured_answer(topic: str, source_urls: List[str], source_texts
 
 def synthesize_answer(topic: str, source_texts: List[str], source_urls: List[str]) -> str:
     return heuristic_structured_answer(topic, source_urls, source_texts)
+
+
+def _guess_topic_from_url(url: str) -> str:
+    # Keep it simple and predictable: domain + last path part
+    d = domain_from_url(url)
+    try:
+        path = urllib.parse.urlparse(url).path if urllib else ""
+    except Exception:
+        path = ""
+    last = ""
+    if path:
+        parts = [p for p in path.split("/") if p]
+        if parts:
+            last = parts[-1]
+    last = re.sub(r"[\?#].*$", "", last)
+    last = re.sub(r"[^a-zA-Z0-9_\-]+", " ", last).strip()
+    if last:
+        return normalize_topic(f"{d} {last}")
+    if d:
+        return normalize_topic(d)
+    return "web_note"
+
+
+def _make_web_note_header(topic: str, url: str) -> str:
+    return (
+        f"WEB INGEST NOTE\n"
+        f"Topic: {normalize_topic(topic)}\n"
+        f"Source: {url.strip()}\n"
+        f"Fetched: {now_date()}\n"
+        f"---\n\n"
+    )
 
 
 # -------------------------
@@ -926,6 +973,49 @@ class BrainState:
                     upgraded += 1
         return upgraded, checked
 
+    # -------- web ingest (NEW) --------
+
+    def web_ingest_url(self, url: str, topic: Optional[str] = None) -> Tuple[bool, str]:
+        if urllib is None:
+            return False, "Web ingestion is unavailable (urllib missing)."
+
+        url = (url or "").strip()
+        if not _is_http_url(url):
+            return False, "Usage: /web <url>  OR  /web <topic> | <url> (must start with http:// or https://)"
+
+        t = normalize_topic(topic) if topic else ""
+        if not t:
+            t = _guess_topic_from_url(url)
+
+        # use cache if available
+        txt = get_cached_url_text(url)
+        if txt is None:
+            raw_txt = fetch_url_text(url, timeout_sec=WEBINGEST_TIMEOUT_SEC, max_bytes=WEBINGEST_MAX_BYTES)
+            if not raw_txt:
+                return False, "Could not fetch the URL (timeout/refused/too large)."
+            txt = raw_txt
+            set_cached_url_text(url, txt)
+
+        txt = (txt or "").strip()
+        if len(txt) < WEBINGEST_MIN_TEXT_CHARS:
+            return False, "Page fetched, but it did not contain enough readable text to save."
+
+        # final cap
+        if len(txt) > WEBINGEST_TEXT_LIMIT:
+            txt = txt[:WEBINGEST_TEXT_LIMIT]
+
+        note_path = os.path.join(RESEARCH_NOTES_DIR, topic_to_notes_filename(t))
+        out = _make_web_note_header(t, url) + txt.strip() + "\n"
+        write_text_file(note_path, out)
+
+        # queue the topic so your normal pipeline can promote/learn it
+        self.queue_topic(t, reason=f"Web ingested source note ({domain_from_url(url)})", confidence=0.35)
+
+        # record sources for /sources command too
+        self.last_web_sources = [url]
+
+        return True, f"Saved web note to: data/research_notes/{os.path.basename(note_path)} and queued topic: {t}"
+
     # -------- web learn --------
 
     def weblearn_topic(self, topic: str) -> Tuple[bool, str]:
@@ -966,6 +1056,8 @@ class BrainState:
             if cached is None:
                 txt = fetch_url_text(u)
                 if txt:
+                    if len(txt) > WEBLEARN_PER_SOURCE_CHAR_LIMIT:
+                        txt = txt[:WEBLEARN_PER_SOURCE_CHAR_LIMIT]
                     set_cached_url_text(u, txt)
                 time.sleep(WEBLEARN_SLEEP_BETWEEN_FETCH_SEC)
             else:
@@ -974,6 +1066,9 @@ class BrainState:
             txt = (txt or "").strip()
             if len(txt) < 400:
                 continue
+
+            if len(txt) > WEBLEARN_PER_SOURCE_CHAR_LIMIT:
+                txt = txt[:WEBLEARN_PER_SOURCE_CHAR_LIMIT]
 
             texts.append(txt)
             used.append(u)
@@ -1273,6 +1368,9 @@ Commands:
   /clearpending
   /promote <topic>
 
+  /web <url>
+  /web <topic> | <url>
+
   /weblearn <topic>
   /webqueue
   /sources
@@ -1293,6 +1391,7 @@ Commands:
 Notes:
 - Terminal-like inputs are ignored by alias and queue logic.
 - /weblearn uses web search plus local synthesis only.
+- /web saves a direct URL as a research note and queues the topic.
 """.strip()
 
 
@@ -1465,6 +1564,23 @@ def main():
                     continue
                 changed = state.promote_if_present(topic)
                 safe_print("Promoted." if changed else "No matching queue item found.")
+                continue
+
+            if cmdline.startswith("/web "):
+                rest = cmdline[len("/web "):].strip()
+                if not rest:
+                    safe_print("Usage: /web <url>  OR  /web <topic> | <url>")
+                    continue
+                left, right = parse_pipe_args(rest)
+                # if no pipe: left is the url
+                if right:
+                    topic = left
+                    url = right
+                else:
+                    topic = ""
+                    url = left
+                ok, msg = state.web_ingest_url(url, topic=topic if topic else None)
+                safe_print(msg)
                 continue
 
             if cmdline.startswith("/confidence "):
