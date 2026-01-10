@@ -1024,6 +1024,29 @@ def choose_preferred_source(candidates: List[Dict[str, str]]) -> Optional[Dict[s
             return c2
     return best
 
+def choose_preferred_source_excluding(candidates: List[Dict[str, str]], avoid_domains: List[str]) -> Optional[Dict[str, str]]:
+    """
+    Phase 5.1: multi-source reinforcement helper
+    Prefer the best source, but if we already have a domain, try to pick a different one.
+    """
+    avoid = set([(d or "").lower().strip() for d in (avoid_domains or []) if (d or "").strip()])
+    if not candidates:
+        return None
+
+    filtered = []
+    for c in candidates:
+        url = (c.get("url") or "").strip()
+        if not url:
+            continue
+        d = get_domain(url)
+        if d and d.lower() in avoid:
+            continue
+        filtered.append(c)
+
+    # If filtering removed everything, fall back to normal behavior
+    return choose_preferred_source(filtered if filtered else candidates)
+
+
 def fetch_page_text(url: str, max_chars: int = 12000) -> Tuple[bool, str]:
     code, body = http_get(url)
     if code != 200 or not body:
@@ -1255,7 +1278,9 @@ def expand_topic_if_needed(topic: str) -> List[str]:
         return []
     return expansions[:MAX_EXPANSIONS_PER_TRIGGER]
 
-def web_learn_topic(topic: str, forced_url: str = "") -> Tuple[bool, str, List[str], str]:
+def web_learn_topic(topic: str, forced_url: str = "", avoid_domains: Optional[List[str]] = None) -> Tuple[bool, str, List[str], str]:
+    avoid_domains = avoid_domains or []
+
     sources: List[str] = []
     chosen_url = ""
 
@@ -1269,7 +1294,7 @@ def web_learn_topic(topic: str, forced_url: str = "") -> Tuple[bool, str, List[s
 
     cands = ddg_html_results(topic, max_results=6)
     if cands:
-        best = choose_preferred_source(cands)
+        best = choose_preferred_source_excluding(cands, avoid_domains)
         if best:
             chosen_url = best.get("url", "")
             ok, txt = fetch_page_text(chosen_url)
@@ -1283,7 +1308,7 @@ def web_learn_topic(topic: str, forced_url: str = "") -> Tuple[bool, str, List[s
 
     cands2 = ddg_lite_results(topic, max_results=6)
     if cands2:
-        best = choose_preferred_source(cands2)
+        best = choose_preferred_source_excluding(cands2, avoid_domains)
         if best:
             chosen_url = best.get("url", "")
             ok, txt = fetch_page_text(chosen_url)
@@ -1551,7 +1576,15 @@ def run_webqueue(limit: int = 3, autoupgrade: bool = True) -> Dict[str, Any]:
         safe_log(WEBQUEUE_LOG, f"webqueue: attempt {item['attempts']}/{item.get('max_attempts',DEFAULT_MAX_QUEUE_ATTEMPTS)} topic='{topic}'")
 
         forced = (item.get("source_url") or "").strip()
-        ok2, answer, sources, chosen_url = web_learn_topic(topic, forced_url=forced)
+                # Phase 5.1: avoid re-learning from the same domain if we already have it stored
+        avoid = []
+        if isinstance(existing, dict):
+            for d in (existing.get("evidence_domains") or []):
+                if d and d not in avoid:
+                    avoid.append(d)
+
+        ok2, answer, sources, chosen_url = web_learn_topic(topic, forced_url=forced, avoid_domains=avoid)
+
         if not ok2:
             item["status"] = "failed"
             item["fail_reason"] = "web_fetch_failed"
@@ -2509,7 +2542,26 @@ def cmd_weblearn(arg: str) -> None:
         print(f"Refusing (junk topic): {why}")
         return
 
-    ok, answer, sources, _chosen_url = web_learn_topic(topic)
+    # Phase 5.1: if we already have a source domain, try to learn from a different domain next time
+    k0 = load_knowledge()
+    e0 = k0.get(topic)
+    avoid = []
+    if isinstance(e0, dict):
+        for d in (e0.get("evidence_domains") or []):
+            if d and d not in avoid:
+                avoid.append(d)
+
+    ok, answer, sources, _chosen_url = web_learn_topic(topic, avoid_domains=avoid)
+
+    # Phase 5.1: merge sources with existing
+    if isinstance(e0, dict):
+        existing_sources = e0.get("sources") or []
+        merged = []
+        for s in existing_sources + (sources or []):
+            s2 = (s or "").strip()
+            if s2 and s2 not in merged:
+                merged.append(s2)
+        sources = merged
     if not ok:
         print(answer)
         return
