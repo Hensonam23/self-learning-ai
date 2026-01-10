@@ -640,29 +640,24 @@ def ensure_entry_shape(entry: Dict[str, Any]) -> Dict[str, Any]:
     return entry
 
 def set_knowledge(topic: str, answer: str, confidence: float, sources: Optional[List[str]] = None,
-                  notes: str = "", taught_by_user: bool = False, _merge_evidence: Optional[Dict[str, Any]] = None) -> None:
+                  notes: str = "", taught_by_user: bool = False,
+                  _merge_evidence: Optional[Dict[str, Any]] = None) -> None:
     """
-    Phase 5.1: confidence weighting + gating
+    Phase 5.1.2: confidence curve tuning (Learning Quality & Trust)
 
-    HARD RULE:
-      Confidence only increases when:
-        - user_confirmed == True, OR
-        - we have >= 2 independent source domains
-
-    Notes:
-      - We still store evidence (domains/buckets) every time.
-      - We still increment reinforcement (for stats), but reinforcement alone does NOT raise confidence.
-      - We never lower confidence automatically.
-      - We never auto-adjust user-taught entries.
+    Hard rules:
+    - Never lowers confidence automatically.
+    - Confidence should only increase when:
+        (A) user confirms (/confirm), OR
+        (B) 2+ independent domains support the topic.
+    - More independent domains can keep increasing confidence (2 sources, 3 sources, 4 sources...).
     """
-    _ = _merge_evidence  # compatibility (ignored for now)
-
     topic_n = normalize_topic(topic)
     if not topic_n:
         return
 
-    def bucket_for_url(url: str) -> str:
-        d = get_domain(url)
+    def bucket_for_domain(domain: str) -> str:
+        d = (domain or "").lower().strip()
         if not d:
             return "other"
         if ("rfc-editor.org" in d) or ("ietf.org" in d):
@@ -675,133 +670,137 @@ def set_knowledge(topic: str, answer: str, confidence: float, sources: Optional[
             return "vendor"
         return "other"
 
-    def evidence_from_sources(srcs: List[str]) -> Tuple[List[str], Dict[str, int]]:
-        domains: List[str] = []
-        buckets: Dict[str, int] = {}
+    def domains_from_sources(srcs: List[str]) -> List[str]:
+        out: List[str] = []
         seen = set()
-
         for s in (srcs or []):
-            s2 = (s or "").strip()
-            if not s2:
+            u = (s or "").strip()
+            if not u:
                 continue
-
-            url = s2
-            m = re.search(r"(https?://\S+)", s2)
-            if m:
-                url = m.group(1).strip()
-
-            d = get_domain(url)
-            if d and d not in seen:
+            d = get_domain(u)
+            if not d:
+                continue
+            d = d.lower().strip()
+            if d not in seen:
                 seen.add(d)
-                domains.append(d)
+                out.append(d)
+        return out
 
-            b = bucket_for_url(url)
-            buckets[b] = buckets.get(b, 0) + 1
-
-        return domains, buckets
-
-    def authority_score(buckets: Dict[str, int]) -> float:
-        # smaller authority influence now (because multi-domain is the real gate)
-        weights = {
-            "rfc": 0.12,
-            "gov_edu": 0.08,
-            "vendor": 0.05,
-            "other": 0.04,
-            "wiki": 0.01,
-        }
-        best = 0.0
-        kinds = 0
-        for k, n in (buckets or {}).items():
-            if n <= 0:
+    def bucket_counts(domains: List[str]) -> Dict[str, int]:
+        b: Dict[str, int] = {}
+        seen = set()
+        for d in (domains or []):
+            dd = (d or "").lower().strip()
+            if not dd or dd in seen:
                 continue
-            kinds += 1
-            best = max(best, weights.get(k, 0.03))
-        diversity_bonus = min(0.03, max(0, kinds - 1) * 0.01)
-        return best + diversity_bonus
+            seen.add(dd)
+            bk = bucket_for_domain(dd)
+            b[bk] = b.get(bk, 0) + 1
+        return b
 
-    def cap_for_domain_count(n: int) -> float:
-        if n >= 5:
-            return 0.92
-        if n == 4:
-            return 0.88
-        if n == 3:
-            return 0.82
-        if n == 2:
-            return 0.75
-        return 0.60  # with 1 domain, do not auto-raise above existing (gate prevents raise)
-
+    # --- load existing
     k = load_knowledge()
     entry = ensure_entry_shape(k.get(topic_n, {}))
 
-    # store core fields
+    existing_conf = float(entry.get("confidence", 0.0))
+
+    # Merge sources (unique)
+    merged_sources: List[str] = []
+    for s in (entry.get("sources") or []) + (sources or []):
+        s2 = (s or "").strip()
+        if s2 and s2 not in merged_sources:
+            merged_sources.append(s2)
+
+    # Evidence (domains + bucket counts) based on merged_sources
+    domains = domains_from_sources(merged_sources)
+    buckets = bucket_counts(domains)
+
+    # If caller provided evidence to merge, merge it gently (do not duplicate)
+    if isinstance(_merge_evidence, dict):
+        try:
+            extra_domains = _merge_evidence.get("domains") or _merge_evidence.get("evidence_domains") or []
+            for d in (extra_domains or []):
+                d2 = (d or "").strip().lower()
+                if d2 and d2 not in domains:
+                    domains.append(d2)
+            buckets = bucket_counts(domains)
+        except Exception:
+            pass
+
+    # Reinforcement bookkeeping (track, but does NOT raise confidence by itself)
+    reinf = entry.get("reinforcement")
+    if not isinstance(reinf, dict):
+        reinf = {"count": 0, "last": ""}
+    if not taught_by_user:
+        reinf["count"] = int(reinf.get("count") or 0) + 1
+        reinf["last"] = iso_now()
+
+    # Confirm bookkeeping (used to raise confidence)
+    confirmed = entry.get("confirmed")
+    if not isinstance(confirmed, dict):
+        confirmed = {"count": 0, "last": ""}
+
+    # --- confidence curve
+    # Hard gate: only allow raises if user confirmed OR 2+ independent domains exist
+    domain_count = len(domains)
+    confirm_count = int(confirmed.get("count") or 0)
+
+    # Base floor (we will never go below existing_conf)
+    new_conf = max(existing_conf, float(confidence))
+
+    # cap without user confirmation
+    cap_no_confirm = 0.92
+    cap_with_confirm = 0.99
+
+    can_raise_by_domains = (domain_count >= 2)
+    can_raise_by_user = (confirm_count >= 1)
+
+    if (not can_raise_by_domains) and (not can_raise_by_user):
+        # gate closed: do not raise beyond existing_conf (ignore incoming confidence bumps)
+        new_conf = existing_conf
+
+    else:
+        # gate open: compute a target based on domain_count + authority buckets
+        # Base target starts at max(existing_conf, 0.55) so 2-source topics don't stay stuck at 0.45
+        target = max(existing_conf, 0.55)
+
+        # each additional independent domain adds a smaller bump (diminishing returns)
+        # 2 domains: +0.10, 3: +0.16, 4: +0.20, 5+: +0.23...
+        bumps = [0.00, 0.10, 0.16, 0.20, 0.23, 0.25]
+        idx = domain_count if domain_count < len(bumps) else (len(bumps) - 1)
+        target += bumps[idx]
+
+        # authority bonuses (small but meaningful)
+        if buckets.get("rfc", 0) >= 1:
+            target += 0.04
+        if buckets.get("gov_edu", 0) >= 1:
+            target += 0.03
+        if buckets.get("vendor", 0) >= 1:
+            target += 0.01
+        # wiki never adds bonus (it can still be part of "2 domains" proof)
+
+        # user confirmation gives a direct bump (stackable per confirm)
+        if can_raise_by_user:
+            target += min(0.05 * confirm_count, 0.20)
+
+        # cap selection
+        cap = cap_with_confirm if can_raise_by_user else cap_no_confirm
+        target = min(target, cap)
+
+        # never lower
+        new_conf = max(existing_conf, target)
+
+    # --- write fields
     entry["answer"] = (answer or "").strip()
+    entry["confidence"] = float(new_conf)
     entry["updated"] = iso_now()
     entry["notes"] = notes or entry.get("notes", "")
     entry["taught_by_user"] = bool(taught_by_user) or bool(entry.get("taught_by_user", False))
-
-    if sources is not None:
-        entry["sources"] = sources
-
-    # ensure reinforcement exists
-    if "reinforcement" not in entry or not isinstance(entry.get("reinforcement"), dict):
-        entry["reinforcement"] = {"count": 0, "last": entry["updated"]}
-
-    # compute evidence snapshots
-    domains: List[str] = []
-    buckets: Dict[str, int] = {}
-    try:
-        domains, buckets = evidence_from_sources(entry.get("sources") or [])
-        entry["evidence_domains"] = domains
-        entry["evidence_buckets"] = buckets
-    except Exception:
-        entry["evidence_domains"] = entry.get("evidence_domains") or []
-        entry["evidence_buckets"] = entry.get("evidence_buckets") or {}
-
-    # user-taught: do not auto-adjust (respect explicit confidence)
-    if entry["taught_by_user"]:
-        entry["confidence"] = float(confidence)
-        k[topic_n] = entry
-        save_knowledge(k)
-        return
-
-    # increment reinforcement (stats only)
-    try:
-        reinf = entry.get("reinforcement") or {}
-        rc = int(reinf.get("count") or 0) + 1
-        reinf["count"] = rc
-        reinf["last"] = entry["updated"]
-        entry["reinforcement"] = reinf
-    except Exception:
-        pass
-
-    prev = float(entry.get("confidence", 0.0))
-    seed = float(confidence)
-
-    # GATE: only allow raising confidence when user confirmed OR 2+ independent domains
-    user_ok = bool(entry.get("user_confirmed", False))
-    dom_ok = (len(domains) >= 2)
-
-    if not (user_ok or dom_ok):
-        # no auto-raise; still never lower
-        entry["confidence"] = max(prev, seed if seed < prev else prev)
-        k[topic_n] = entry
-        save_knowledge(k)
-        return
-
-    # Allowed to raise: compute a bounded increase
-    dom_boost = min(0.18, max(0, len(domains) - 1) * 0.08)
-    auth_boost = authority_score(buckets)
-    base = max(0.35, seed)
-
-    proposed = base + dom_boost + auth_boost
-    cap = cap_for_domain_count(len(domains))
-    proposed = min(cap, proposed)
-
-    # user_confirmed gets a small extra allowance inside the cap
-    if user_ok:
-        proposed = min(0.92, max(proposed, min(cap, prev + 0.05)))
-
-    entry["confidence"] = max(prev, seed, proposed)
+    entry["sources"] = merged_sources
+    entry["evidence_domains"] = domains
+    entry["evidence_buckets"] = buckets
+    entry["reinforcement"] = reinf
+    entry["confirmed"] = confirmed
 
     k[topic_n] = entry
     save_knowledge(k)
@@ -2374,33 +2373,46 @@ def cmd_confidence(arg: str) -> None:
 
 
 def cmd_confirm(arg: str) -> None:
+    """
+    Phase 5.1.2: user confirmation raises confidence.
+    Each /confirm adds a small bump (stackable) and records confirmation metadata.
+    """
     topic = normalize_topic(arg.replace("/confirm", "", 1).strip())
     if not topic:
         print("Usage: /confirm <topic>")
         return
+
     aliases = load_aliases()
     resolved = resolve_topic(topic, aliases)
 
     k = load_knowledge()
     entry = k.get(resolved)
     if not isinstance(entry, dict):
-        print("No entry yet for that topic.")
+        print("No entry yet for that topic. Teach it or /weblearn it first.")
         return
+
     entry = ensure_entry_shape(entry)
 
-    # mark user confirmation (does not overwrite answer)
-    entry["user_confirmed"] = True
-    entry["confirmed_on"] = iso_now()
+    confirmed = entry.get("confirmed")
+    if not isinstance(confirmed, dict):
+        confirmed = {"count": 0, "last": ""}
 
-    # safe bump: only upward, capped
-    prev = float(entry.get("confidence", 0.0))
-    bump = 0.05
-    entry["confidence"] = min(0.92, max(prev, prev + bump, 0.60))
+    confirmed["count"] = int(confirmed.get("count") or 0) + 1
+    confirmed["last"] = iso_now()
+    entry["confirmed"] = confirmed
+
+    # bump confidence: +0.05 per confirm, capped
+    conf0 = float(entry.get("confidence", 0.0))
+    conf1 = min(conf0 + 0.05, 0.99)
+    entry["confidence"] = max(conf0, conf1)
     entry["updated"] = iso_now()
 
+    # save
     k[resolved] = entry
     save_knowledge(k)
-    print(f"Confirmed '{resolved}'. Confidence is now {entry['confidence']}.")
+
+    print(f"Confirmed '{resolved}'. confidence: {conf0:.2f} -> {entry['confidence']:.2f} (confirm count={confirmed['count']})")
+
 
 def cmd_lowest(arg: str) -> None:
     n_str = arg.replace("/lowest", "", 1).strip()
