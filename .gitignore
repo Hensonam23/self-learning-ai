@@ -52,3 +52,4 @@ llama.cpp/
 
 # local backups
 brain.py.bak_*
+brain.py.bak.*
