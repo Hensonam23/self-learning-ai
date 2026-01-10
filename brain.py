@@ -2711,6 +2711,8 @@ def main() -> None:
                 cmd_confidence(user); continue
             if user.startswith("/confirm"):
                 cmd_confirm(user); continue
+            if user.startswith("/confirm"):
+                cmd_confirm(user); continue
             if user.startswith("/lowest"):
                 cmd_lowest(user); continue
             if user.startswith("/alias "):
