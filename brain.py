@@ -5,6 +5,7 @@
 # Phase 2: structured synthesis + source ranking + topic expansion + /weburl
 # Phase 3: /merge /dedupe /prune (safe) + /selftest
 # Phase 4: controlled autonomy (daily + weekly) with guardrails
+# Phase 5.1: evidence-weighted confidence (authority + independent sources + reinforcement)
 
 import os
 import re
@@ -100,7 +101,6 @@ AUTONOMY_DEFAULTS: Dict[str, Any] = {
     "last_weekly_ymd": "",
 
     # Themes (simple, stable)
-    # These are "seed topics" lists; autonomy rotates per day-of-week and weekly deep dive.
     "daily_themes": {
         "mon": ["osi model", "tcp vs udp", "encapsulation"],
         "tue": ["subnetting", "cidr", "vlsm"],
@@ -111,13 +111,43 @@ AUTONOMY_DEFAULTS: Dict[str, Any] = {
         "sun": ["ipv6 basics", "icmp", "arp"],
     },
     "weekly_themes": [
-        # weekly “deep dive” buckets (run chooses one bucket that’s least covered)
         ["rfc 1918", "rfc 6890", "ipv4 address space", "nat"],
         ["tls basics", "https", "certificates", "public key cryptography"],
         ["bgp basics", "as number", "route selection", "prefix"],
         ["tcp congestion control", "three-way handshake", "window size", "retransmission"],
     ],
 }
+
+# -----------------------------
+# Phase 5.1: Evidence-weighted confidence
+# -----------------------------
+# NOTE: This does NOT rewrite answers. Only changes how confidence is earned.
+
+CONF_FLOOR_UNKNOWN = 0.35
+CONF_FLOOR_LEARNED = 0.45
+CONF_CAP_NONUSER = 0.88
+
+# Buckets are simple, stable categories.
+# Values are "confidence bonus potential" per unique bucket encountered.
+AUTH_BUCKET_BONUS: Dict[str, float] = {
+    "rfc": 0.25,         # rfc-editor.org, ietf.org
+    "nist": 0.22,        # nist.gov
+    "standards": 0.20,   # w3.org, ieee, iso, etc.
+    "gov": 0.18,         # other .gov
+    "edu": 0.15,         # .edu
+    "vendor": 0.10,      # docs/support/developer KBs
+    "other": 0.06,       # reputable-ish general web
+    "wiki": 0.03,        # wikipedia (allowed but small)
+}
+
+REINFORCE_DAYS = 7
+REINFORCE_BONUS_PER_HIT = 0.02
+REINFORCE_BONUS_CAP = 0.10
+
+INDEPENDENT_DOMAIN_BONUS_PER_EXTRA = 0.03
+INDEPENDENT_DOMAIN_BONUS_CAP = 0.12
+
+HIGH_AUTH_BUCKETS = {"rfc", "nist", "standards", "gov", "edu"}
 
 # -----------------------------
 # Small utilities
@@ -133,7 +163,6 @@ def today_ymd() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d")
 
 def weekday_key() -> str:
-    # mon..sun
     return ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][datetime.datetime.now().weekday()]
 
 def ensure_dirs() -> None:
@@ -286,6 +315,203 @@ def get_domain(url: str) -> str:
     except Exception:
         return ""
 
+def clamp(x: float, lo: float, hi: float) -> float:
+    try:
+        x = float(x)
+    except Exception:
+        x = lo
+    if x < lo:
+        return lo
+    if x > hi:
+        return hi
+    return x
+
+def normalize_source_url(s: str) -> str:
+    s = (s or "").strip()
+    if not s:
+        return ""
+    if s.lower().startswith("wikipedia:"):
+        # stored like "Wikipedia: https://...."
+        s2 = s.split(":", 1)[1].strip()
+        return s2
+    return s
+
+def classify_source_bucket(url_or_label: str, title: str = "") -> Tuple[str, str]:
+    """
+    Returns (bucket, domain_key).
+    domain_key is what we use for "independent domain" counting.
+    """
+    raw = (url_or_label or "").strip()
+    if not raw:
+        return "other", ""
+
+    # Wikipedia stored as "Wikipedia: https://..." sometimes
+    if raw.lower().startswith("wikipedia:"):
+        u = normalize_source_url(raw)
+        d = get_domain(u) or "wikipedia.org"
+        return "wiki", d
+
+    u = normalize_source_url(raw)
+    d = get_domain(u)
+    t = (title or "").lower()
+
+    # If it's not a URL, treat it as "other"
+    if not d and not u.startswith("http"):
+        return "other", ""
+
+    # Strong standards / RFC style
+    if "rfc-editor.org" in d or "ietf.org" in d:
+        return "rfc", d
+    if "nist.gov" in d:
+        return "nist", d
+
+    # Standards orgs (simple list, stable)
+    standards_domains = [
+        "w3.org", "ieee.org", "iso.org", "itu.int", "internetsociety.org",
+        "icann.org", "iana.org",
+    ]
+    if any(sd in d for sd in standards_domains):
+        return "standards", d
+
+    if d.endswith(".gov"):
+        return "gov", d
+    if d.endswith(".edu"):
+        return "edu", d
+
+    if "wikipedia.org" in d:
+        return "wiki", d
+
+    vendor_signals = ["docs.", "support.", "developer.", "learn.", "kb."]
+    if any(v in d for v in vendor_signals) or any(v in t for v in ["documentation", "docs", "support"]):
+        return "vendor", d
+
+    return "other", d
+
+def ensure_evidence_shape(entry: Dict[str, Any]) -> Dict[str, Any]:
+    ev = entry.get("evidence")
+    if not isinstance(ev, dict):
+        ev = {}
+    if not isinstance(ev.get("domains"), dict):
+        ev["domains"] = {}
+    if not isinstance(ev.get("buckets"), dict):
+        ev["buckets"] = {}
+    if not isinstance(ev.get("reinforce_count"), int):
+        ev["reinforce_count"] = 0
+    if not isinstance(ev.get("last_reinforced"), str):
+        ev["last_reinforced"] = ""
+    entry["evidence"] = ev
+    return entry
+
+def update_evidence(entry: Dict[str, Any], sources: List[str], source_titles: Optional[List[str]] = None) -> Dict[str, Any]:
+    entry = ensure_evidence_shape(entry)
+    ev = entry["evidence"]
+    domains = ev.get("domains", {})
+    buckets = ev.get("buckets", {})
+
+    if not isinstance(sources, list):
+        sources = []
+
+    titles = source_titles if isinstance(source_titles, list) else []
+    while len(titles) < len(sources):
+        titles.append("")
+
+    for i, s in enumerate(sources):
+        url = normalize_source_url(s)
+        bucket, domain = classify_source_bucket(s, titles[i] if i < len(titles) else "")
+        if domain:
+            if domain not in domains or not isinstance(domains.get(domain), dict):
+                domains[domain] = {"count": 0, "bucket": bucket}
+            domains[domain]["count"] = int(domains[domain].get("count") or 0) + 1
+            # keep the strongest bucket seen for this domain
+            prev_b = domains[domain].get("bucket") or "other"
+            if AUTH_BUCKET_BONUS.get(bucket, 0.0) > AUTH_BUCKET_BONUS.get(prev_b, 0.0):
+                domains[domain]["bucket"] = bucket
+
+        buckets[bucket] = int(buckets.get(bucket) or 0) + 1
+
+    ev["domains"] = domains
+    ev["buckets"] = buckets
+    entry["evidence"] = ev
+    return entry
+
+def compute_weighted_confidence(existing_entry: Dict[str, Any], base_floor: float, sources: List[str]) -> Tuple[float, Dict[str, Any]]:
+    """
+    Evidence-based confidence:
+      - authority buckets contribute once each (not per hit)
+      - independent domains contribute small bonus
+      - reinforcement over time (>=7 days) adds tiny bump
+      - never decreases confidence
+    """
+    entry = ensure_entry_shape(existing_entry)
+    entry = ensure_evidence_shape(entry)
+
+    taught_by_user = bool(entry.get("taught_by_user", False))
+    existing_conf = float(entry.get("confidence", 0.0) or 0.0)
+
+    # User-taught stays user-taught; we do not mess with its confidence here.
+    if taught_by_user:
+        return clamp(existing_conf, 0.0, 1.0), entry
+
+    # Update evidence based on new sources
+    entry = update_evidence(entry, sources)
+    ev = entry.get("evidence", {})
+    domains = ev.get("domains", {}) if isinstance(ev.get("domains"), dict) else {}
+    buckets = ev.get("buckets", {}) if isinstance(ev.get("buckets"), dict) else {}
+
+    # Authority bonus: count each bucket once (presence-based)
+    authority_bonus = 0.0
+    for b, bonus in AUTH_BUCKET_BONUS.items():
+        if int(buckets.get(b) or 0) > 0:
+            authority_bonus += float(bonus)
+
+    # Independent domain bonus
+    domain_count = len([d for d in domains.keys() if d])
+    indep_bonus = 0.0
+    if domain_count > 1:
+        indep_bonus = min(INDEPENDENT_DOMAIN_BONUS_CAP, INDEPENDENT_DOMAIN_BONUS_PER_EXTRA * float(domain_count - 1))
+
+    # High-authority independent confirmations multiplier
+    high_auth_domains = 0
+    for d, meta in domains.items():
+        if not isinstance(meta, dict):
+            continue
+        b = (meta.get("bucket") or "other").strip()
+        if b in HIGH_AUTH_BUCKETS:
+            high_auth_domains += 1
+    mult = 1.0
+    if high_auth_domains >= 2:
+        mult = 1.12
+    elif high_auth_domains == 1:
+        mult = 1.06
+
+    # Reinforcement over time (only if re-learned after a gap)
+    last_ref = (ev.get("last_reinforced") or "").strip()
+    last_ts = parse_iso_to_ts(last_ref) if last_ref else None
+    reinforce_bonus = 0.0
+    if last_ts is None:
+        # first time we start tracking
+        ev["last_reinforced"] = iso_now()
+    else:
+        days = (now_ts() - int(last_ts)) / float(24 * 3600)
+        if days >= float(REINFORCE_DAYS):
+            ev["reinforce_count"] = int(ev.get("reinforce_count") or 0) + 1
+            ev["last_reinforced"] = iso_now()
+
+    reinforce_hits = int(ev.get("reinforce_count") or 0)
+    if reinforce_hits > 0:
+        reinforce_bonus = min(REINFORCE_BONUS_CAP, REINFORCE_BONUS_PER_HIT * float(reinforce_hits))
+
+    # Combine
+    floor = max(float(base_floor), CONF_FLOOR_UNKNOWN)
+    raw = max(existing_conf, floor) + authority_bonus + indep_bonus + reinforce_bonus
+    raw = raw * mult
+
+    # Clamp & never decrease
+    new_conf = clamp(max(existing_conf, raw), CONF_FLOOR_UNKNOWN, CONF_CAP_NONUSER)
+
+    entry["evidence"] = ev
+    return new_conf, entry
+
 # -----------------------------
 # Persistent stores
 # -----------------------------
@@ -355,11 +581,9 @@ def load_autonomy() -> Dict[str, Any]:
     cfg = read_json(AUTONOMY_PATH, {})
     if not isinstance(cfg, dict):
         cfg = {}
-    # merge defaults
     merged = json.loads(json.dumps(AUTONOMY_DEFAULTS))
     for k, v in cfg.items():
         merged[k] = v
-    # also merge nested daily_themes if partially present
     if isinstance(cfg.get("daily_themes"), dict):
         merged_dt = dict(AUTONOMY_DEFAULTS["daily_themes"])
         merged_dt.update(cfg["daily_themes"])
@@ -410,10 +634,13 @@ def ensure_entry_shape(entry: Dict[str, Any]) -> Dict[str, Any]:
         entry["updated"] = iso_now()
     if "taught_by_user" not in entry:
         entry["taught_by_user"] = False
+    # Phase 5.1 evidence is optional; only created when we learn from sources.
+    if "evidence" in entry:
+        entry = ensure_evidence_shape(entry)
     return entry
 
 def set_knowledge(topic: str, answer: str, confidence: float, sources: Optional[List[str]] = None,
-                  notes: str = "", taught_by_user: bool = False) -> None:
+                  notes: str = "", taught_by_user: bool = False, _merge_evidence: Optional[Dict[str, Any]] = None) -> None:
     topic_n = normalize_topic(topic)
     if not topic_n:
         return
@@ -426,6 +653,12 @@ def set_knowledge(topic: str, answer: str, confidence: float, sources: Optional[
     entry["taught_by_user"] = bool(taught_by_user) or bool(entry.get("taught_by_user", False))
     if sources is not None:
         entry["sources"] = sources
+
+    # Phase 5.1: allow caller to pass updated evidence object without breaking old entries
+    if isinstance(_merge_evidence, dict):
+        entry = ensure_evidence_shape(entry)
+        entry["evidence"] = _merge_evidence
+
     k[topic_n] = entry
     save_knowledge(k)
 
@@ -503,26 +736,15 @@ def wiki_summary(title: str) -> Optional[Tuple[str, str]]:
     return None
 
 def clean_ddg_link(link: str) -> str:
-    """
-    DDG HTML results often return redirect links like:
-      //duckduckgo.com/l/?uddg=<encoded_url>&amp;rut=...
-    This converts them into a real https:// URL and extracts the uddg target if present.
-    """
     link = (link or "").strip()
     if not link:
         return ""
-
-    # Fix scheme-less URLs like //duckduckgo.com/...
     if link.startswith("//"):
         link = "https:" + link
-
-    # Unescape HTML entities (&amp; -> &)
     try:
         link = html_lib.unescape(link)
     except Exception:
         link = link.replace("&amp;", "&")
-
-    # If it's a DDG redirect, extract the real target from uddg=
     try:
         if "duckduckgo.com/l/?" in link and "uddg=" in link and urllib is not None:
             p = urllib.parse.urlparse(link)
@@ -535,7 +757,6 @@ def clean_ddg_link(link: str) -> str:
                 return target
     except Exception:
         pass
-
     return link
 
 def ddg_html_results(query: str, max_results: int = 5) -> List[Dict[str, str]]:
@@ -561,38 +782,19 @@ def ddg_html_results(query: str, max_results: int = 5) -> List[Dict[str, str]]:
         out[i]["snippet"] = snippets[i]
     return out
 
-def is_protocol_security_topic(topic: str) -> bool:
-    t = normalize_topic(topic)
-    keywords = [
-        "tls", "https", "ssl", "certificate", "x.509", "pkcs",
-        "public key", "crypto", "cryptography", "cipher", "handshake",
-        "oauth", "openid", "jwt"
-    ]
-    return any(k in t for k in keywords)
-
 def try_standards_first(topic: str) -> Optional[Tuple[str, str]]:
-    """
-    Try to find an RFC/IETF source first using targeted queries.
-    Returns (url,label) or None.
-    """
-    # Try RFC Editor first
     c1 = ddg_html_results(f"site:rfc-editor.org {topic}", max_results=6)
     best = choose_preferred_source(c1) if c1 else None
     if best and best.get("url"):
         return best["url"], "rfc-editor.org"
-
-    # Then IETF
     c2 = ddg_html_results(f"site:ietf.org {topic}", max_results=6)
     best = choose_preferred_source(c2) if c2 else None
     if best and best.get("url"):
         return best["url"], "ietf.org"
-
-    # Then NIST (sometimes useful for crypto background)
     c3 = ddg_html_results(f"site:nist.gov {topic}", max_results=6)
     best = choose_preferred_source(c3) if c3 else None
     if best and best.get("url"):
         return best["url"], "nist.gov"
-
     return None
 
 def ddg_lite_results(query: str, max_results: int = 5) -> List[Dict[str, str]]:
@@ -656,17 +858,9 @@ def choose_best_source(candidates: List[Dict[str, str]]) -> Optional[Dict[str, s
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored[0][1]
 
-
 def choose_preferred_source(candidates: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
-    """
-    Pick best source with strong preference for:
-      - rfc-editor.org, ietf.org
-      - .gov, .edu
-    Avoid wikipedia unless it's basically the only viable option.
-    """
     if not candidates:
         return None
-
     scored = []
     for c in candidates:
         url = (c.get("url") or "").strip()
@@ -674,26 +868,17 @@ def choose_preferred_source(candidates: List[Dict[str, str]]) -> Optional[Dict[s
         if not url:
             continue
         scored.append((source_score(url, title), c))
-
     if not scored:
         return None
-
     scored.sort(key=lambda x: x[0], reverse=True)
-
-    # If the best is wikipedia, but we have any decent non-wikipedia option, pick that instead
     best_score, best = scored[0]
     best_domain = get_domain(best.get("url", ""))
-
-    # find best non-wikipedia
     nonwiki = [(sc, c) for (sc, c) in scored if "wikipedia.org" not in get_domain(c.get("url",""))]
     if "wikipedia.org" in best_domain and nonwiki:
-        # pick the highest scoring non-wiki if it isn't terrible compared to wiki
         nonwiki.sort(key=lambda x: x[0], reverse=True)
         sc2, c2 = nonwiki[0]
-        # if within 60 points of the wiki (or higher), use non-wiki
         if sc2 >= (best_score - 60):
             return c2
-
     return best
 
 def fetch_page_text(url: str, max_chars: int = 12000) -> Tuple[bool, str]:
@@ -709,39 +894,132 @@ def fetch_page_text(url: str, max_chars: int = 12000) -> Tuple[bool, str]:
 
 def pick_definition_sentence(topic: str, text: str) -> str:
     topic_n = normalize_topic(topic)
-    sentences = re.split(r"(?<=[\.\!\?])\s+", text)
-    for s in sentences[:40]:
-        s2 = s.strip()
+
+    # RFC/standards pages often have ugly nav headers or metadata lines. We skip those.
+    def is_header_junk(s: str) -> bool:
+        s0 = (s or "").strip()
+        if not s0:
+            return True
+        low = s0.lower()
+
+        junk_signals = [
+            "status of this memo",
+            "rfc home", "text | pdf | html", "tracker", "ipr", "errata", "info page",
+            "network working group", "request for comments",
+            "obsoletes:", "updates:", "category:", "issn:", "doi:", "bcp:", "std:",
+        ]
+        if any(j in low for j in junk_signals):
+            return True
+
+        # author/affiliation-ish lines that show up early in RFC HTML
+        if re.match(r"^[a-z][a-z\-]+(\s+[a-z][a-z\-]+)?\s+(bcp|std)\s*:\s*\d+", low):
+            return True
+
+        # lots of bracket/pipe markup is usually navigation
+        if s0.count("[") >= 1 and s0.count("]") >= 1:
+            return True
+        if s0.count("|") >= 2:
+            return True
+
+        # very long "sentence" is usually scraped header/nav
+        if len(s0) > 220:
+            return True
+
+        return False
+
+    # Split loosely: RFC pages sometimes don’t have clean punctuation breaks
+    chunks = re.split(r"[\n\r]+|(?<=[\.\!\?])\s+", text)
+
+    def norm(s: str) -> str:
+        return re.sub(r"\s+", " ", (s or "")).strip()
+
+    # Pass 1: prefer actual definition phrases
+    prefer_phrases = [
+        "this document describes",
+        "this document specifies",
+        "this document defines",
+        "this memo defines",
+        "this document provides",
+        "this document discusses",
+    ]
+    for s in chunks[:180]:
+        s2 = norm(s)
         if not s2:
+            continue
+        low = s2.lower()
+        if is_header_junk(s2):
+            continue
+        if any(p in low for p in prefer_phrases):
+            return s2
+
+    # Pass 2: prefer a chunk containing the topic, but skip junk
+    for s in chunks[:180]:
+        s2 = norm(s)
+        if not s2:
+            continue
+        if is_header_junk(s2):
             continue
         if topic_n and topic_n in s2.lower():
             return s2
-    for s in sentences[:10]:
-        s2 = s.strip()
-        if s2:
-            return s2
+
+    # Pass 3: otherwise return the first clean chunk
+    for s in chunks[:120]:
+        s2 = norm(s)
+        if not s2:
+            continue
+        if is_header_junk(s2):
+            continue
+        return s2
+
     return ""
+
+
 
 def bullets_from_text(text: str, max_bullets: int = 6) -> List[str]:
     sentences = re.split(r"(?<=[\.\!\?])\s+", text)
-    bullets = []
+    bullets: List[str] = []
+    seen = set()
     for s in sentences:
         s2 = s.strip()
         if not s2:
             continue
+        key = re.sub(r"\s+", " ", s2).strip().lower()
+        if key in seen:
+            continue
         if 40 <= len(s2) <= 160:
             bullets.append(s2)
+            seen.add(key)
         if len(bullets) >= max_bullets:
             break
+
     if not bullets:
         chunk = text[:700].strip()
         if chunk:
             bullets.append(chunk)
+
     return bullets[:max_bullets]
 
 def structured_synthesis(topic: str, seed_text: str, source_url: str, source_label: str) -> str:
     definition = pick_definition_sentence(topic, seed_text)
     bullets = bullets_from_text(seed_text, max_bullets=6)
+
+    # Phase 5: avoid repeating the Definition as the first bullet
+    if definition:
+        dkey = re.sub(r"\s+", " ", definition).strip().lower()
+        bullets = [b for b in bullets if re.sub(r"\s+", " ", b).strip().lower() != dkey]
+
+    # Also drop obvious page junk lines
+    bullets = [b for b in bullets if "watch video" not in b.lower()]
+
+    # Phase 5: extra cleanup for RFC/IETF style pages (remove metadata bullets)
+    dsrc = get_domain(source_url)
+    if ("rfc-editor.org" in dsrc) or ("ietf.org" in dsrc):
+        drop = [
+            "request for comments", "network working group", "obsoletes:", "updates:",
+            "category:", "bcp:", "std:", "status of this memo",
+        ]
+        bullets = [b for b in bullets if not any(x in b.lower() for x in drop)]
+
 
     examples = []
     t = normalize_topic(topic)
@@ -838,7 +1116,6 @@ def web_learn_topic(topic: str, forced_url: str = "") -> Tuple[bool, str, List[s
     sources: List[str] = []
     chosen_url = ""
 
-    # If user provided a URL, respect it
     if forced_url:
         ok, txt = fetch_page_text(forced_url)
         if not ok:
@@ -847,11 +1124,6 @@ def web_learn_topic(topic: str, forced_url: str = "") -> Tuple[bool, str, List[s
         sources.append(forced_url)
         return True, answer, sources, forced_url
 
-    # -----------------------------
-    # FIX A: Prefer ranked web sources first (DDG), Wikipedia is fallback
-    # -----------------------------
-
-    # Try DDG HTML results first (ranked)
     cands = ddg_html_results(topic, max_results=6)
     if cands:
         best = choose_preferred_source(cands)
@@ -866,7 +1138,6 @@ def web_learn_topic(topic: str, forced_url: str = "") -> Tuple[bool, str, List[s
             sources.append(chosen_url)
             safe_log(WEBQUEUE_LOG, f"weblearn: fetch failed best_url='{chosen_url}' trying ddg_lite + wiki fallback")
 
-    # Try DDG Lite next (ranked)
     cands2 = ddg_lite_results(topic, max_results=6)
     if cands2:
         best = choose_preferred_source(cands2)
@@ -881,7 +1152,6 @@ def web_learn_topic(topic: str, forced_url: str = "") -> Tuple[bool, str, List[s
             sources.append(chosen_url)
             safe_log(WEBQUEUE_LOG, f"weblearn: fetch failed best_url='{chosen_url}' falling back to wikipedia")
 
-    # Wikipedia fallback (only after web search fails)
     wtitle = wiki_opensearch_title(topic)
     if wtitle:
         ws = wiki_summary(wtitle)
@@ -936,10 +1206,6 @@ def queue_add(topic: str, reason: str = "", confidence: float = 0.35, source_url
     q = load_queue()
     existing = queue_find_item(q, topic_n)
     if existing:
-        # -----------------------------
-        # Fix B: allow "reviving" a completed item back to pending
-        # so timers/autonomy/curiosity can deepen low-confidence topics over time.
-        # -----------------------------
         st = (existing.get("status") or "").strip().lower()
         reason_l = (reason or "").lower()
 
@@ -970,7 +1236,6 @@ def queue_add(topic: str, reason: str = "", confidence: float = 0.35, source_url
             save_queue(q)
             return True, "Re-queued for deeper learning."
 
-        # Normal behavior: keep it as-is, just fill blanks
         if reason and not existing.get("reason"):
             existing["reason"] = reason
         if source_url and not existing.get("source_url"):
@@ -1159,25 +1424,26 @@ def run_webqueue(limit: int = 3, autoupgrade: bool = True) -> Dict[str, Any]:
             existing_conf = float(existing.get("confidence", 0.0)) if isinstance(existing, dict) else 0.0
             taught_by_user = bool(existing.get("taught_by_user", False)) if isinstance(existing, dict) else False
 
-            # Hard protection: never overwrite user-taught high confidence
             if taught_by_user and existing_conf >= 0.75:
                 mark_done(item, note="Skipped upgrade: user-taught answer is high confidence.")
                 safe_log(WEBQUEUE_LOG, f"webqueue: done (skipped overwrite) topic='{topic}' taught_by_user=True conf={existing_conf}")
                 continue
 
-            # Extra Phase 4 protection: avoid overwriting any very-high-confidence entry
             if existing_conf >= protect_conf and isinstance(existing, dict) and (existing.get("answer") or "").strip():
                 mark_done(item, note=f"Skipped upgrade: existing confidence >= {protect_conf}.")
                 safe_log(WEBQUEUE_LOG, f"webqueue: done (skipped overwrite) topic='{topic}' conf={existing_conf} protect_threshold={protect_conf}")
                 continue
 
-            new_conf = max(float(item.get("current_confidence", 0.35)), 0.45)
-            note = "Upgraded knowledge using Phase 2 structured synthesis"
-            set_knowledge(topic, answer.strip(), new_conf, sources=sources, notes=note, taught_by_user=False)
+            base_floor = max(float(item.get("current_confidence", CONF_FLOOR_UNKNOWN)), CONF_FLOOR_LEARNED)
+            existing_entry = ensure_entry_shape(existing) if isinstance(existing, dict) else ensure_entry_shape({})
+            new_conf, updated_entry = compute_weighted_confidence(existing_entry, base_floor=base_floor, sources=sources)
+
+            note = "Upgraded knowledge using Phase 2 structured synthesis (Phase 5.1 weighted confidence)"
+            set_knowledge(topic, answer.strip(), new_conf, sources=sources, notes=note, taught_by_user=False, _merge_evidence=updated_entry.get("evidence"))
 
             learned += 1
             mark_done(item, note=f"{note}.")
-            safe_log(WEBQUEUE_LOG, f"webqueue: learned topic='{topic}' chosen_url='{chosen_url}' sources={sources}")
+            safe_log(WEBQUEUE_LOG, f"webqueue: learned topic='{topic}' chosen_url='{chosen_url}' conf={new_conf:.2f} sources={sources}")
 
             expansions = expand_topic_if_needed(topic)
             if expansions:
@@ -1259,7 +1525,6 @@ def autonomy_pick_weekly_bucket(cfg: Dict[str, Any]) -> List[str]:
     if not isinstance(buckets, list) or not buckets:
         return []
 
-    # Pick the bucket with the lowest “coverage” in current knowledge (simple heuristic)
     k = load_knowledge()
     best_bucket = None
     best_score = None
@@ -1273,7 +1538,6 @@ def autonomy_pick_weekly_bucket(cfg: Dict[str, Any]) -> List[str]:
         for t in bnorm:
             if t in k and isinstance(k[t], dict) and (k[t].get("answer") or "").strip():
                 covered += 1
-        # lower covered is better (we want to fill gaps)
         score = covered
         if best_score is None or score < best_score:
             best_score = score
@@ -1320,7 +1584,6 @@ def autonomy_run_daily(force: bool = False) -> Dict[str, Any]:
     limit = int(cfg.get("daily_seed_limit", 3))
     res_seed = autonomy_seed_topics(topics, reason="Autonomy daily seed", limit=limit)
 
-    # Optional small learn pass
     learn_limit = int(cfg.get("daily_autolearn_limit", 2))
     res_learn = {"learned": 0, "attempted": 0}
     if learn_limit > 0:
@@ -1338,7 +1601,6 @@ def autonomy_run_weekly(force: bool = False) -> Dict[str, Any]:
         return {"ok": False, "msg": "Autonomy is disabled."}
 
     ymd = today_ymd()
-    # weekly rule: run once per 7 days (based on last_weekly_ymd)
     last = (cfg.get("last_weekly_ymd") or "").strip()
     if (not force) and last:
         try:
@@ -1414,6 +1676,31 @@ def cmd_merge(arg: str) -> None:
         if s not in srcs:
             srcs.append(s)
     merged["sources"] = srcs
+
+    # Merge evidence safely (Phase 5.1): keep the richer one
+    ev_from = from_entry.get("evidence") if isinstance(from_entry.get("evidence"), dict) else None
+    ev_to = to_entry.get("evidence") if isinstance(to_entry.get("evidence"), dict) else None
+    if ev_from or ev_to:
+        merged = ensure_evidence_shape(merged)
+        if ev_to:
+            merged["evidence"] = ev_to
+        if ev_from:
+            merged["evidence"] = merged.get("evidence") or {}
+            # soft merge counts
+            try:
+                merged_ev = merged.get("evidence") if isinstance(merged.get("evidence"), dict) else {}
+                merged_ev.setdefault("domains", {})
+                merged_ev.setdefault("buckets", {})
+                if isinstance(ev_from.get("domains"), dict):
+                    for d, meta in ev_from["domains"].items():
+                        if d not in merged_ev["domains"]:
+                            merged_ev["domains"][d] = meta
+                if isinstance(ev_from.get("buckets"), dict):
+                    for b, n in ev_from["buckets"].items():
+                        merged_ev["buckets"][b] = int(merged_ev["buckets"].get(b) or 0) + int(n or 0)
+                merged["evidence"] = merged_ev
+            except Exception:
+                pass
 
     merged["taught_by_user"] = bool(to_entry.get("taught_by_user", False) or from_entry.get("taught_by_user", False))
     merged["updated"] = iso_now()
@@ -1598,7 +1885,6 @@ def cmd_selftest(_arg: str) -> None:
     except Exception as e:
         add("queue_cooldown", False, str(e))
 
-    # systemd user timers best-effort
     try:
         import subprocess
         def run(cmd: List[str]) -> str:
@@ -1877,7 +2163,25 @@ def cmd_confidence(arg: str) -> None:
     if not entry:
         print("No entry yet for that topic. Teach it first.")
         return
-    print(f"{resolved} confidence: {entry.get('confidence',0.0)} (updated {entry.get('updated','')})")
+    conf = float(entry.get("confidence", 0.0))
+    print(f"{resolved} confidence: {conf} (updated {entry.get('updated','')})")
+    ev = entry.get("evidence")
+    if isinstance(ev, dict):
+        domains = ev.get("domains", {})
+        buckets = ev.get("buckets", {})
+        rc = int(ev.get("reinforce_count") or 0)
+        lr = (ev.get("last_reinforced") or "").strip()
+        if isinstance(domains, dict) and domains:
+            print(f"- evidence domains: {len(domains)}")
+        if isinstance(buckets, dict) and buckets:
+            # show top buckets
+            tops = sorted([(b, int(n or 0)) for b, n in buckets.items()], key=lambda x: x[1], reverse=True)[:6]
+            if tops:
+                print("- evidence buckets:")
+                for b, n in tops:
+                    print(f"  - {b}: {n}")
+        if rc or lr:
+            print(f"- reinforcement: count={rc} last={lr}")
 
 def cmd_lowest(arg: str) -> None:
     n_str = arg.replace("/lowest", "", 1).strip()
@@ -2024,11 +2328,18 @@ def cmd_weblearn(arg: str) -> None:
         print(answer)
         return
 
-    set_knowledge(topic, answer.strip(), confidence=0.55, sources=sources, notes="Learned via /weblearn (Phase 2)", taught_by_user=False)
+    k = load_knowledge()
+    existing = k.get(topic)
+    existing_entry = ensure_entry_shape(existing) if isinstance(existing, dict) else ensure_entry_shape({})
+    base_floor = 0.55
+    new_conf, updated_entry = compute_weighted_confidence(existing_entry, base_floor=base_floor, sources=sources)
+
+    set_knowledge(topic, answer.strip(), confidence=new_conf, sources=sources, notes="Learned via /weblearn (Phase 2) (Phase 5.1 weighted confidence)", taught_by_user=False, _merge_evidence=updated_entry.get("evidence"))
     print(answer.strip())
+
     okg, _whyg = autonomy_queue_guard_ok()
     if okg:
-        queue_add(topic, reason="Learned via /weblearn (Phase 2) - deepen later", confidence=0.55)
+        queue_add(topic, reason="Learned via /weblearn (Phase 2) - deepen later", confidence=new_conf)
 
     expansions = expand_topic_if_needed(topic)
     for ex in expansions:
@@ -2052,7 +2363,13 @@ def cmd_weburl(arg: str) -> None:
         print(answer)
         return
 
-    set_knowledge(topic, answer.strip(), confidence=0.60, sources=sources, notes="Learned via /weburl (Phase 2)", taught_by_user=False)
+    k = load_knowledge()
+    existing = k.get(topic)
+    existing_entry = ensure_entry_shape(existing) if isinstance(existing, dict) else ensure_entry_shape({})
+    base_floor = 0.60
+    new_conf, updated_entry = compute_weighted_confidence(existing_entry, base_floor=base_floor, sources=sources)
+
+    set_knowledge(topic, answer.strip(), confidence=new_conf, sources=sources, notes="Learned via /weburl (Phase 2) (Phase 5.1 weighted confidence)", taught_by_user=False, _merge_evidence=updated_entry.get("evidence"))
     print(answer.strip())
 
     expansions = expand_topic_if_needed(topic)
