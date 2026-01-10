@@ -15,6 +15,7 @@ import shutil
 import signal
 import difflib
 import datetime
+import html as html_lib
 from typing import Dict, Any, List, Tuple, Optional
 
 try:
@@ -501,6 +502,42 @@ def wiki_summary(title: str) -> Optional[Tuple[str, str]]:
         return None
     return None
 
+def clean_ddg_link(link: str) -> str:
+    """
+    DDG HTML results often return redirect links like:
+      //duckduckgo.com/l/?uddg=<encoded_url>&amp;rut=...
+    This converts them into a real https:// URL and extracts the uddg target if present.
+    """
+    link = (link or "").strip()
+    if not link:
+        return ""
+
+    # Fix scheme-less URLs like //duckduckgo.com/...
+    if link.startswith("//"):
+        link = "https:" + link
+
+    # Unescape HTML entities (&amp; -> &)
+    try:
+        link = html_lib.unescape(link)
+    except Exception:
+        link = link.replace("&amp;", "&")
+
+    # If it's a DDG redirect, extract the real target from uddg=
+    try:
+        if "duckduckgo.com/l/?" in link and "uddg=" in link and urllib is not None:
+            p = urllib.parse.urlparse(link)
+            qs = urllib.parse.parse_qs(p.query)
+            if "uddg" in qs and qs["uddg"]:
+                target = qs["uddg"][0]
+                target = urllib.parse.unquote(target).strip()
+                if target.startswith("//"):
+                    target = "https:" + target
+                return target
+    except Exception:
+        pass
+
+    return link
+
 def ddg_html_results(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
     if urllib is None:
@@ -514,6 +551,7 @@ def ddg_html_results(query: str, max_results: int = 5) -> List[Dict[str, str]]:
         if len(out) >= max_results:
             break
         link = m.group(1).strip()
+        link = clean_ddg_link(link)
         title = strip_html(m.group(2))
         out.append({"title": title, "url": link, "snippet": ""})
     snippets = []
@@ -522,6 +560,40 @@ def ddg_html_results(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     for i in range(min(len(out), len(snippets))):
         out[i]["snippet"] = snippets[i]
     return out
+
+def is_protocol_security_topic(topic: str) -> bool:
+    t = normalize_topic(topic)
+    keywords = [
+        "tls", "https", "ssl", "certificate", "x.509", "pkcs",
+        "public key", "crypto", "cryptography", "cipher", "handshake",
+        "oauth", "openid", "jwt"
+    ]
+    return any(k in t for k in keywords)
+
+def try_standards_first(topic: str) -> Optional[Tuple[str, str]]:
+    """
+    Try to find an RFC/IETF source first using targeted queries.
+    Returns (url,label) or None.
+    """
+    # Try RFC Editor first
+    c1 = ddg_html_results(f"site:rfc-editor.org {topic}", max_results=6)
+    best = choose_preferred_source(c1) if c1 else None
+    if best and best.get("url"):
+        return best["url"], "rfc-editor.org"
+
+    # Then IETF
+    c2 = ddg_html_results(f"site:ietf.org {topic}", max_results=6)
+    best = choose_preferred_source(c2) if c2 else None
+    if best and best.get("url"):
+        return best["url"], "ietf.org"
+
+    # Then NIST (sometimes useful for crypto background)
+    c3 = ddg_html_results(f"site:nist.gov {topic}", max_results=6)
+    best = choose_preferred_source(c3) if c3 else None
+    if best and best.get("url"):
+        return best["url"], "nist.gov"
+
+    return None
 
 def ddg_lite_results(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
@@ -536,6 +608,7 @@ def ddg_lite_results(query: str, max_results: int = 5) -> List[Dict[str, str]]:
         if len(out) >= max_results:
             break
         link = m.group(1).strip()
+        link = clean_ddg_link(link)
         title = strip_html(m.group(2))
         if not link.startswith("http"):
             continue
@@ -555,11 +628,11 @@ def source_score(url: str, title: str = "") -> int:
     if d.endswith(".gov"):
         score += 95
     if d.endswith(".edu"):
-        score += 85
+        score += 95
     if "nist.gov" in d:
         score += 110
     if "wikipedia.org" in d:
-        score += 55
+        score += 5
     vendor_signals = ["docs.", "support.", "developer.", "learn.", "kb."]
     if any(v in d for v in vendor_signals):
         score += 25
@@ -582,6 +655,46 @@ def choose_best_source(candidates: List[Dict[str, str]]) -> Optional[Dict[str, s
         scored.append((source_score(url, title), c))
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored[0][1]
+
+
+def choose_preferred_source(candidates: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    """
+    Pick best source with strong preference for:
+      - rfc-editor.org, ietf.org
+      - .gov, .edu
+    Avoid wikipedia unless it's basically the only viable option.
+    """
+    if not candidates:
+        return None
+
+    scored = []
+    for c in candidates:
+        url = (c.get("url") or "").strip()
+        title = (c.get("title") or "").strip()
+        if not url:
+            continue
+        scored.append((source_score(url, title), c))
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    # If the best is wikipedia, but we have any decent non-wikipedia option, pick that instead
+    best_score, best = scored[0]
+    best_domain = get_domain(best.get("url", ""))
+
+    # find best non-wikipedia
+    nonwiki = [(sc, c) for (sc, c) in scored if "wikipedia.org" not in get_domain(c.get("url",""))]
+    if "wikipedia.org" in best_domain and nonwiki:
+        # pick the highest scoring non-wiki if it isn't terrible compared to wiki
+        nonwiki.sort(key=lambda x: x[0], reverse=True)
+        sc2, c2 = nonwiki[0]
+        # if within 60 points of the wiki (or higher), use non-wiki
+        if sc2 >= (best_score - 60):
+            return c2
+
+    return best
 
 def fetch_page_text(url: str, max_chars: int = 12000) -> Tuple[bool, str]:
     code, body = http_get(url)
@@ -725,6 +838,7 @@ def web_learn_topic(topic: str, forced_url: str = "") -> Tuple[bool, str, List[s
     sources: List[str] = []
     chosen_url = ""
 
+    # If user provided a URL, respect it
     if forced_url:
         ok, txt = fetch_page_text(forced_url)
         if not ok:
@@ -733,6 +847,41 @@ def web_learn_topic(topic: str, forced_url: str = "") -> Tuple[bool, str, List[s
         sources.append(forced_url)
         return True, answer, sources, forced_url
 
+    # -----------------------------
+    # FIX A: Prefer ranked web sources first (DDG), Wikipedia is fallback
+    # -----------------------------
+
+    # Try DDG HTML results first (ranked)
+    cands = ddg_html_results(topic, max_results=6)
+    if cands:
+        best = choose_preferred_source(cands)
+        if best:
+            chosen_url = best.get("url", "")
+            ok, txt = fetch_page_text(chosen_url)
+            if ok:
+                label = get_domain(chosen_url) or "Web"
+                answer = structured_synthesis(topic, txt, chosen_url, label)
+                sources.append(chosen_url)
+                return True, answer, sources, chosen_url
+            sources.append(chosen_url)
+            safe_log(WEBQUEUE_LOG, f"weblearn: fetch failed best_url='{chosen_url}' trying ddg_lite + wiki fallback")
+
+    # Try DDG Lite next (ranked)
+    cands2 = ddg_lite_results(topic, max_results=6)
+    if cands2:
+        best = choose_preferred_source(cands2)
+        if best:
+            chosen_url = best.get("url", "")
+            ok, txt = fetch_page_text(chosen_url)
+            if ok:
+                label = get_domain(chosen_url) or "Web"
+                answer = structured_synthesis(topic, txt, chosen_url, label)
+                sources.append(chosen_url)
+                return True, answer, sources, chosen_url
+            sources.append(chosen_url)
+            safe_log(WEBQUEUE_LOG, f"weblearn: fetch failed best_url='{chosen_url}' falling back to wikipedia")
+
+    # Wikipedia fallback (only after web search fails)
     wtitle = wiki_opensearch_title(topic)
     if wtitle:
         ws = wiki_summary(wtitle)
@@ -742,33 +891,6 @@ def web_learn_topic(topic: str, forced_url: str = "") -> Tuple[bool, str, List[s
             answer = structured_synthesis(topic, extract, chosen_url, "Wikipedia")
             sources.append(f"Wikipedia: {page_url}" if page_url else f"Wikipedia: {wtitle}")
             return True, answer, sources, chosen_url
-
-    cands = ddg_html_results(topic, max_results=6)
-    if cands:
-        best = choose_best_source(cands)
-        if best:
-            chosen_url = best.get("url", "")
-            ok, txt = fetch_page_text(chosen_url)
-            if ok:
-                label = get_domain(chosen_url) or "Web"
-                answer = structured_synthesis(topic, txt, chosen_url, label)
-                sources.append(chosen_url)
-                return True, answer, sources, chosen_url
-            sources.append(chosen_url)
-            safe_log(WEBQUEUE_LOG, f"weblearn: fetch failed best_url='{chosen_url}' falling back")
-
-    cands2 = ddg_lite_results(topic, max_results=6)
-    if cands2:
-        best = choose_best_source(cands2)
-        if best:
-            chosen_url = best.get("url", "")
-            ok, txt = fetch_page_text(chosen_url)
-            if ok:
-                label = get_domain(chosen_url) or "Web"
-                answer = structured_synthesis(topic, txt, chosen_url, label)
-                sources.append(chosen_url)
-                return True, answer, sources, chosen_url
-            sources.append(chosen_url)
 
     return False, "Web search returned no results or could not be fetched.", sources, ""
 
@@ -814,6 +936,41 @@ def queue_add(topic: str, reason: str = "", confidence: float = 0.35, source_url
     q = load_queue()
     existing = queue_find_item(q, topic_n)
     if existing:
+        # -----------------------------
+        # Fix B: allow "reviving" a completed item back to pending
+        # so timers/autonomy/curiosity can deepen low-confidence topics over time.
+        # -----------------------------
+        st = (existing.get("status") or "").strip().lower()
+        reason_l = (reason or "").lower()
+
+        deepen_signals = [
+            "low confidence",
+            "deepen",
+            "curiosity",
+            "autonomy",
+            "expanded from",
+            "learned via",
+            "answer exists but confidence is low",
+        ]
+        wants_deepen = any(sig in reason_l for sig in deepen_signals)
+
+        if st in ("done", "failed_final") and wants_deepen:
+            existing["status"] = "pending"
+            existing["requested_on"] = iso_now()
+            existing["current_confidence"] = float(confidence)
+            existing["attempts"] = 0
+            existing["last_attempt_ts"] = 0
+            existing["fail_reason"] = ""
+            existing["completed_on"] = ""
+            existing["worker_note"] = ""
+            if reason:
+                existing["reason"] = reason
+            if source_url:
+                existing["source_url"] = source_url
+            save_queue(q)
+            return True, "Re-queued for deeper learning."
+
+        # Normal behavior: keep it as-is, just fill blanks
         if reason and not existing.get("reason"):
             existing["reason"] = reason
         if source_url and not existing.get("source_url"):
@@ -1056,6 +1213,9 @@ def curiosity_tick(limit: int = 3) -> Dict[str, Any]:
     k = load_knowledge()
     items = []
     for topic, entry in k.items():
+        junk2, why2 = is_junk_topic(topic)
+        if junk2:
+            continue
         if not isinstance(entry, dict):
             continue
         conf = float(entry.get("confidence", 0.0))
@@ -1275,6 +1435,9 @@ def cmd_dedupe(_arg: str) -> None:
 
     bucket: Dict[str, List[str]] = {}
     for topic, entry in k.items():
+        junk2, why2 = is_junk_topic(topic)
+        if junk2:
+            continue
         if not isinstance(entry, dict):
             continue
         ans = (entry.get("answer") or "").strip()
@@ -1319,6 +1482,9 @@ def cmd_prune(arg: str) -> None:
     shadows = []
 
     for topic, entry in k.items():
+        junk2, why2 = is_junk_topic(topic)
+        if junk2:
+            continue
         if not isinstance(entry, dict):
             continue
         ans = (entry.get("answer") or "").strip()
@@ -1724,6 +1890,9 @@ def cmd_lowest(arg: str) -> None:
     k = load_knowledge()
     items = []
     for topic, entry in k.items():
+        junk2, why2 = is_junk_topic(topic)
+        if junk2:
+            continue
         if not isinstance(entry, dict):
             continue
         conf = float(entry.get("confidence", 0.0))
@@ -1856,7 +2025,7 @@ def cmd_weblearn(arg: str) -> None:
         return
 
     set_knowledge(topic, answer.strip(), confidence=0.55, sources=sources, notes="Learned via /weblearn (Phase 2)", taught_by_user=False)
-    print("Learned.")
+    print(answer.strip())
     okg, _whyg = autonomy_queue_guard_ok()
     if okg:
         queue_add(topic, reason="Learned via /weblearn (Phase 2) - deepen later", confidence=0.55)
@@ -1884,7 +2053,7 @@ def cmd_weburl(arg: str) -> None:
         return
 
     set_knowledge(topic, answer.strip(), confidence=0.60, sources=sources, notes="Learned via /weburl (Phase 2)", taught_by_user=False)
-    print("Learned.")
+    print(answer.strip())
 
     expansions = expand_topic_if_needed(topic)
     for ex in expansions:
