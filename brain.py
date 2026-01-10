@@ -642,19 +642,22 @@ def ensure_entry_shape(entry: Dict[str, Any]) -> Dict[str, Any]:
 def set_knowledge(topic: str, answer: str, confidence: float, sources: Optional[List[str]] = None,
                   notes: str = "", taught_by_user: bool = False, _merge_evidence: Optional[Dict[str, Any]] = None) -> None:
     """
-    Phase 5.1: confidence weighting
-    - Never lowers confidence automatically.
-    - Raises confidence based on:
-        - source authority (RFC/IETF > .gov/.edu > vendor docs > wiki)
-        - independent domains count
-        - reinforcement count over time (each non-user learn increments)
-    - Never changes user-taught entries except to store sources/notes.
+    Phase 5.1: confidence weighting + gating
+
+    HARD RULE:
+      Confidence only increases when:
+        - user_confirmed == True, OR
+        - we have >= 2 independent source domains
+
+    Notes:
+      - We still store evidence (domains/buckets) every time.
+      - We still increment reinforcement (for stats), but reinforcement alone does NOT raise confidence.
+      - We never lower confidence automatically.
+      - We never auto-adjust user-taught entries.
     """
+    _ = _merge_evidence  # compatibility (ignored for now)
+
     topic_n = normalize_topic(topic)
-
-    # Phase 5.1 compatibility: older callers may pass _merge_evidence (ignored for now)
-    _ = _merge_evidence
-
     if not topic_n:
         return
 
@@ -698,12 +701,13 @@ def set_knowledge(topic: str, answer: str, confidence: float, sources: Optional[
         return domains, buckets
 
     def authority_score(buckets: Dict[str, int]) -> float:
+        # smaller authority influence now (because multi-domain is the real gate)
         weights = {
-            "rfc": 0.28,
-            "gov_edu": 0.18,
-            "vendor": 0.10,
-            "other": 0.08,
-            "wiki": 0.03,
+            "rfc": 0.12,
+            "gov_edu": 0.08,
+            "vendor": 0.05,
+            "other": 0.04,
+            "wiki": 0.01,
         }
         best = 0.0
         kinds = 0
@@ -711,29 +715,25 @@ def set_knowledge(topic: str, answer: str, confidence: float, sources: Optional[
             if n <= 0:
                 continue
             kinds += 1
-            best = max(best, weights.get(k, 0.06))
-        diversity_bonus = min(0.06, max(0, kinds - 1) * 0.02)
+            best = max(best, weights.get(k, 0.03))
+        diversity_bonus = min(0.03, max(0, kinds - 1) * 0.01)
         return best + diversity_bonus
 
-    def compute_weighted_conf(seed_conf: float, domains: List[str], buckets: Dict[str, int], reinf_count: int) -> float:
-        base = max(0.35, float(seed_conf))
-
-        # more independent domains = more confidence
-        dom_boost = min(0.14, max(0, len(domains) - 1) * 0.06)
-
-        # authority boost (best bucket + tiny diversity)
-        auth_boost = authority_score(buckets)
-
-        # reinforcement over time (capped)
-        reinf_boost = min(0.10, max(0, min(reinf_count, 6)) * 0.02)
-
-        out = base + dom_boost + auth_boost + reinf_boost
-        out = min(0.92, max(base, out))
-        return out
+    def cap_for_domain_count(n: int) -> float:
+        if n >= 5:
+            return 0.92
+        if n == 4:
+            return 0.88
+        if n == 3:
+            return 0.82
+        if n == 2:
+            return 0.75
+        return 0.60  # with 1 domain, do not auto-raise above existing (gate prevents raise)
 
     k = load_knowledge()
     entry = ensure_entry_shape(k.get(topic_n, {}))
 
+    # store core fields
     entry["answer"] = (answer or "").strip()
     entry["updated"] = iso_now()
     entry["notes"] = notes or entry.get("notes", "")
@@ -742,41 +742,66 @@ def set_knowledge(topic: str, answer: str, confidence: float, sources: Optional[
     if sources is not None:
         entry["sources"] = sources
 
-    # Ensure reinforcement exists
+    # ensure reinforcement exists
     if "reinforcement" not in entry or not isinstance(entry.get("reinforcement"), dict):
         entry["reinforcement"] = {"count": 0, "last": entry["updated"]}
 
-    # Always compute evidence snapshots (safe)
+    # compute evidence snapshots
+    domains: List[str] = []
+    buckets: Dict[str, int] = {}
     try:
         domains, buckets = evidence_from_sources(entry.get("sources") or [])
         entry["evidence_domains"] = domains
         entry["evidence_buckets"] = buckets
     except Exception:
-        pass
+        entry["evidence_domains"] = entry.get("evidence_domains") or []
+        entry["evidence_buckets"] = entry.get("evidence_buckets") or {}
 
-    # User-taught: do not auto-adjust (respect the explicit confidence passed in)
+    # user-taught: do not auto-adjust (respect explicit confidence)
     if entry["taught_by_user"]:
         entry["confidence"] = float(confidence)
         k[topic_n] = entry
         save_knowledge(k)
         return
 
-    # Non-user: increment reinforcement + compute weighted confidence (never decrease)
+    # increment reinforcement (stats only)
     try:
         reinf = entry.get("reinforcement") or {}
         rc = int(reinf.get("count") or 0) + 1
         reinf["count"] = rc
         reinf["last"] = entry["updated"]
         entry["reinforcement"] = reinf
-
-        domains = entry.get("evidence_domains") or []
-        buckets = entry.get("evidence_buckets") or {}
-
-        weighted = compute_weighted_conf(float(confidence), domains, buckets, rc)
-        prev = float(entry.get("confidence", 0.0))
-        entry["confidence"] = max(prev, float(confidence), weighted)
     except Exception:
-        entry["confidence"] = max(float(entry.get("confidence", 0.0)), float(confidence))
+        pass
+
+    prev = float(entry.get("confidence", 0.0))
+    seed = float(confidence)
+
+    # GATE: only allow raising confidence when user confirmed OR 2+ independent domains
+    user_ok = bool(entry.get("user_confirmed", False))
+    dom_ok = (len(domains) >= 2)
+
+    if not (user_ok or dom_ok):
+        # no auto-raise; still never lower
+        entry["confidence"] = max(prev, seed if seed < prev else prev)
+        k[topic_n] = entry
+        save_knowledge(k)
+        return
+
+    # Allowed to raise: compute a bounded increase
+    dom_boost = min(0.18, max(0, len(domains) - 1) * 0.08)
+    auth_boost = authority_score(buckets)
+    base = max(0.35, seed)
+
+    proposed = base + dom_boost + auth_boost
+    cap = cap_for_domain_count(len(domains))
+    proposed = min(cap, proposed)
+
+    # user_confirmed gets a small extra allowance inside the cap
+    if user_ok:
+        proposed = min(0.92, max(proposed, min(cap, prev + 0.05)))
+
+    entry["confidence"] = max(prev, seed, proposed)
 
     k[topic_n] = entry
     save_knowledge(k)
@@ -2090,6 +2115,7 @@ def print_help() -> None:
 /purgejunk
 /promote
 /confidence <topic>
+/confirm <topic>
 /lowest [n]
 /alias <from> | <to>
 /aliases
@@ -2312,6 +2338,36 @@ def cmd_confidence(arg: str) -> None:
         for k, v in sorted(buckets.items(), key=lambda x: (-int(x[1]), str(x[0]))):
             print(f"  - {k}: {v}")
     print(f"- reinforcement: count={int(reinf.get('count',0) or 0)} last={reinf.get('last','')}")
+
+
+def cmd_confirm(arg: str) -> None:
+    topic = normalize_topic(arg.replace("/confirm", "", 1).strip())
+    if not topic:
+        print("Usage: /confirm <topic>")
+        return
+    aliases = load_aliases()
+    resolved = resolve_topic(topic, aliases)
+
+    k = load_knowledge()
+    entry = k.get(resolved)
+    if not isinstance(entry, dict):
+        print("No entry yet for that topic.")
+        return
+    entry = ensure_entry_shape(entry)
+
+    # mark user confirmation (does not overwrite answer)
+    entry["user_confirmed"] = True
+    entry["confirmed_on"] = iso_now()
+
+    # safe bump: only upward, capped
+    prev = float(entry.get("confidence", 0.0))
+    bump = 0.05
+    entry["confidence"] = min(0.92, max(prev, prev + bump, 0.60))
+    entry["updated"] = iso_now()
+
+    k[resolved] = entry
+    save_knowledge(k)
+    print(f"Confirmed '{resolved}'. Confidence is now {entry['confidence']}.")
 
 def cmd_lowest(arg: str) -> None:
     n_str = arg.replace("/lowest", "", 1).strip()
@@ -2653,6 +2709,8 @@ def main() -> None:
                 cmd_promote(); continue
             if user.startswith("/confidence"):
                 cmd_confidence(user); continue
+            if user.startswith("/confirm"):
+                cmd_confirm(user); continue
             if user.startswith("/lowest"):
                 cmd_lowest(user); continue
             if user.startswith("/alias "):
