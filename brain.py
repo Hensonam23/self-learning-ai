@@ -641,28 +641,146 @@ def ensure_entry_shape(entry: Dict[str, Any]) -> Dict[str, Any]:
 
 def set_knowledge(topic: str, answer: str, confidence: float, sources: Optional[List[str]] = None,
                   notes: str = "", taught_by_user: bool = False, _merge_evidence: Optional[Dict[str, Any]] = None) -> None:
+    """
+    Phase 5.1: confidence weighting
+    - Never lowers confidence automatically.
+    - Raises confidence based on:
+        - source authority (RFC/IETF > .gov/.edu > vendor docs > wiki)
+        - independent domains count
+        - reinforcement count over time (each non-user learn increments)
+    - Never changes user-taught entries except to store sources/notes.
+    """
     topic_n = normalize_topic(topic)
+
+    # Phase 5.1 compatibility: older callers may pass _merge_evidence (ignored for now)
+    _ = _merge_evidence
+
     if not topic_n:
         return
+
+    def bucket_for_url(url: str) -> str:
+        d = get_domain(url)
+        if not d:
+            return "other"
+        if ("rfc-editor.org" in d) or ("ietf.org" in d):
+            return "rfc"
+        if d.endswith(".gov") or d.endswith(".edu") or ("nist.gov" in d):
+            return "gov_edu"
+        if "wikipedia.org" in d:
+            return "wiki"
+        if any(x in d for x in ["docs.", "developer.", "support.", "learn.", "kb."]):
+            return "vendor"
+        return "other"
+
+    def evidence_from_sources(srcs: List[str]) -> Tuple[List[str], Dict[str, int]]:
+        domains: List[str] = []
+        buckets: Dict[str, int] = {}
+        seen = set()
+
+        for s in (srcs or []):
+            s2 = (s or "").strip()
+            if not s2:
+                continue
+
+            url = s2
+            m = re.search(r"(https?://\S+)", s2)
+            if m:
+                url = m.group(1).strip()
+
+            d = get_domain(url)
+            if d and d not in seen:
+                seen.add(d)
+                domains.append(d)
+
+            b = bucket_for_url(url)
+            buckets[b] = buckets.get(b, 0) + 1
+
+        return domains, buckets
+
+    def authority_score(buckets: Dict[str, int]) -> float:
+        weights = {
+            "rfc": 0.28,
+            "gov_edu": 0.18,
+            "vendor": 0.10,
+            "other": 0.08,
+            "wiki": 0.03,
+        }
+        best = 0.0
+        kinds = 0
+        for k, n in (buckets or {}).items():
+            if n <= 0:
+                continue
+            kinds += 1
+            best = max(best, weights.get(k, 0.06))
+        diversity_bonus = min(0.06, max(0, kinds - 1) * 0.02)
+        return best + diversity_bonus
+
+    def compute_weighted_conf(seed_conf: float, domains: List[str], buckets: Dict[str, int], reinf_count: int) -> float:
+        base = max(0.35, float(seed_conf))
+
+        # more independent domains = more confidence
+        dom_boost = min(0.14, max(0, len(domains) - 1) * 0.06)
+
+        # authority boost (best bucket + tiny diversity)
+        auth_boost = authority_score(buckets)
+
+        # reinforcement over time (capped)
+        reinf_boost = min(0.10, max(0, min(reinf_count, 6)) * 0.02)
+
+        out = base + dom_boost + auth_boost + reinf_boost
+        out = min(0.92, max(base, out))
+        return out
+
     k = load_knowledge()
     entry = ensure_entry_shape(k.get(topic_n, {}))
+
     entry["answer"] = (answer or "").strip()
-    entry["confidence"] = float(confidence)
     entry["updated"] = iso_now()
     entry["notes"] = notes or entry.get("notes", "")
     entry["taught_by_user"] = bool(taught_by_user) or bool(entry.get("taught_by_user", False))
+
     if sources is not None:
         entry["sources"] = sources
 
-    # Phase 5.1: allow caller to pass updated evidence object without breaking old entries
-    if isinstance(_merge_evidence, dict):
-        entry = ensure_evidence_shape(entry)
-        entry["evidence"] = _merge_evidence
+    # Ensure reinforcement exists
+    if "reinforcement" not in entry or not isinstance(entry.get("reinforcement"), dict):
+        entry["reinforcement"] = {"count": 0, "last": entry["updated"]}
+
+    # Always compute evidence snapshots (safe)
+    try:
+        domains, buckets = evidence_from_sources(entry.get("sources") or [])
+        entry["evidence_domains"] = domains
+        entry["evidence_buckets"] = buckets
+    except Exception:
+        pass
+
+    # User-taught: do not auto-adjust (respect the explicit confidence passed in)
+    if entry["taught_by_user"]:
+        entry["confidence"] = float(confidence)
+        k[topic_n] = entry
+        save_knowledge(k)
+        return
+
+    # Non-user: increment reinforcement + compute weighted confidence (never decrease)
+    try:
+        reinf = entry.get("reinforcement") or {}
+        rc = int(reinf.get("count") or 0) + 1
+        reinf["count"] = rc
+        reinf["last"] = entry["updated"]
+        entry["reinforcement"] = reinf
+
+        domains = entry.get("evidence_domains") or []
+        buckets = entry.get("evidence_buckets") or {}
+
+        weighted = compute_weighted_conf(float(confidence), domains, buckets, rc)
+        prev = float(entry.get("confidence", 0.0))
+        entry["confidence"] = max(prev, float(confidence), weighted)
+    except Exception:
+        entry["confidence"] = max(float(entry.get("confidence", 0.0)), float(confidence))
 
     k[topic_n] = entry
     save_knowledge(k)
 
-# -----------------------------
 # Web fetch/search + Phase 2 ranking
 # -----------------------------
 
@@ -2163,25 +2281,37 @@ def cmd_confidence(arg: str) -> None:
     if not entry:
         print("No entry yet for that topic. Teach it first.")
         return
-    conf = float(entry.get("confidence", 0.0))
-    print(f"{resolved} confidence: {conf} (updated {entry.get('updated','')})")
-    ev = entry.get("evidence")
-    if isinstance(ev, dict):
-        domains = ev.get("domains", {})
-        buckets = ev.get("buckets", {})
-        rc = int(ev.get("reinforce_count") or 0)
-        lr = (ev.get("last_reinforced") or "").strip()
-        if isinstance(domains, dict) and domains:
-            print(f"- evidence domains: {len(domains)}")
-        if isinstance(buckets, dict) and buckets:
-            # show top buckets
-            tops = sorted([(b, int(n or 0)) for b, n in buckets.items()], key=lambda x: x[1], reverse=True)[:6]
-            if tops:
-                print("- evidence buckets:")
-                for b, n in tops:
-                    print(f"  - {b}: {n}")
-        if rc or lr:
-            print(f"- reinforcement: count={rc} last={lr}")
+
+    print(f"{resolved} confidence: {entry.get('confidence',0.0)} (updated {entry.get('updated','')})")
+
+    # Phase 5.1: prefer the new stored fields (these are the source of truth)
+    domains = entry.get("evidence_domains")
+    buckets = entry.get("evidence_buckets")
+    reinf = entry.get("reinforcement")
+
+    # Back-compat fallback: some older entries may only have entry["evidence"]
+    if (domains is None) or (buckets is None) or (reinf is None):
+        ev = entry.get("evidence") or {}
+        if domains is None:
+            domains = ev.get("domains")
+        if buckets is None:
+            buckets = ev.get("buckets")
+        if reinf is None:
+            reinf = ev.get("reinforcement")
+
+    if not isinstance(domains, list):
+        domains = []
+    if not isinstance(buckets, dict):
+        buckets = {}
+    if not isinstance(reinf, dict):
+        reinf = {"count": 0, "last": entry.get("updated", "")}
+
+    print(f"- evidence domains: {len(domains)}")
+    if buckets:
+        print("- evidence buckets:")
+        for k, v in sorted(buckets.items(), key=lambda x: (-int(x[1]), str(x[0]))):
+            print(f"  - {k}: {v}")
+    print(f"- reinforcement: count={int(reinf.get('count',0) or 0)} last={reinf.get('last','')}")
 
 def cmd_lowest(arg: str) -> None:
     n_str = arg.replace("/lowest", "", 1).strip()
