@@ -964,33 +964,99 @@ def ddg_lite_results(query: str, max_results: int = 5) -> List[Dict[str, str]]:
 def source_score(url: str, title: str = "") -> int:
     d = get_domain(url)
     t = (title or "").lower()
+    u = (url or "").lower()
     score = 0
+
+    # Phase 5.1: hard deny list (almost always low-signal / SEO / personal publishing)
+    # Use a huge negative so it never wins.
+    hard_deny = [
+        "medium.com",
+        "blogspot.",
+        "wordpress.com",
+        "wixsite.com",
+        "weebly.com",
+    ]
+    if any(x in d for x in hard_deny):
+        return -9999
+
+    # Phase 5.1: strong preference for primary standards / official sources
     if "rfc-editor.org" in d:
-        score += 120
+        score += 160
     if "ietf.org" in d:
-        score += 100
-    if d.endswith(".gov"):
-        score += 95
-    if d.endswith(".edu"):
-        score += 95
+        score += 140
+    if "iana.org" in d:
+        score += 130
     if "nist.gov" in d:
+        score += 150
+    if d.endswith(".gov"):
         score += 110
+    if d.endswith(".edu"):
+        score += 110
+
+    # Web standards bodies / spec sources
+    if "w3.org" in d:
+        score += 135
+    if "whatwg.org" in d:
+        score += 130
+    if "ieee.org" in d:
+        score += 120
+    if "iso.org" in d:
+        score += 120
+    if "opengroup.org" in d:
+        score += 115
+
+    # Wikipedia is allowed only as fallback
     if "wikipedia.org" in d:
         score += 5
-    vendor_signals = ["docs.", "support.", "developer.", "learn.", "kb."]
-    if any(v in d for v in vendor_signals):
+
+    # Mild preference: vendor documentation portals (signal words + known vendors)
+    vendor_signals = ["docs.", "support.", "developer.", "learn.", "kb.", "/docs", "/documentation"]
+    if any(v in d for v in vendor_signals) or any(v in u for v in ["/docs", "/documentation", "/kb", "/support"]):
         score += 25
-    blog_signals = ["blog", "medium.com", "wordpress", "blogspot", "substack"]
+
+    major_vendor_domains = [
+        "cisco.com",
+        "juniper.net",
+        "microsoft.com",
+        "learn.microsoft.com",
+        "cloudflare.com",
+        "akamai.com",
+        "redhat.com",
+        "ibm.com",
+        "oracle.com",
+        "developer.apple.com",
+        "developers.google.com",
+    ]
+    if any(m in d for m in major_vendor_domains):
+        score += 20
+
     # Phase 5.1: social / login-wall domains are usually bad learning sources
-    bad_domains = ["linkedin.com", "facebook.com", "quora.com", "pinterest.com"]
+    bad_domains = ["linkedin.com", "facebook.com", "quora.com", "pinterest.com", "x.com", "twitter.com", "instagram.com", "tiktok.com"]
     if any(bd in d for bd in bad_domains):
-        score -= 120
+        score -= 140
+
+    # Blog / newsletter signals (not always wrong, but lower trust)
+    blog_signals = ["blog", "wordpress", "blogspot", "substack"]
     if any(b in d for b in blog_signals):
-        score -= 35
-    if any(w in t for w in ["opinion", "my experience", "top 10", "best", "review"]):
+        score -= 40
+
+    # SEO / content farm markers (URL)
+    seo_markers = [
+        "utm_", "ref=", "aff=", "affiliate",
+        "best-", "top-", "vs-", "review", "reviews",
+        "coupon", "promo", "discount",
+        "/tag/", "/tags/", "/category/", "/categories/",
+    ]
+    if any(m in u for m in seo_markers):
+        score -= 20
+
+    # SEO / opinion markers (title)
+    if any(w in t for w in ["opinion", "my experience", "top 10", "top ten", "best", "review", "vs "]):
         score -= 15
+
     if url.startswith("https://"):
         score += 5
+
     return score
 
 def choose_best_source(candidates: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
