@@ -2557,6 +2557,38 @@ def cmd_lowest(arg: str) -> None:
     for conf, topic in items[:n]:
         print(f"- {topic}: {conf}")
 
+
+def cmd_needsources(arg: str) -> None:
+    """
+    /needsources [n]
+    List topics with fewer than n evidence domains (default 2).
+    """
+    try:
+        n_str = arg.replace("/needsources", "", 1).strip()
+        n = int(n_str) if n_str else 2
+    except Exception:
+        n = 2
+    if n < 1:
+        n = 1
+
+    rows = []
+    for topic, entry in (knowledge or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        domains = entry.get("evidence_domains") or []
+        dcount = len(set([(d or "").lower().strip() for d in domains if (d or "").strip()]))
+        conf = float(entry.get("confidence", 0.0) or 0.0)
+        if dcount < n:
+            rows.append((topic, conf, dcount))
+
+    rows.sort(key=lambda x: (x[2], x[1], x[0]))  # fewest domains, then lowest confidence
+    print(f"Topics needing sources (< {n} domains):")
+    if not rows:
+        print("- none")
+        return
+    for topic, conf, dcount in rows[:50]:
+        print(f"- {topic}: {conf:.2f} (domains={dcount})")
+
 def cmd_alias(arg: str) -> None:
     left, right = split_pipe(arg)
     frm = normalize_topic(left.replace("/alias", "", 1).strip())
@@ -2897,6 +2929,10 @@ def main() -> None:
                 cmd_confirm(user); continue
             if user.startswith("/lowest"):
                 cmd_lowest(user); continue
+
+            if user.startswith("/needsources"):
+                cmd_needsources(user); continue
+
             if user.startswith("/alias "):
                 cmd_alias(user); continue
             if user.startswith("/aliases"):
