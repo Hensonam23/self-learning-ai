@@ -981,6 +981,10 @@ def source_score(url: str, title: str = "") -> int:
     if any(v in d for v in vendor_signals):
         score += 25
     blog_signals = ["blog", "medium.com", "wordpress", "blogspot", "substack"]
+    # Phase 5.1: social / login-wall domains are usually bad learning sources
+    bad_domains = ["linkedin.com", "facebook.com", "quora.com", "pinterest.com"]
+    if any(bd in d for bd in bad_domains):
+        score -= 120
     if any(b in d for b in blog_signals):
         score -= 35
     if any(w in t for w in ["opinion", "my experience", "top 10", "best", "review"]):
@@ -1053,6 +1057,19 @@ def fetch_page_text(url: str, max_chars: int = 12000) -> Tuple[bool, str]:
     text = strip_html(body)
     if not text:
         return False, ""
+
+    # Phase 5.1: reject login/paywall/cookie-wall pages (treat as fetch fail)
+    low = text.lower()
+    login_signals = [
+        "sign in", "log in", "join linkedin", "agree & join", "create your free account",
+        "enable cookies", "accept all cookies", "privacy policy", "cookie policy",
+        "to continue, please", "verify you are a human", "captcha"
+    ]
+    # If a page is mostly auth/cookie boilerplate, it’s not useful as a learning source.
+    hits = sum(1 for sig in login_signals if sig in low)
+    if hits >= 3:
+        return False, ""
+
     if len(text) > max_chars:
         text = text[:max_chars]
     return True, text
