@@ -1054,8 +1054,45 @@ def fetch_page_text(url: str, max_chars: int = 12000) -> Tuple[bool, str]:
     code, body = http_get(url)
     if code != 200 or not body:
         return False, ""
+
+    # Phase 5.1: reject gated / unusable pages BEFORE stripping (HTML-level)
+    # (login walls, cookie walls, JS-required pages, captchas, paywalls)
+    lowered_html = body.lower()
+    blocked_markers = [
+        ("sign in" in lowered_html and "password" in lowered_html),
+        ("log in" in lowered_html and "password" in lowered_html),
+        ("create account" in lowered_html and ("sign in" in lowered_html or "log in" in lowered_html)),
+        ("join now" in lowered_html and ("sign in" in lowered_html or "log in" in lowered_html)),
+
+        ("cookie" in lowered_html and "consent" in lowered_html and ("accept" in lowered_html or "agree" in lowered_html)),
+        ("we value your privacy" in lowered_html and "cookie" in lowered_html),
+        ("privacy choices" in lowered_html and "cookie" in lowered_html),
+        ("accept all cookies" in lowered_html and "cookie" in lowered_html),
+
+        ("enable javascript" in lowered_html),
+        ("please enable javascript" in lowered_html),
+        ("this site requires javascript" in lowered_html),
+        ("checking your browser before accessing" in lowered_html),
+
+        ("captcha" in lowered_html and ("verify" in lowered_html or "human" in lowered_html)),
+        ("unusual traffic" in lowered_html and ("robot" in lowered_html or "automated" in lowered_html)),
+        ("are you a robot" in lowered_html),
+        ("cloudflare" in lowered_html and ("attention required" in lowered_html or "security check" in lowered_html)),
+
+        ("subscribe to continue" in lowered_html),
+        ("subscription" in lowered_html and "continue" in lowered_html),
+        ("to continue reading" in lowered_html and ("subscribe" in lowered_html or "sign in" in lowered_html)),
+        ("metered paywall" in lowered_html),
+    ]
+    if any(blocked_markers):
+        return False, ""
     text = strip_html(body)
     if not text:
+        return False, ""
+
+    # Phase 5.1: thin content detection (after stripping)
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(cleaned) < 500:
         return False, ""
 
     # Phase 5.1: reject login/paywall/cookie-wall pages (treat as fetch fail)
