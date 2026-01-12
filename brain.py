@@ -2782,6 +2782,7 @@ def cmd_lowest(arg: str) -> None:
         print(f"- {topic}: {conf}")
 
 
+<<<<<<< HEAD
 
 def cmd_lowestdomains(arg: str) -> None:
     """
@@ -2814,6 +2815,8 @@ def cmd_lowestdomains(arg: str) -> None:
     for conf, dcount, topic in items[:n]:
         print(f"- {topic}: {conf:.2f} (domains={dcount})")
 
+=======
+>>>>>>> 8f5b5ef (Restore maintenance commands: needsources, lowestdomains, repair_evidence)
 def cmd_needsources(arg: str) -> None:
     """
     /needsources [n]
@@ -2830,9 +2833,12 @@ def cmd_needsources(arg: str) -> None:
     k = load_knowledge()
     rows = []
     for topic, entry in k.items():
+<<<<<<< HEAD
         junk2, why2 = is_junk_topic(topic)
         if junk2:
             continue
+=======
+>>>>>>> 8f5b5ef (Restore maintenance commands: needsources, lowestdomains, repair_evidence)
         if not isinstance(entry, dict):
             continue
         domains = entry.get("evidence_domains") or []
@@ -2841,7 +2847,11 @@ def cmd_needsources(arg: str) -> None:
         if dcount < n:
             rows.append((topic, conf, dcount))
 
+<<<<<<< HEAD
     rows.sort(key=lambda x: (x[2], x[1], x[0]))  # fewest domains, then lowest confidence, then topic
+=======
+    rows.sort(key=lambda x: (x[2], x[1], x[0]))
+>>>>>>> 8f5b5ef (Restore maintenance commands: needsources, lowestdomains, repair_evidence)
     print(f"Topics needing sources (< {n} domains):")
     if not rows:
         print("- none")
@@ -2850,6 +2860,7 @@ def cmd_needsources(arg: str) -> None:
         print(f"- {topic}: {conf:.2f} (domains={dcount})")
 
 
+<<<<<<< HEAD
 
 def cmd_debugsources(arg: str) -> None:
     """
@@ -2994,6 +3005,114 @@ def cmd_repair_evidence(arg: str) -> None:
     print(f"- backfilled evidence: {backfilled}")
     print(f"- clamped confidence: {clamped}")
     print(f"- total touched: {touched}")
+=======
+def cmd_lowestdomains(arg: str) -> None:
+    """
+    /lowestdomains [n]
+    Like /lowest but includes evidence domain count.
+    """
+    try:
+        n_str = arg.replace("/lowestdomains", "", 1).strip()
+        n = int(n_str) if n_str else 10
+    except Exception:
+        n = 10
+    if n < 1:
+        n = 1
+
+    k = load_knowledge()
+    rows = []
+    for topic, entry in k.items():
+        if not isinstance(entry, dict):
+            continue
+        conf = float(entry.get("confidence", 0.0) or 0.0)
+        domains = entry.get("evidence_domains") or []
+        dcount = len(set([(d or "").lower().strip() for d in domains if (d or "").strip()]))
+        rows.append((conf, dcount, topic))
+
+    rows.sort(key=lambda x: (x[0], x[1], x[2]))
+    print(f"Lowest confidence w/ domains (top {n}):")
+    for conf, dcount, topic in rows[:n]:
+        print(f"- {topic}: {conf:.2f} (domains={dcount})")
+
+
+def cmd_repair_evidence(arg: str = "") -> None:
+    """
+    /repair_evidence
+    Rebuild evidence_domains + evidence buckets from existing sources.
+    Also removes junk topics that clearly look like CLI artifacts.
+    """
+    k = load_knowledge()
+    removed = 0
+    touched = 0
+
+    def extract_url(s: str) -> str:
+        s = (s or "").strip()
+        m = re.search(r'(https?://\S+)', s)
+        return m.group(1) if m else ""
+
+    def bucket(domain: str) -> str:
+        d = (domain or "").lower().strip()
+        if not d:
+            return "other"
+        if "wikipedia.org" in d:
+            return "wiki"
+        if d.endswith(".gov") or d.endswith(".edu"):
+            return "gov_edu"
+        if "rfc-editor.org" in d or d.endswith("ietf.org") or "datatracker.ietf.org" in d:
+            return "rfc"
+        return "other"
+
+    junk_keys = []
+    for topic, entry in k.items():
+        if not isinstance(entry, dict):
+            continue
+
+        # Remove obvious garbage topics (prompt artifacts)
+        t = (topic or "").strip()
+        if t.startswith(">") or t.startswith("/") or t.startswith("www.") or " /" in t:
+            junk_keys.append(topic)
+            continue
+
+        sources = entry.get("sources") or []
+        domains = []
+        buckets = {}
+
+        for ss in sources:
+            u = extract_url(ss)
+            if not u:
+                continue
+            d = get_domain(u)
+            if not d:
+                continue
+            dl = d.lower().strip()
+            if dl not in domains:
+                domains.append(dl)
+            b = bucket(dl)
+            buckets[b] = int(buckets.get(b, 0)) + 1
+
+        # Update only if we found anything
+        if domains:
+            entry["evidence_domains"] = domains
+            ev = entry.get("evidence")
+            if not isinstance(ev, dict):
+                ev = {}
+            ev["domains"] = domains
+            ev["buckets"] = buckets
+            entry["evidence"] = ev
+            touched += 1
+
+    for jk in junk_keys:
+        try:
+            del k[jk]
+            removed += 1
+        except Exception:
+            pass
+
+    save_knowledge(k)
+    print("Repair complete:")
+    print(f"- removed junk topics: {removed}")
+    print(f"- backfilled evidence: {touched}")
+>>>>>>> 8f5b5ef (Restore maintenance commands: needsources, lowestdomains, repair_evidence)
 
 def cmd_alias(arg: str) -> None:
     left, right = split_pipe(arg)
@@ -3336,6 +3455,15 @@ def main() -> None:
             if user.startswith("/lowestdomains"):
                 cmd_lowestdomains(user); continue
 
+<<<<<<< HEAD
+=======
+            if user.startswith("/needsources"):
+                cmd_needsources(user); continue
+
+            if user.startswith("/repair_evidence"):
+                cmd_repair_evidence(user); continue
+
+>>>>>>> 8f5b5ef (Restore maintenance commands: needsources, lowestdomains, repair_evidence)
             if user.startswith("/lowest"):
                 cmd_lowest(user); continue
             if user.startswith("/needsources"):
