@@ -1568,6 +1568,25 @@ def web_learn_topic(topic: str, forced_url: str = "", avoid_domains: Optional[Li
     cands = ddg_html_results(topic, max_results=6)
     if cands:
         best = choose_preferred_source_excluding(cands, avoid_domains)
+        # Phase 5.1 wiki fallback fix:
+        # If Wikipedia wins, do a second pass search excluding Wikipedia and nudging standards/docs.
+        try:
+            _u = (best or {}).get("url","") if isinstance(best, dict) else ""
+            _d = get_domain(_u)
+        except Exception:
+            _d = ""
+        if best and "wikipedia.org" in (_d or ""):
+            q2 = (topic or "").strip() + " RFC IETF NIST documentation -site:wikipedia.org -site:wiktionary.org -site:wikidata.org"
+            c2 = ddg_html_results(q2, max_results=10) or []
+            if not c2:
+                c2 = ddg_lite_results(q2, max_results=10) or []
+            c2 = [c for c in (c2 or []) if "wikipedia.org" not in get_domain((c.get("url") or ""))]
+            if c2:
+                try:
+                    best = choose_preferred_source_excluding(c2, avoid_domains)
+                except Exception:
+                    best = choose_preferred_source(c2)
+
         if best:
             chosen_url = best.get("url", "")
             ok, txt = fetch_page_text(chosen_url)
