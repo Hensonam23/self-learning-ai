@@ -1802,6 +1802,9 @@ def curiosity_tick(limit: int = 3) -> Dict[str, Any]:
         junk2, why2 = is_junk_topic(topic)
         if junk2:
             continue
+        junk2, why2 = is_junk_topic(topic)
+        if junk2:
+            continue
         if not isinstance(entry, dict):
             continue
         conf = float(entry.get("confidence", 0.0))
