@@ -962,27 +962,21 @@ def clean_ddg_link(link: str) -> str:
     return link
 
 def ddg_html_results(query: str, max_results: int = 5) -> List[Dict[str, str]]:
-    out: List[Dict[str, str]] = []
-    if urllib is None:
-        return out
-    q = urllib.parse.quote(query)
-    url = f"https://duckduckgo.com/html/?q={q}"
-    code, html = http_get(url)
-    if code != 200 or not html:
-        return out
-    for m in re.finditer(r'(?is)<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html):
-        if len(out) >= max_results:
-            break
-        link = m.group(1).strip()
-        link = clean_ddg_link(link)
-        title = strip_html(m.group(2))
-        out.append({"title": title, "url": link, "snippet": ""})
-    snippets = []
-    for sm in re.finditer(r'(?is)<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', html):
-        snippets.append(strip_html(sm.group(1)))
-    for i in range(min(len(out), len(snippets))):
-        out[i]["snippet"] = snippets[i]
-    return out
+    """
+    Phase 5.1: make search reliable by routing through DDG Lite parser.
+    """
+    return ddg_lite_results(query, max_results=max_results)
+
+
+
+def ddg_search(query: str, max_results: int = 10) -> List[Dict[str, str]]:
+    """
+    Compatibility shim: tooling expects ddg_search().
+    """
+    try:
+        return ddg_html_results(query, max_results=int(max_results or 10))
+    except Exception:
+        return []
 
 def try_standards_first(topic: str) -> Optional[Tuple[str, str]]:
     c1 = ddg_html_results(f"site:rfc-editor.org {topic}", max_results=6)
@@ -999,124 +993,106 @@ def try_standards_first(topic: str) -> Optional[Tuple[str, str]]:
         return best["url"], "nist.gov"
     return None
 
+
 def ddg_lite_results(query: str, max_results: int = 5) -> List[Dict[str, str]]:
-    out: List[Dict[str, str]] = []
+    """
+    DuckDuckGo Lite HTML results (headless-friendly).
+    Returns: [{title, url}, ...] where url is the REAL target (uddg decoded).
+    """
+    if not query:
+        return []
     if urllib is None:
-        return out
-    q = urllib.parse.quote(query)
+        return []
+
+    q = urllib.parse.quote_plus(query.strip())
     url = f"https://lite.duckduckgo.com/lite/?q={q}"
-    code, html = http_get(url)
-    if code != 200 or not html:
-        return out
-    for m in re.finditer(r'(?is)<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html):
-        if len(out) >= max_results:
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", "ignore")
+    except Exception:
+        return []
+
+    if not html:
+        return []
+
+    html = html.replace("&amp;", "&")
+
+    results: List[Dict[str, str]] = []
+    seen = set()
+
+    for mm in re.finditer(r'href="([^"]*duckduckgo\.com/l/\?[^"]*uddg=[^"]+)"', html, flags=re.I):
+        href = (mm.group(1) or "").strip()
+        if not href:
+            continue
+        if href.startswith("//"):
+            href = "https:" + href
+
+        target = ""
+        try:
+            p = urllib.parse.urlparse(href)
+            qs = urllib.parse.parse_qs(p.query)
+            uddg = (qs.get("uddg") or [""])[0]
+            if uddg:
+                target = urllib.parse.unquote(uddg).strip()
+        except Exception:
+            target = ""
+
+        if not target:
+            continue
+        if target.startswith("//"):
+            target = "https:" + target
+        if not (target.startswith("http://") or target.startswith("https://")):
+            continue
+        if target in seen:
+            continue
+
+        seen.add(target)
+        results.append({"title": "", "url": target})
+        if len(results) >= int(max_results or 5):
             break
-        link = m.group(1).strip()
-        link = clean_ddg_link(link)
-        title = strip_html(m.group(2))
-        if not link.startswith("http"):
-            continue
-        if not title or len(title) < 3:
-            continue
-        out.append({"title": title, "url": link, "snippet": ""})
-    return out
+
+    return results
 
 def source_score(url: str, title: str = "") -> int:
     d = get_domain(url)
     t = (title or "").lower()
-    u = (url or "").lower()
     score = 0
-
-    # Phase 5.1: hard deny list (almost always low-signal / SEO / personal publishing)
-    # Use a huge negative so it never wins.
-    hard_deny = [
-        "medium.com",
-        "blogspot.",
-        "wordpress.com",
-        "wixsite.com",
-        "weebly.com",
-    ]
-    if any(x in d for x in hard_deny):
-        return -9999
-
-    # Phase 5.1: strong preference for primary standards / official sources
     if "rfc-editor.org" in d:
-        score += 160
+        score += 120
     if "ietf.org" in d:
-        score += 140
-    if "iana.org" in d:
-        score += 130
-    if "nist.gov" in d:
-        score += 150
+        score += 100
     if d.endswith(".gov"):
-        score += 110
+        score += 95
     if d.endswith(".edu"):
+        score += 95
+    if "nist.gov" in d:
         score += 110
 
-    # Web standards bodies / spec sources
-    if "w3.org" in d:
-        score += 135
-    if "whatwg.org" in d:
-        score += 130
-    if "ieee.org" in d:
-        score += 120
-    if "iso.org" in d:
-        score += 120
-    if "opengroup.org" in d:
-        score += 115
-
-    # Wikipedia is allowed only as fallback
+    # Wikipedia should never be a "main" learning source unless nothing else works.
     if "wikipedia.org" in d:
-        score += 5
+        score -= 80
 
-    # Mild preference: vendor documentation portals (signal words + known vendors)
-    vendor_signals = ["docs.", "support.", "developer.", "learn.", "kb.", "/docs", "/documentation"]
-    if any(v in d for v in vendor_signals) or any(v in u for v in ["/docs", "/documentation", "/kb", "/support"]):
+    vendor_signals = ["docs.", "support.", "developer.", "learn.", "kb."]
+    if any(v in d for v in vendor_signals):
         score += 25
 
-    major_vendor_domains = [
-        "cisco.com",
-        "juniper.net",
-        "microsoft.com",
-        "learn.microsoft.com",
-        "cloudflare.com",
-        "akamai.com",
-        "redhat.com",
-        "ibm.com",
-        "oracle.com",
-        "developer.apple.com",
-        "developers.google.com",
-    ]
-    if any(m in d for m in major_vendor_domains):
-        score += 20
+    blog_signals = ["blog", "medium.com", "wordpress", "blogspot", "substack"]
+    bad_domains = ["linkedin.com", "facebook.com", "quora.com", "pinterest.com"]
 
-    # Phase 5.1: social / login-wall domains are usually bad learning sources
-    bad_domains = ["linkedin.com", "facebook.com", "quora.com", "pinterest.com", "x.com", "twitter.com", "instagram.com", "tiktok.com"]
+    # If DDG redirect wrappers leak through anywhere, nuke them
+    if "duckduckgo.com" in d:
+        score -= 200
+
     if any(bd in d for bd in bad_domains):
-        score -= 140
-
-    # Blog / newsletter signals (not always wrong, but lower trust)
-    blog_signals = ["blog", "wordpress", "blogspot", "substack"]
+        score -= 120
     if any(b in d for b in blog_signals):
-        score -= 40
-
-    # SEO / content farm markers (URL)
-    seo_markers = [
-        "utm_", "ref=", "aff=", "affiliate",
-        "best-", "top-", "vs-", "review", "reviews",
-        "coupon", "promo", "discount",
-        "/tag/", "/tags/", "/category/", "/categories/",
-    ]
-    if any(m in u for m in seo_markers):
-        score -= 20
-
-    # SEO / opinion markers (title)
-    if any(w in t for w in ["opinion", "my experience", "top 10", "top ten", "best", "review", "vs "]):
+        score -= 35
+    if any(w in t for w in ["opinion", "my experience", "top 10", "best", "review"]):
         score -= 15
-
     if url.startswith("https://"):
         score += 5
-
     return score
 
 def choose_best_source(candidates: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
@@ -1130,66 +1106,109 @@ def choose_best_source(candidates: List[Dict[str, str]]) -> Optional[Dict[str, s
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored[0][1]
 
+
 def choose_preferred_source(candidates: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
-    """
-    Prefer non-Wikipedia sources whenever possible.
-    Wikipedia should be fallback-only unless there are no usable non-wiki candidates.
-    """
-    if not candidates:
-        return None
-
-    scored = []
-    for c in candidates:
-        url = (c.get("url") or "").strip()
-        title = (c.get("title") or "").strip()
-        if not url:
-            continue
-        scored.append((source_score(url, title), c))
-
-    if not scored:
-        return None
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    best_score, best = scored[0]
-    best_domain = get_domain(best.get("url", ""))
-
-    nonwiki = [(sc, c) for (sc, c) in scored if "wikipedia.org" not in get_domain(c.get("url", ""))]
-
-    # HARD RULE: if Wikipedia is best and we have ANY non-wiki candidate that isn't total trash, choose it.
-    # (This keeps wikipedia as a true fallback.)
-    if "wikipedia.org" in best_domain and nonwiki:
-        nonwiki.sort(key=lambda x: x[0], reverse=True)
-        sc2, c2 = nonwiki[0]
-
-        # If the best non-wiki is catastrophically low, allow wiki fallback.
-        # Otherwise, prefer non-wiki even if it scored lower.
-        if sc2 > -500:
-            return c2
-
-    return best
+    return choose_preferred_source_excluding(candidates, avoid_domains=[])
 
 def choose_preferred_source_excluding(candidates: List[Dict[str, str]], avoid_domains: List[str]) -> Optional[Dict[str, str]]:
     """
-    Phase 5.1: multi-source reinforcement helper
-    Prefer the best source, but if we already have a domain, try to pick a different one.
+    Pick the best candidate URL.
+    Phase 5.1: unwrap DDG redirects before scoring + prefer NON-WIKI when available.
     """
-    avoid = set([(d or "").lower().strip() for d in (avoid_domains or []) if (d or "").strip()])
     if not candidates:
         return None
 
-    filtered = []
+    avoid_set = set([(d or "").strip().lower() for d in (avoid_domains or []) if (d or "").strip()])
+
+    def _unwrap(u: str) -> str:
+        u = (u or "").strip().replace("&amp;", "&")
+        if not u:
+            return ""
+        if u.startswith("//"):
+            u = "https:" + u
+        try:
+            if urllib is not None and "duckduckgo.com/l/" in u and "uddg=" in u:
+                p = urllib.parse.urlparse(u)
+                qs = urllib.parse.parse_qs(p.query)
+                uddg = (qs.get("uddg") or [""])[0]
+                if uddg:
+                    t = urllib.parse.unquote(uddg).strip()
+                    if t.startswith("//"):
+                        t = "https:" + t
+                    return t
+        except Exception:
+            pass
+        return u
+
+    def _domain(u: str) -> str:
+        u = _unwrap(u)
+        if not u or urllib is None:
+            return ""
+        try:
+            host = (urllib.parse.urlparse(u).netloc or "").strip().lower()
+        except Exception:
+            host = ""
+        if host.startswith("www."):
+            host = host[4:]
+        return host
+
+    def _is_wiki(u: str) -> bool:
+        d = _domain(u)
+        return ("wikipedia.org" in d) or ("wiktionary.org" in d) or ("wikidata.org" in d)
+
+    cleaned: List[Dict[str, str]] = []
     for c in candidates:
-        url = (c.get("url") or "").strip()
-        if not url:
+        if not isinstance(c, dict):
             continue
-        d = get_domain(url)
-        if d and d.lower() in avoid:
+        u0 = (c.get("url") or "").strip()
+        if not u0:
             continue
-        filtered.append(c)
+        u = _unwrap(u0)
+        d = _domain(u)
+        if d and d in avoid_set:
+            continue
+        c2 = dict(c)
+        c2["url"] = u
+        cleaned.append(c2)
 
-    # If filtering removed everything, fall back to normal behavior
-    return choose_preferred_source(filtered if filtered else candidates)
+    if not cleaned:
+        return None
 
+    nonwiki = [c for c in cleaned if not _is_wiki(c.get("url",""))]
+    pool = nonwiki if nonwiki else cleaned
+
+    def _score(u: str) -> int:
+        d = _domain(u)
+        s = 0
+
+        # Standards / primary sources
+        if ("rfc-editor.org" in d) or ("ietf.org" in d) or ("isoc.org" in d) or ("nist.gov" in d):
+            s += 200
+
+        # Prefer institutional domains
+        if d.endswith(".gov") or d.endswith(".mil"):
+            s += 120
+        elif d.endswith(".edu"):
+            s += 90
+        elif d.endswith(".org"):
+            s += 40
+
+        # Hard penalty (but only relevant if wiki is only thing left)
+        if ("wikipedia.org" in d) or ("wiktionary.org" in d) or ("wikidata.org" in d):
+            s -= 999
+
+        return s
+
+    best = None
+    best_s = -10**9
+    for c in pool:
+        u = (c.get("url") or "").strip()
+        sc = _score(u)
+        if sc > best_s:
+            best_s = sc
+            best = c
+
+    return best
 
 def fetch_page_text_debug(url: str, max_chars: int = 12000) -> Tuple[bool, str, str]:
     """
@@ -1246,61 +1265,43 @@ def fetch_page_text(url: str, max_chars: int = 12000) -> Tuple[bool, str]:
     if code != 200 or not body:
         return False, ""
 
-    # Phase 5.1: reject gated / unusable pages BEFORE stripping (HTML-level)
-    # (login walls, cookie walls, JS-required pages, captchas, paywalls)
     lowered_html = body.lower()
-    blocked_markers = [
+
+    # Hard blocks only (cookie banners are NOT hard blocks)
+    hard_blocks = [
         ("sign in" in lowered_html and "password" in lowered_html),
         ("log in" in lowered_html and "password" in lowered_html),
-        ("create account" in lowered_html and ("sign in" in lowered_html or "log in" in lowered_html)),
-        ("join now" in lowered_html and ("sign in" in lowered_html or "log in" in lowered_html)),
-
-        ("cookie" in lowered_html and "consent" in lowered_html and ("accept" in lowered_html or "agree" in lowered_html)),
-        ("we value your privacy" in lowered_html and "cookie" in lowered_html),
-        ("privacy choices" in lowered_html and "cookie" in lowered_html),
-        ("accept all cookies" in lowered_html and "cookie" in lowered_html),
-
-        ("enable javascript" in lowered_html),
-        ("please enable javascript" in lowered_html),
-        ("this site requires javascript" in lowered_html),
-        ("checking your browser before accessing" in lowered_html),
-
+        ("verify you are a human" in lowered_html),
         ("captcha" in lowered_html and ("verify" in lowered_html or "human" in lowered_html)),
-        ("unusual traffic" in lowered_html and ("robot" in lowered_html or "automated" in lowered_html)),
         ("are you a robot" in lowered_html),
         ("cloudflare" in lowered_html and ("attention required" in lowered_html or "security check" in lowered_html)),
-
+        ("checking your browser before accessing" in lowered_html),
+        ("please enable javascript" in lowered_html),
+        ("enable javascript" in lowered_html),
+        ("this site requires javascript" in lowered_html),
         ("subscribe to continue" in lowered_html),
-        ("subscription" in lowered_html and "continue" in lowered_html),
         ("to continue reading" in lowered_html and ("subscribe" in lowered_html or "sign in" in lowered_html)),
-        ("metered paywall" in lowered_html),
     ]
-    if any(blocked_markers):
+    if any(hard_blocks):
         return False, ""
+
     text = strip_html(body)
     if not text:
         return False, ""
 
-    # Phase 5.1: thin content detection (after stripping)
-    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
-    if len(cleaned) < 500:
-        return False, ""
-
-    # Phase 5.1: reject login/paywall/cookie-wall pages (treat as fetch fail)
     low = text.lower()
-    login_signals = [
-        "sign in", "log in", "join linkedin", "agree & join", "create your free account",
-        "enable cookies", "accept all cookies", "privacy policy", "cookie policy",
-        "to continue, please", "verify you are a human", "captcha"
-    ]
-    # If a page is mostly auth/cookie boilerplate, it’s not useful as a learning source.
-    hits = sum(1 for sig in login_signals if sig in low)
-    if hits >= 3:
+
+    # Secondary hard blocks (some survive stripping)
+    if (("sign in" in low and "password" in low) or
+        ("enable javascript" in low) or
+        ("captcha" in low and ("human" in low or "verify" in low))):
         return False, ""
 
-    if len(text) > max_chars:
-        text = text[:max_chars]
-    return True, text
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    if len(cleaned) < 700:
+        return False, ""
+
+    return True, cleaned[:max_chars]
 
 def pick_definition_sentence(topic: str, text: str) -> str:
     topic_n = normalize_topic(topic)
