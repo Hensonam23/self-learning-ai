@@ -501,6 +501,12 @@ def compute_weighted_confidence(existing_entry: Dict[str, Any], base_floor: floa
     if reinforce_hits > 0:
         reinforce_bonus = min(REINFORCE_BONUS_CAP, REINFORCE_BONUS_PER_HIT * float(reinforce_hits))
 
+    # Phase 5.1: prevent confidence inflation from repeat learns
+    # If we did not gain a new domain and the user has not confirmed, do not apply reinforcement bonus.
+    gained_new_domain = bool(ev.get("_gained_new_domain"))
+    if (not gained_new_domain) and (int(confirmed.get("count") or 0) <= 0):
+        reinforce_bonus = 0.0
+
     # Combine
     floor = max(float(base_floor), CONF_FLOOR_UNKNOWN)
     raw = max(existing_conf, floor) + authority_bonus + indep_bonus + reinforce_bonus
