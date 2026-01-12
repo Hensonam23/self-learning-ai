@@ -2631,6 +2631,22 @@ def cmd_repair_evidence(arg: str) -> None:
     - clamp over-confident unconfirmed entries lacking evidence
     """
     k = load_knowledge()
+
+    def _bucket(d: str) -> str:
+        d = (d or "").lower().strip()
+        if not d:
+            return "other"
+        if "rfc-editor.org" in d or "ietf.org" in d or "iana.org" in d:
+            return "rfc"
+        if d.endswith(".gov") or d.endswith(".edu") or "nist.gov" in d:
+            return "gov_edu"
+        if "wikipedia.org" in d:
+            return "wiki"
+        # treat major vendor docs as vendor bucket
+        vendor_hits = ["cisco.com", "juniper.net", "microsoft.com", "learn.microsoft.com", "cloudflare.com", "akamai.com", "redhat.com", "ibm.com", "oracle.com"]
+        if any(v in d for v in vendor_hits):
+            return "vendor"
+        return "other"
     removed = 0
     backfilled = 0
     clamped = 0
@@ -2677,7 +2693,7 @@ def cmd_repair_evidence(arg: str) -> None:
             if not isinstance(buckets, dict):
                 buckets = {}
             for d in domains_clean:
-                b = bucket_for_domain(d)
+                b = _bucket(d)
                 buckets[b] = int(buckets.get(b, 0) or 0) + 1
             entry["evidence_buckets"] = buckets
             backfilled += 1
