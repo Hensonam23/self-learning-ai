@@ -1481,6 +1481,76 @@ def expand_topic_if_needed(topic: str) -> List[str]:
         return []
     return expansions[:MAX_EXPANSIONS_PER_TRIGGER]
 
+
+def ddg_lite_search(query: str, max_results: int = 10) -> List[Dict[str, str]]:
+    """
+    DuckDuckGo Lite HTML search (headless-friendly).
+    Returns: [{title, url}, ...]
+    """
+    if not query:
+        return []
+    if urllib is None:
+        return []
+
+    q = urllib.parse.quote_plus(query.strip())
+    url = f"https://lite.duckduckgo.com/lite/?q={q}"
+
+    # IMPORTANT: DDG Lite often needs a User-Agent
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read()
+        html = body.decode("utf-8", "ignore")
+    except Exception:
+        return []
+
+    if not html:
+        return []
+
+    # HTML entity cleanup for URLs like &amp;
+    html = html.replace("&amp;", "&")
+
+    results: List[Dict[str, str]] = []
+
+    # DDG Lite result links are often like:
+    # href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com&rut=..."
+    for mm in re.finditer(r'href="([^"]*duckduckgo\.com/l/\?[^"]*uddg=[^"]+)"', html, flags=re.I):
+        href = (mm.group(1) or "").strip()
+        if not href:
+            continue
+
+        if href.startswith("//"):
+            href = "https:" + href
+
+        try:
+            parsed = urllib.parse.urlparse(href)
+            qs = urllib.parse.parse_qs(parsed.query)
+            uddg = (qs.get("uddg") or [""])[0]
+            target = urllib.parse.unquote(uddg) if uddg else ""
+        except Exception:
+            target = ""
+
+        if not target:
+            continue
+        if not (target.startswith("http://") or target.startswith("https://")):
+            continue
+
+        results.append({"title": "", "url": target})
+        if len(results) >= max_results:
+            break
+
+    # fallback: any direct hrefs
+    if not results:
+        for href in re.findall(r'href="(https?://[^"]+)"', html, flags=re.I):
+            href = (href or "").strip()
+            if not href:
+                continue
+            results.append({"title": "", "url": href})
+            if len(results) >= max_results:
+                break
+
+    return results
+
 def web_learn_topic(topic: str, forced_url: str = "", avoid_domains: Optional[List[str]] = None) -> Tuple[bool, str, List[str], str]:
     avoid_domains = avoid_domains or []
 
