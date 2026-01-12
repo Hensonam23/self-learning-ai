@@ -2736,7 +2736,7 @@ def cmd_debugsources(arg: str) -> None:
     def show(label: str, q: str):
         print(f"--- {label} ---")
         print(f"query: {q}")
-        cands = ddg_search(q, max_results=12) or []
+        cands = ddg_html_results(q, max_results=12) or []
         if not cands:
             print("(no candidates)")
             return
