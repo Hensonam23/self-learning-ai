@@ -1910,7 +1910,15 @@ def run_webqueue(limit: int = 3, autoupgrade: bool = True) -> Dict[str, Any]:
         safe_log(WEBQUEUE_LOG, f"webqueue: attempt {item['attempts']}/{item.get('max_attempts',DEFAULT_MAX_QUEUE_ATTEMPTS)} topic='{topic}'")
 
         forced = (item.get("source_url") or "").strip()
-                # Phase 5.1: avoid re-learning from the same domain if we already have it stored
+
+        # Phase 5.1: avoid re-learning from the same domain if we already have it stored
+        existing = None
+        try:
+            k0 = load_knowledge()
+            existing = k0.get(topic) if isinstance(k0, dict) else None
+        except Exception:
+            existing = None
+
         avoid = []
         if isinstance(existing, dict):
             for d in (existing.get("evidence_domains") or []):
