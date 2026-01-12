@@ -53,3 +53,7 @@ llama.cpp/
 # local backups
 brain.py.bak_*
 brain.py.bak.*
+
+# local patch scripts
+patch_*.py
+apply_*.py

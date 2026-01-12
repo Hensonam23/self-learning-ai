@@ -304,16 +304,57 @@ def parse_iso_to_ts(s: str) -> Optional[int]:
         return None
 
 def get_domain(url: str) -> str:
-    url = (url or "").strip()
-    if not url:
+    """
+    Extract domain/host from a URL.
+
+    Phase 5.1: unwrap DuckDuckGo redirect URLs (duckduckgo.com/l/?uddg=...),
+    so domain-based scoring + wiki detection + evidence_domains work correctly.
+    """
+    u = (url or "").strip()
+    if not u:
         return ""
+
+    # Normalize scheme-less URLs
+    if u.startswith("//"):
+        u = "https:" + u
+
+    # If we have the project helper, use it (keeps behavior consistent)
     try:
-        if urllib is None:
-            return ""
-        p = urllib.parse.urlparse(url)
-        return (p.netloc or "").lower()
+        u = clean_ddg_redirect_url(u)
+    except Exception:
+        pass
+
+    if urllib is None:
+        return ""
+
+    # If still wrapped, unwrap uddg= manually
+    try:
+        if "duckduckgo.com/l/" in u and "uddg=" in u:
+            u2 = u.replace("&amp;", "&")
+            p = urllib.parse.urlparse(u2)
+            qs = urllib.parse.parse_qs(p.query)
+            uddg = (qs.get("uddg") or [""])[0]
+            if uddg:
+                u = urllib.parse.unquote(uddg)
+                if u.startswith("//"):
+                    u = "https:" + u
+    except Exception:
+        pass
+
+    # If it's a bare domain like "example.com", normalize it
+    if "://" not in u and " " not in u and "/" not in u and "." in u:
+        u = "https://" + u
+
+    try:
+        p = urllib.parse.urlparse(u)
+        host = (p.netloc or "").strip().lower()
     except Exception:
         return ""
+
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
 
 def clamp(x: float, lo: float, hi: float) -> float:
     try:
@@ -500,6 +541,21 @@ def compute_weighted_confidence(existing_entry: Dict[str, Any], base_floor: floa
     reinforce_hits = int(ev.get("reinforce_count") or 0)
     if reinforce_hits > 0:
         reinforce_bonus = min(REINFORCE_BONUS_CAP, REINFORCE_BONUS_PER_HIT * float(reinforce_hits))
+
+    # Phase 5.1: prevent confidence inflation from repeat learns
+    # If we did not gain a new domain and the user has not confirmed, do not apply reinforcement bonus.
+    gained_new_domain = bool(ev.get("_gained_new_domain"))
+
+    # confirmed may not be initialized yet in this function, so read it safely from existing_entry
+    confirm_count = 0
+    try:
+        c = (existing_entry or {}).get("confirmed") or {}
+        confirm_count = int(c.get("count") or 0)
+    except Exception:
+        confirm_count = 0
+
+    if (not gained_new_domain) and (confirm_count <= 0):
+        reinforce_bonus = 0.0
 
     # Combine
     floor = max(float(base_floor), CONF_FLOOR_UNKNOWN)
@@ -797,6 +853,10 @@ def set_knowledge(topic: str, answer: str, confidence: float, sources: Optional[
     entry["notes"] = notes or entry.get("notes", "")
     entry["taught_by_user"] = bool(taught_by_user) or bool(entry.get("taught_by_user", False))
     entry["sources"] = merged_sources
+    # Phase 5.1: track whether this update added a NEW independent domain
+    old_domains = set([(d or "").lower().strip() for d in (entry.get("evidence_domains") or []) if (d or "").strip()])
+    new_domains = set([(d or "").lower().strip() for d in (domains or []) if (d or "").strip()])
+    entry["_gained_new_domain"] = (len(new_domains - old_domains) > 0)
     entry["evidence_domains"] = domains
     entry["evidence_buckets"] = buckets
     entry["reinforcement"] = reinf
@@ -902,27 +962,21 @@ def clean_ddg_link(link: str) -> str:
     return link
 
 def ddg_html_results(query: str, max_results: int = 5) -> List[Dict[str, str]]:
-    out: List[Dict[str, str]] = []
-    if urllib is None:
-        return out
-    q = urllib.parse.quote(query)
-    url = f"https://duckduckgo.com/html/?q={q}"
-    code, html = http_get(url)
-    if code != 200 or not html:
-        return out
-    for m in re.finditer(r'(?is)<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html):
-        if len(out) >= max_results:
-            break
-        link = m.group(1).strip()
-        link = clean_ddg_link(link)
-        title = strip_html(m.group(2))
-        out.append({"title": title, "url": link, "snippet": ""})
-    snippets = []
-    for sm in re.finditer(r'(?is)<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', html):
-        snippets.append(strip_html(sm.group(1)))
-    for i in range(min(len(out), len(snippets))):
-        out[i]["snippet"] = snippets[i]
-    return out
+    """
+    Phase 5.1: make search reliable by routing through DDG Lite parser.
+    """
+    return ddg_lite_results(query, max_results=max_results)
+
+
+
+def ddg_search(query: str, max_results: int = 10) -> List[Dict[str, str]]:
+    """
+    Compatibility shim: tooling expects ddg_search().
+    """
+    try:
+        return ddg_html_results(query, max_results=int(max_results or 10))
+    except Exception:
+        return []
 
 def try_standards_first(topic: str) -> Optional[Tuple[str, str]]:
     c1 = ddg_html_results(f"site:rfc-editor.org {topic}", max_results=6)
@@ -939,27 +993,67 @@ def try_standards_first(topic: str) -> Optional[Tuple[str, str]]:
         return best["url"], "nist.gov"
     return None
 
+
 def ddg_lite_results(query: str, max_results: int = 5) -> List[Dict[str, str]]:
-    out: List[Dict[str, str]] = []
+    """
+    DuckDuckGo Lite HTML results (headless-friendly).
+    Returns: [{title, url}, ...] where url is the REAL target (uddg decoded).
+    """
+    if not query:
+        return []
     if urllib is None:
-        return out
-    q = urllib.parse.quote(query)
+        return []
+
+    q = urllib.parse.quote_plus(query.strip())
     url = f"https://lite.duckduckgo.com/lite/?q={q}"
-    code, html = http_get(url)
-    if code != 200 or not html:
-        return out
-    for m in re.finditer(r'(?is)<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html):
-        if len(out) >= max_results:
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", "ignore")
+    except Exception:
+        return []
+
+    if not html:
+        return []
+
+    html = html.replace("&amp;", "&")
+
+    results: List[Dict[str, str]] = []
+    seen = set()
+
+    for mm in re.finditer(r'href="([^"]*duckduckgo\.com/l/\?[^"]*uddg=[^"]+)"', html, flags=re.I):
+        href = (mm.group(1) or "").strip()
+        if not href:
+            continue
+        if href.startswith("//"):
+            href = "https:" + href
+
+        target = ""
+        try:
+            p = urllib.parse.urlparse(href)
+            qs = urllib.parse.parse_qs(p.query)
+            uddg = (qs.get("uddg") or [""])[0]
+            if uddg:
+                target = urllib.parse.unquote(uddg).strip()
+        except Exception:
+            target = ""
+
+        if not target:
+            continue
+        if target.startswith("//"):
+            target = "https:" + target
+        if not (target.startswith("http://") or target.startswith("https://")):
+            continue
+        if target in seen:
+            continue
+
+        seen.add(target)
+        results.append({"title": "", "url": target})
+        if len(results) >= int(max_results or 5):
             break
-        link = m.group(1).strip()
-        link = clean_ddg_link(link)
-        title = strip_html(m.group(2))
-        if not link.startswith("http"):
-            continue
-        if not title or len(title) < 3:
-            continue
-        out.append({"title": title, "url": link, "snippet": ""})
-    return out
+
+    return results
 
 def source_score(url: str, title: str = "") -> int:
     d = get_domain(url)
@@ -975,14 +1069,22 @@ def source_score(url: str, title: str = "") -> int:
         score += 95
     if "nist.gov" in d:
         score += 110
+
+    # Wikipedia should never be a "main" learning source unless nothing else works.
     if "wikipedia.org" in d:
-        score += 5
+        score -= 80
+
     vendor_signals = ["docs.", "support.", "developer.", "learn.", "kb."]
     if any(v in d for v in vendor_signals):
         score += 25
+
     blog_signals = ["blog", "medium.com", "wordpress", "blogspot", "substack"]
-    # Phase 5.1: social / login-wall domains are usually bad learning sources
     bad_domains = ["linkedin.com", "facebook.com", "quora.com", "pinterest.com"]
+
+    # If DDG redirect wrappers leak through anywhere, nuke them
+    if "duckduckgo.com" in d:
+        score -= 200
+
     if any(bd in d for bd in bad_domains):
         score -= 120
     if any(b in d for b in blog_signals):
@@ -1004,75 +1106,202 @@ def choose_best_source(candidates: List[Dict[str, str]]) -> Optional[Dict[str, s
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored[0][1]
 
+
 def choose_preferred_source(candidates: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
-    if not candidates:
-        return None
-    scored = []
-    for c in candidates:
-        url = (c.get("url") or "").strip()
-        title = (c.get("title") or "").strip()
-        if not url:
-            continue
-        scored.append((source_score(url, title), c))
-    if not scored:
-        return None
-    scored.sort(key=lambda x: x[0], reverse=True)
-    best_score, best = scored[0]
-    best_domain = get_domain(best.get("url", ""))
-    nonwiki = [(sc, c) for (sc, c) in scored if "wikipedia.org" not in get_domain(c.get("url",""))]
-    if "wikipedia.org" in best_domain and nonwiki:
-        nonwiki.sort(key=lambda x: x[0], reverse=True)
-        sc2, c2 = nonwiki[0]
-        if sc2 >= (best_score - 60):
-            return c2
-    return best
+    return choose_preferred_source_excluding(candidates, avoid_domains=[])
 
 def choose_preferred_source_excluding(candidates: List[Dict[str, str]], avoid_domains: List[str]) -> Optional[Dict[str, str]]:
     """
-    Phase 5.1: multi-source reinforcement helper
-    Prefer the best source, but if we already have a domain, try to pick a different one.
+    Pick the best candidate URL.
+    Phase 5.1: unwrap DDG redirects before scoring + prefer NON-WIKI when available.
     """
-    avoid = set([(d or "").lower().strip() for d in (avoid_domains or []) if (d or "").strip()])
     if not candidates:
         return None
 
-    filtered = []
+    avoid_set = set([(d or "").strip().lower() for d in (avoid_domains or []) if (d or "").strip()])
+
+    def _unwrap(u: str) -> str:
+        u = (u or "").strip().replace("&amp;", "&")
+        if not u:
+            return ""
+        if u.startswith("//"):
+            u = "https:" + u
+        try:
+            if urllib is not None and "duckduckgo.com/l/" in u and "uddg=" in u:
+                p = urllib.parse.urlparse(u)
+                qs = urllib.parse.parse_qs(p.query)
+                uddg = (qs.get("uddg") or [""])[0]
+                if uddg:
+                    t = urllib.parse.unquote(uddg).strip()
+                    if t.startswith("//"):
+                        t = "https:" + t
+                    return t
+        except Exception:
+            pass
+        return u
+
+    def _domain(u: str) -> str:
+        u = _unwrap(u)
+        if not u or urllib is None:
+            return ""
+        try:
+            host = (urllib.parse.urlparse(u).netloc or "").strip().lower()
+        except Exception:
+            host = ""
+        if host.startswith("www."):
+            host = host[4:]
+        return host
+
+    def _is_wiki(u: str) -> bool:
+        d = _domain(u)
+        return ("wikipedia.org" in d) or ("wiktionary.org" in d) or ("wikidata.org" in d)
+
+    cleaned: List[Dict[str, str]] = []
     for c in candidates:
-        url = (c.get("url") or "").strip()
-        if not url:
+        if not isinstance(c, dict):
             continue
-        d = get_domain(url)
-        if d and d.lower() in avoid:
+        u0 = (c.get("url") or "").strip()
+        if not u0:
             continue
-        filtered.append(c)
+        u = _unwrap(u0)
+        d = _domain(u)
+        if d and d in avoid_set:
+            continue
+        c2 = dict(c)
+        c2["url"] = u
+        cleaned.append(c2)
 
-    # If filtering removed everything, fall back to normal behavior
-    return choose_preferred_source(filtered if filtered else candidates)
+    if not cleaned:
+        return None
 
+    nonwiki = [c for c in cleaned if not _is_wiki(c.get("url",""))]
+    pool = nonwiki if nonwiki else cleaned
+
+    def _score(u: str) -> int:
+        d = _domain(u)
+        s = 0
+
+        # Standards / primary sources
+        if ("rfc-editor.org" in d) or ("ietf.org" in d) or ("isoc.org" in d) or ("nist.gov" in d):
+            s += 200
+
+        # Prefer institutional domains
+        if d.endswith(".gov") or d.endswith(".mil"):
+            s += 120
+        elif d.endswith(".edu"):
+            s += 90
+        elif d.endswith(".org"):
+            s += 40
+
+        # Hard penalty (but only relevant if wiki is only thing left)
+        if ("wikipedia.org" in d) or ("wiktionary.org" in d) or ("wikidata.org" in d):
+            s -= 999
+
+        return s
+
+    best = None
+    best_s = -10**9
+    for c in pool:
+        u = (c.get("url") or "").strip()
+        sc = _score(u)
+        if sc > best_s:
+            best_s = sc
+            best = c
+
+    return best
+
+def fetch_page_text_debug(url: str, max_chars: int = 12000) -> Tuple[bool, str, str]:
+    """
+    Debug fetch that returns (ok, text, reason).
+    Does NOT modify normal learning behavior.
+    """
+    code, body = http_get(url)
+    if code != 200 or not body:
+        return False, "", f"http_{code}"
+
+    lowered_html = body.lower()
+
+    blocked_markers = [
+        ("sign in" in lowered_html and "password" in lowered_html),
+        ("log in" in lowered_html and "password" in lowered_html),
+        ("create account" in lowered_html and ("sign in" in lowered_html or "log in" in lowered_html)),
+        ("join now" in lowered_html and ("sign in" in lowered_html or "log in" in lowered_html)),
+
+        ("cookie" in lowered_html and "consent" in lowered_html and ("accept" in lowered_html or "agree" in lowered_html)),
+        ("we value your privacy" in lowered_html and "cookie" in lowered_html),
+        ("privacy choices" in lowered_html and "cookie" in lowered_html),
+        ("accept all cookies" in lowered_html and "cookie" in lowered_html),
+
+        ("enable javascript" in lowered_html),
+        ("please enable javascript" in lowered_html),
+        ("this site requires javascript" in lowered_html),
+        ("checking your browser before accessing" in lowered_html),
+
+        ("captcha" in lowered_html and ("verify" in lowered_html or "human" in lowered_html)),
+        ("unusual traffic" in lowered_html and ("robot" in lowered_html or "automated" in lowered_html)),
+        ("are you a robot" in lowered_html),
+        ("cloudflare" in lowered_html and ("attention required" in lowered_html or "security check" in lowered_html)),
+
+        ("subscribe to continue" in lowered_html),
+        ("subscription" in lowered_html and "continue" in lowered_html),
+        ("to continue reading" in lowered_html and ("subscribe" in lowered_html or "sign in" in lowered_html)),
+        ("metered paywall" in lowered_html),
+    ]
+    if any(blocked_markers):
+        return False, "", "blocked_marker"
+
+    text = strip_html(body)
+    if not text:
+        return False, "", "strip_empty"
+
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(cleaned) < 500:
+        return False, "", f"thin_{len(cleaned)}"
+
+    return True, text, "ok"
 
 def fetch_page_text(url: str, max_chars: int = 12000) -> Tuple[bool, str]:
     code, body = http_get(url)
     if code != 200 or not body:
         return False, ""
+
+    lowered_html = body.lower()
+
+    # Hard blocks only (cookie banners are NOT hard blocks)
+    hard_blocks = [
+        ("sign in" in lowered_html and "password" in lowered_html),
+        ("log in" in lowered_html and "password" in lowered_html),
+        ("verify you are a human" in lowered_html),
+        ("captcha" in lowered_html and ("verify" in lowered_html or "human" in lowered_html)),
+        ("are you a robot" in lowered_html),
+        ("cloudflare" in lowered_html and ("attention required" in lowered_html or "security check" in lowered_html)),
+        ("checking your browser before accessing" in lowered_html),
+        ("please enable javascript" in lowered_html),
+        ("enable javascript" in lowered_html),
+        ("this site requires javascript" in lowered_html),
+        ("subscribe to continue" in lowered_html),
+        ("to continue reading" in lowered_html and ("subscribe" in lowered_html or "sign in" in lowered_html)),
+    ]
+    if any(hard_blocks):
+        return False, ""
+
     text = strip_html(body)
     if not text:
         return False, ""
 
-    # Phase 5.1: reject login/paywall/cookie-wall pages (treat as fetch fail)
     low = text.lower()
-    login_signals = [
-        "sign in", "log in", "join linkedin", "agree & join", "create your free account",
-        "enable cookies", "accept all cookies", "privacy policy", "cookie policy",
-        "to continue, please", "verify you are a human", "captcha"
-    ]
-    # If a page is mostly auth/cookie boilerplate, it’s not useful as a learning source.
-    hits = sum(1 for sig in login_signals if sig in low)
-    if hits >= 3:
+
+    # Secondary hard blocks (some survive stripping)
+    if (("sign in" in low and "password" in low) or
+        ("enable javascript" in low) or
+        ("captcha" in low and ("human" in low or "verify" in low))):
         return False, ""
 
-    if len(text) > max_chars:
-        text = text[:max_chars]
-    return True, text
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    if len(cleaned) < 700:
+        return False, ""
+
+    return True, cleaned[:max_chars]
 
 def pick_definition_sentence(topic: str, text: str) -> str:
     topic_n = normalize_topic(topic)
@@ -1294,6 +1523,76 @@ def expand_topic_if_needed(topic: str) -> List[str]:
         return []
     return expansions[:MAX_EXPANSIONS_PER_TRIGGER]
 
+
+def ddg_lite_search(query: str, max_results: int = 10) -> List[Dict[str, str]]:
+    """
+    DuckDuckGo Lite HTML search (headless-friendly).
+    Returns: [{title, url}, ...]
+    """
+    if not query:
+        return []
+    if urllib is None:
+        return []
+
+    q = urllib.parse.quote_plus(query.strip())
+    url = f"https://lite.duckduckgo.com/lite/?q={q}"
+
+    # IMPORTANT: DDG Lite often needs a User-Agent
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read()
+        html = body.decode("utf-8", "ignore")
+    except Exception:
+        return []
+
+    if not html:
+        return []
+
+    # HTML entity cleanup for URLs like &amp;
+    html = html.replace("&amp;", "&")
+
+    results: List[Dict[str, str]] = []
+
+    # DDG Lite result links are often like:
+    # href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com&rut=..."
+    for mm in re.finditer(r'href="([^"]*duckduckgo\.com/l/\?[^"]*uddg=[^"]+)"', html, flags=re.I):
+        href = (mm.group(1) or "").strip()
+        if not href:
+            continue
+
+        if href.startswith("//"):
+            href = "https:" + href
+
+        try:
+            parsed = urllib.parse.urlparse(href)
+            qs = urllib.parse.parse_qs(parsed.query)
+            uddg = (qs.get("uddg") or [""])[0]
+            target = urllib.parse.unquote(uddg) if uddg else ""
+        except Exception:
+            target = ""
+
+        if not target:
+            continue
+        if not (target.startswith("http://") or target.startswith("https://")):
+            continue
+
+        results.append({"title": "", "url": target})
+        if len(results) >= max_results:
+            break
+
+    # fallback: any direct hrefs
+    if not results:
+        for href in re.findall(r'href="(https?://[^"]+)"', html, flags=re.I):
+            href = (href or "").strip()
+            if not href:
+                continue
+            results.append({"title": "", "url": href})
+            if len(results) >= max_results:
+                break
+
+    return results
+
 def web_learn_topic(topic: str, forced_url: str = "", avoid_domains: Optional[List[str]] = None) -> Tuple[bool, str, List[str], str]:
     avoid_domains = avoid_domains or []
 
@@ -1311,6 +1610,25 @@ def web_learn_topic(topic: str, forced_url: str = "", avoid_domains: Optional[Li
     cands = ddg_html_results(topic, max_results=6)
     if cands:
         best = choose_preferred_source_excluding(cands, avoid_domains)
+        # Phase 5.1 wiki fallback fix:
+        # If Wikipedia wins, do a second pass search excluding Wikipedia and nudging standards/docs.
+        try:
+            _u = (best or {}).get("url","") if isinstance(best, dict) else ""
+            _d = get_domain(_u)
+        except Exception:
+            _d = ""
+        if best and "wikipedia.org" in (_d or ""):
+            q2 = (topic or "").strip() + " RFC IETF NIST documentation -site:wikipedia.org -site:wiktionary.org -site:wikidata.org"
+            c2 = ddg_html_results(q2, max_results=10) or []
+            if not c2:
+                c2 = ddg_lite_results(q2, max_results=10) or []
+            c2 = [c for c in (c2 or []) if "wikipedia.org" not in get_domain((c.get("url") or ""))]
+            if c2:
+                try:
+                    best = choose_preferred_source_excluding(c2, avoid_domains)
+                except Exception:
+                    best = choose_preferred_source(c2)
+
         if best:
             chosen_url = best.get("url", "")
             ok, txt = fetch_page_text(chosen_url)
@@ -1671,6 +1989,15 @@ def curiosity_tick(limit: int = 3) -> Dict[str, Any]:
     k = load_knowledge()
     items = []
     for topic, entry in k.items():
+        junk2, why2 = is_junk_topic(topic)
+        if junk2:
+            continue
+        junk2, why2 = is_junk_topic(topic)
+        if junk2:
+            continue
+        junk2, why2 = is_junk_topic(topic)
+        if junk2:
+            continue
         junk2, why2 = is_junk_topic(topic)
         if junk2:
             continue
@@ -2454,6 +2781,220 @@ def cmd_lowest(arg: str) -> None:
     for conf, topic in items[:n]:
         print(f"- {topic}: {conf}")
 
+
+
+def cmd_lowestdomains(arg: str) -> None:
+    """
+    /lowestdomains [n]
+    Like /lowest, but shows evidence domain count.
+    """
+    n_str = arg.replace("/lowestdomains", "", 1).strip()
+    n = 10
+    if n_str:
+        try:
+            n = int(n_str)
+        except Exception:
+            n = 10
+
+    k = load_knowledge()
+    items = []
+    for topic, entry in k.items():
+        junk2, why2 = is_junk_topic(topic)
+        if junk2:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        conf = float(entry.get("confidence", 0.0) or 0.0)
+        domains = entry.get("evidence_domains") or []
+        dcount = len(set([(d or "").lower().strip() for d in domains if (d or "").strip()]))
+        items.append((conf, dcount, topic))
+
+    items.sort(key=lambda x: (x[0], x[1], x[2]))
+    print(f"Lowest confidence w/ domains (top {n}):")
+    for conf, dcount, topic in items[:n]:
+        print(f"- {topic}: {conf:.2f} (domains={dcount})")
+
+def cmd_needsources(arg: str) -> None:
+    """
+    /needsources [n]
+    List topics with fewer than n evidence domains (default 2).
+    """
+    try:
+        n_str = arg.replace("/needsources", "", 1).strip()
+        n = int(n_str) if n_str else 2
+    except Exception:
+        n = 2
+    if n < 1:
+        n = 1
+
+    k = load_knowledge()
+    rows = []
+    for topic, entry in k.items():
+        junk2, why2 = is_junk_topic(topic)
+        if junk2:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        domains = entry.get("evidence_domains") or []
+        dcount = len(set([(d or "").lower().strip() for d in domains if (d or "").strip()]))
+        conf = float(entry.get("confidence", 0.0) or 0.0)
+        if dcount < n:
+            rows.append((topic, conf, dcount))
+
+    rows.sort(key=lambda x: (x[2], x[1], x[0]))  # fewest domains, then lowest confidence, then topic
+    print(f"Topics needing sources (< {n} domains):")
+    if not rows:
+        print("- none")
+        return
+    for topic, conf, dcount in rows[:50]:
+        print(f"- {topic}: {conf:.2f} (domains={dcount})")
+
+
+
+def cmd_debugsources(arg: str) -> None:
+    """
+    /debugsources <topic>
+    Show candidate URLs + scores + whether fetch is blocked/thin/etc.
+    """
+    topic = normalize_topic(arg.replace("/debugsources", "", 1).strip())
+    if not topic:
+        print("Usage: /debugsources <topic>")
+        return
+
+    q1 = topic
+    q2 = topic + " documentation RFC IETF NIST -site:wikipedia.org -site:wiktionary.org -site:wikidata.org"
+
+    def show(label: str, q: str):
+        print(f"--- {label} ---")
+        print(f"query: {q}")
+        cands = ddg_html_results(q, max_results=12) or []
+        if not cands:
+            print("(no candidates)")
+            return
+
+        rows = []
+        for c in cands:
+            url = (c.get("url") or "").strip()
+            title = (c.get("title") or "").strip()
+            if not url:
+                continue
+            sc = source_score(url, title)
+            rows.append((sc, url, title))
+
+        rows.sort(key=lambda x: x[0], reverse=True)
+
+        for sc, url, title in rows[:8]:
+            ok, text, reason = fetch_page_text_debug(url)
+            dom = get_domain(url)
+            tlen = len(re.sub(r"\s+"," ", (text or "")).strip()) if text else 0
+            print(f"- score={sc:4d} ok={ok} reason={reason:12s} len={tlen:5d} domain={dom} url={url}")
+
+    show("NORMAL", q1)
+    print("")
+    show("WIKI_AVOID", q2)
+
+def cmd_repair_evidence(arg: str) -> None:
+    """
+    /repair_evidence
+    One-time maintenance:
+    - remove junk topics
+    - backfill evidence_domains / buckets from stored sources (if present)
+    - clamp over-confident unconfirmed entries lacking evidence
+    """
+    k = load_knowledge()
+
+    def _bucket(d: str) -> str:
+        d = (d or "").lower().strip()
+        if not d:
+            return "other"
+        if "rfc-editor.org" in d or "ietf.org" in d or "iana.org" in d:
+            return "rfc"
+        if d.endswith(".gov") or d.endswith(".edu") or "nist.gov" in d:
+            return "gov_edu"
+        if "wikipedia.org" in d:
+            return "wiki"
+        # treat major vendor docs as vendor bucket
+        vendor_hits = ["cisco.com", "juniper.net", "microsoft.com", "learn.microsoft.com", "cloudflare.com", "akamai.com", "redhat.com", "ibm.com", "oracle.com"]
+        if any(v in d for v in vendor_hits):
+            return "vendor"
+        return "other"
+    removed = 0
+    backfilled = 0
+    clamped = 0
+    touched = 0
+
+    for topic in list(k.keys()):
+        junk, why = is_junk_topic(topic)
+        if junk:
+            del k[topic]
+            removed += 1
+            continue
+
+        entry = k.get(topic)
+        if not isinstance(entry, dict):
+            continue
+
+        # Ensure confirmed structure exists
+        confirmed = entry.get("confirmed")
+        if not isinstance(confirmed, dict):
+            confirmed = {"count": 0, "last": ""}
+            entry["confirmed"] = confirmed
+
+        # Backfill evidence_domains from sources if missing/empty
+        domains = entry.get("evidence_domains")
+        if not isinstance(domains, list):
+            domains = []
+        domains_clean = set([(d or "").lower().strip() for d in domains if (d or "").strip()])
+
+        sources = entry.get("sources") or []
+        if isinstance(sources, list) and sources:
+            for u in sources:
+                try:
+                    d = get_domain(str(u))
+                except Exception:
+                    d = ""
+                d = (d or "").lower().strip()
+                if d:
+                    domains_clean.add(d)
+
+        if len(domains_clean) != len(domains):
+            entry["evidence_domains"] = sorted(domains_clean)
+            # also backfill buckets if possible
+            buckets = entry.get("evidence_buckets")
+            if not isinstance(buckets, dict):
+                buckets = {}
+            for d in domains_clean:
+                b = _bucket(d)
+                buckets[b] = int(buckets.get(b, 0) or 0) + 1
+            entry["evidence_buckets"] = buckets
+            backfilled += 1
+            touched += 1
+
+        # Clamp confidence if unconfirmed and weak evidence (<2 domains)
+        try:
+            conf = float(entry.get("confidence", 0.0) or 0.0)
+        except Exception:
+            conf = 0.0
+        confirm_count = int(confirmed.get("count") or 0)
+        dcount = len(set([(d or "").lower().strip() for d in (entry.get("evidence_domains") or []) if (d or "").strip()]))
+
+        if confirm_count <= 0 and dcount < 2 and conf > 0.92:
+            entry["confidence"] = 0.92
+            entry["updated"] = iso_now()
+            clamped += 1
+            touched += 1
+
+        k[topic] = entry
+
+    if removed or backfilled or clamped:
+        save_knowledge(k)
+
+    print("Repair complete:")
+    print(f"- removed junk topics: {removed}")
+    print(f"- backfilled evidence: {backfilled}")
+    print(f"- clamped confidence: {clamped}")
+    print(f"- total touched: {touched}")
+
 def cmd_alias(arg: str) -> None:
     left, right = split_pipe(arg)
     frm = normalize_topic(left.replace("/alias", "", 1).strip())
@@ -2792,8 +3333,22 @@ def main() -> None:
                 cmd_confidence(user); continue
             if user.startswith("/confirm"):
                 cmd_confirm(user); continue
+            if user.startswith("/lowestdomains"):
+                cmd_lowestdomains(user); continue
+
             if user.startswith("/lowest"):
                 cmd_lowest(user); continue
+            if user.startswith("/needsources"):
+                cmd_needsources(user); continue
+
+
+
+            if user.startswith("/debugsources"):
+                cmd_debugsources(user); continue
+
+            if user.startswith("/repair_evidence"):
+                cmd_repair_evidence(user); continue
+
             if user.startswith("/alias "):
                 cmd_alias(user); continue
             if user.startswith("/aliases"):
