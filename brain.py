@@ -504,7 +504,16 @@ def compute_weighted_confidence(existing_entry: Dict[str, Any], base_floor: floa
     # Phase 5.1: prevent confidence inflation from repeat learns
     # If we did not gain a new domain and the user has not confirmed, do not apply reinforcement bonus.
     gained_new_domain = bool(ev.get("_gained_new_domain"))
-    if (not gained_new_domain) and (int(confirmed.get("count") or 0) <= 0):
+
+    # confirmed may not be initialized yet in this function, so read it safely from existing_entry
+    confirm_count = 0
+    try:
+        c = (existing_entry or {}).get("confirmed") or {}
+        confirm_count = int(c.get("count") or 0)
+    except Exception:
+        confirm_count = 0
+
+    if (not gained_new_domain) and (confirm_count <= 0):
         reinforce_bonus = 0.0
 
     # Combine
