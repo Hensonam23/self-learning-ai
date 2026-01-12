@@ -3214,8 +3214,7 @@ def cmd_curiosity(arg: str) -> None:
         except Exception:
             limit = 3
     res = curiosity_tick(limit=limit)
-    print(f"Curiosity complete. Queued {res['queued']} out of {res['considered']} considered (limit {res['limit']}).")
-
+    print(f"curiosity: queued={res['queued']} considered={res['considered']} limit={res['limit']}")
 def cmd_autonomy(arg: str) -> None:
     rest = arg.replace("/autonomy", "", 1).strip().lower()
     cfg = load_autonomy()
@@ -3370,9 +3369,9 @@ def run_cli_mode() -> bool:
             if isinstance(res, dict):
                 print(f"curiosity: considered={res.get('considered')} queued={res.get('queued')} limit={res.get('limit')}")
             else:
-                print(f"curiosity: ran n={n}")
+                pass  # legacy wrapper log removed
         except Exception:
-            print(f"curiosity: ran n={n}")
+            pass  # legacy wrapper log removed
         return True
 
     return False
