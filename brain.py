@@ -3302,22 +3302,42 @@ def _call_webqueue(limit: int):
             return fn(limit)
 
 def _call_curiosity(n: int):
-    # try a few likely function names without assuming exact signature
+    # Best option: reuse the exact interactive command handler if present
+    fn = globals().get("cmd_curiosity")
+    if callable(fn):
+        # try the most likely signature first (full command string)
+        try:
+            return fn(f"/curiosity {n}")
+        except TypeError:
+            pass
+        # try passing just the number string
+        try:
+            return fn(str(n))
+        except TypeError:
+            pass
+        # try no args
+        try:
+            return fn()
+        except TypeError:
+            pass
+
+    # Fallback: try internal runners (older names)
     for name in ("run_curiosity", "run_curiosity_queue", "run_curiosity_seed"):
-        fn = globals().get(name)
-        if not callable(fn):
+        fn2 = globals().get(name)
+        if not callable(fn2):
             continue
         try:
-            return fn(limit=n)
+            return fn2(limit=n)
         except TypeError:
             try:
-                return fn(n)
+                return fn2(n)
             except TypeError:
                 try:
-                    return fn(n=n)
+                    return fn2(n=n)
                 except TypeError:
                     continue
     return None
+
 
 def run_cli_mode() -> bool:
     """
