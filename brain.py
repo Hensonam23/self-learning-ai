@@ -1481,6 +1481,52 @@ def expand_topic_if_needed(topic: str) -> List[str]:
         return []
     return expansions[:MAX_EXPANSIONS_PER_TRIGGER]
 
+
+def ddg_lite_search(query: str, max_results: int = 10) -> List[Dict[str, str]]:
+    """
+    DuckDuckGo Lite HTML search (more reliable headless fallback).
+    Returns: [{title, url}, ...]
+    """
+    if not query:
+        return []
+    if urllib is None:
+        return []
+
+    q = urllib.parse.quote_plus(query.strip())
+    url = f"https://lite.duckduckgo.com/lite/?q={q}"
+
+    code, body = http_get(url)
+    if code != 200 or not body:
+        return []
+
+    html = body
+    results = []
+    for m in re.finditer(r'<a[^>]+class="result-link"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html, flags=re.I|re.S):
+        href = (m.group(1) or "").strip()
+        title_html = (m.group(2) or "").strip()
+        title = strip_html(title_html).strip()
+        if not href:
+            continue
+
+        if href.startswith("/l/") or "uddg=" in href:
+            try:
+                parsed = urllib.parse.urlparse(href)
+                qs = urllib.parse.parse_qs(parsed.query)
+                if "uddg" in qs and qs["uddg"]:
+                    href = urllib.parse.unquote(qs["uddg"][0])
+            except Exception:
+                pass
+
+        if href.startswith("//"):
+            href = "https:" + href
+        if href.startswith("/"):
+            continue
+
+        results.append({"title": title, "url": href})
+        if len(results) >= max_results:
+            break
+    return results
+
 def web_learn_topic(topic: str, forced_url: str = "", avoid_domains: Optional[List[str]] = None) -> Tuple[bool, str, List[str], str]:
     avoid_domains = avoid_domains or []
 
@@ -1496,7 +1542,7 @@ def web_learn_topic(topic: str, forced_url: str = "", avoid_domains: Optional[Li
         return True, answer, sources, forced_url
 
     cands = ddg_html_results(topic, max_results=6)
-    if cands:
+    # Phase 5.1: if primary search returns nothing, fall back to DDG Lite\n    if not cands:\n        cands = ddg_lite_search(topic, max_results=12)\n\n    if cands:
         best = choose_preferred_source_excluding(cands, avoid_domains)
         if best:
             chosen_url = best.get("url", "")
