@@ -2586,6 +2586,38 @@ def cmd_lowest(arg: str) -> None:
         print(f"- {topic}: {conf}")
 
 
+
+def cmd_lowestdomains(arg: str) -> None:
+    """
+    /lowestdomains [n]
+    Like /lowest, but shows evidence domain count.
+    """
+    n_str = arg.replace("/lowestdomains", "", 1).strip()
+    n = 10
+    if n_str:
+        try:
+            n = int(n_str)
+        except Exception:
+            n = 10
+
+    k = load_knowledge()
+    items = []
+    for topic, entry in k.items():
+        junk2, why2 = is_junk_topic(topic)
+        if junk2:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        conf = float(entry.get("confidence", 0.0) or 0.0)
+        domains = entry.get("evidence_domains") or []
+        dcount = len(set([(d or "").lower().strip() for d in domains if (d or "").strip()]))
+        items.append((conf, dcount, topic))
+
+    items.sort(key=lambda x: (x[0], x[1], x[2]))
+    print(f"Lowest confidence w/ domains (top {n}):")
+    for conf, dcount, topic in items[:n]:
+        print(f"- {topic}: {conf:.2f} (domains={dcount})")
+
 def cmd_needsources(arg: str) -> None:
     """
     /needsources [n]
@@ -3064,6 +3096,10 @@ def main() -> None:
                 cmd_confirm(user); continue
             if user.startswith("/lowest"):
                 cmd_lowest(user); continue
+
+
+            if user.startswith("/lowestdomains"):
+                cmd_lowestdomains(user); continue
 
             if user.startswith("/needsources"):
                 cmd_needsources(user); continue
