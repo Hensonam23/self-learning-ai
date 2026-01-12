@@ -2621,6 +2621,93 @@ def cmd_needsources(arg: str) -> None:
     for topic, conf, dcount in rows[:50]:
         print(f"- {topic}: {conf:.2f} (domains={dcount})")
 
+
+def cmd_repair_evidence(arg: str) -> None:
+    """
+    /repair_evidence
+    One-time maintenance:
+    - remove junk topics
+    - backfill evidence_domains / buckets from stored sources (if present)
+    - clamp over-confident unconfirmed entries lacking evidence
+    """
+    k = load_knowledge()
+    removed = 0
+    backfilled = 0
+    clamped = 0
+    touched = 0
+
+    for topic in list(k.keys()):
+        junk, why = is_junk_topic(topic)
+        if junk:
+            del k[topic]
+            removed += 1
+            continue
+
+        entry = k.get(topic)
+        if not isinstance(entry, dict):
+            continue
+
+        # Ensure confirmed structure exists
+        confirmed = entry.get("confirmed")
+        if not isinstance(confirmed, dict):
+            confirmed = {"count": 0, "last": ""}
+            entry["confirmed"] = confirmed
+
+        # Backfill evidence_domains from sources if missing/empty
+        domains = entry.get("evidence_domains")
+        if not isinstance(domains, list):
+            domains = []
+        domains_clean = set([(d or "").lower().strip() for d in domains if (d or "").strip()])
+
+        sources = entry.get("sources") or []
+        if isinstance(sources, list) and sources:
+            for u in sources:
+                try:
+                    d = get_domain(str(u))
+                except Exception:
+                    d = ""
+                d = (d or "").lower().strip()
+                if d:
+                    domains_clean.add(d)
+
+        if len(domains_clean) != len(domains):
+            entry["evidence_domains"] = sorted(domains_clean)
+            # also backfill buckets if possible
+            buckets = entry.get("evidence_buckets")
+            if not isinstance(buckets, dict):
+                buckets = {}
+            for d in domains_clean:
+                b = bucket_for_domain(d)
+                buckets[b] = int(buckets.get(b, 0) or 0) + 1
+            entry["evidence_buckets"] = buckets
+            backfilled += 1
+            touched += 1
+
+        # Clamp confidence if unconfirmed and weak evidence (<2 domains)
+        try:
+            conf = float(entry.get("confidence", 0.0) or 0.0)
+        except Exception:
+            conf = 0.0
+        confirm_count = int(confirmed.get("count") or 0)
+        dcount = len(set([(d or "").lower().strip() for d in (entry.get("evidence_domains") or []) if (d or "").strip()]))
+
+        if confirm_count <= 0 and dcount < 2 and conf > 0.92:
+            entry["confidence"] = 0.92
+            entry["updated"] = iso_now()
+            clamped += 1
+            touched += 1
+
+        k[topic] = entry
+
+    if removed or backfilled or clamped:
+        save_knowledge(k)
+
+    print("Repair complete:")
+    print(f"- removed junk topics: {removed}")
+    print(f"- backfilled evidence: {backfilled}")
+    print(f"- clamped confidence: {clamped}")
+    print(f"- total touched: {touched}")
+
 def cmd_alias(arg: str) -> None:
     left, right = split_pipe(arg)
     frm = normalize_topic(left.replace("/alias", "", 1).strip())
@@ -2964,6 +3051,10 @@ def main() -> None:
 
             if user.startswith("/needsources"):
                 cmd_needsources(user); continue
+
+
+            if user.startswith("/repair_evidence"):
+                cmd_repair_evidence(user); continue
 
             if user.startswith("/alias "):
                 cmd_alias(user); continue
