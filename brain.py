@@ -797,6 +797,10 @@ def set_knowledge(topic: str, answer: str, confidence: float, sources: Optional[
     entry["notes"] = notes or entry.get("notes", "")
     entry["taught_by_user"] = bool(taught_by_user) or bool(entry.get("taught_by_user", False))
     entry["sources"] = merged_sources
+    # Phase 5.1: track whether this update added a NEW independent domain
+    old_domains = set([(d or "").lower().strip() for d in (entry.get("evidence_domains") or []) if (d or "").strip()])
+    new_domains = set([(d or "").lower().strip() for d in (domains or []) if (d or "").strip()])
+    entry["_gained_new_domain"] = (len(new_domains - old_domains) > 0)
     entry["evidence_domains"] = domains
     entry["evidence_buckets"] = buckets
     entry["reinforcement"] = reinf
