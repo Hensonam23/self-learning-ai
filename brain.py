@@ -304,16 +304,57 @@ def parse_iso_to_ts(s: str) -> Optional[int]:
         return None
 
 def get_domain(url: str) -> str:
-    url = (url or "").strip()
-    if not url:
+    """
+    Extract domain/host from a URL.
+
+    Phase 5.1: unwrap DuckDuckGo redirect URLs (duckduckgo.com/l/?uddg=...),
+    so domain-based scoring + wiki detection + evidence_domains work correctly.
+    """
+    u = (url or "").strip()
+    if not u:
         return ""
+
+    # Normalize scheme-less URLs
+    if u.startswith("//"):
+        u = "https:" + u
+
+    # If we have the project helper, use it (keeps behavior consistent)
     try:
-        if urllib is None:
-            return ""
-        p = urllib.parse.urlparse(url)
-        return (p.netloc or "").lower()
+        u = clean_ddg_redirect_url(u)
+    except Exception:
+        pass
+
+    if urllib is None:
+        return ""
+
+    # If still wrapped, unwrap uddg= manually
+    try:
+        if "duckduckgo.com/l/" in u and "uddg=" in u:
+            u2 = u.replace("&amp;", "&")
+            p = urllib.parse.urlparse(u2)
+            qs = urllib.parse.parse_qs(p.query)
+            uddg = (qs.get("uddg") or [""])[0]
+            if uddg:
+                u = urllib.parse.unquote(uddg)
+                if u.startswith("//"):
+                    u = "https:" + u
+    except Exception:
+        pass
+
+    # If it's a bare domain like "example.com", normalize it
+    if "://" not in u and " " not in u and "/" not in u and "." in u:
+        u = "https://" + u
+
+    try:
+        p = urllib.parse.urlparse(u)
+        host = (p.netloc or "").strip().lower()
     except Exception:
         return ""
+
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
 
 def clamp(x: float, lo: float, hi: float) -> float:
     try:
