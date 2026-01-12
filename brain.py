@@ -2719,6 +2719,49 @@ def cmd_needsources(arg: str) -> None:
         print(f"- {topic}: {conf:.2f} (domains={dcount})")
 
 
+
+def cmd_debugsources(arg: str) -> None:
+    """
+    /debugsources <topic>
+    Show candidate URLs + scores + whether fetch is blocked/thin/etc.
+    """
+    topic = normalize_topic(arg.replace("/debugsources", "", 1).strip())
+    if not topic:
+        print("Usage: /debugsources <topic>")
+        return
+
+    q1 = topic
+    q2 = topic + " documentation RFC IETF NIST -site:wikipedia.org -site:wiktionary.org -site:wikidata.org"
+
+    def show(label: str, q: str):
+        print(f"--- {label} ---")
+        print(f"query: {q}")
+        cands = ddg_search(q, max_results=12) or []
+        if not cands:
+            print("(no candidates)")
+            return
+
+        rows = []
+        for c in cands:
+            url = (c.get("url") or "").strip()
+            title = (c.get("title") or "").strip()
+            if not url:
+                continue
+            sc = source_score(url, title)
+            rows.append((sc, url, title))
+
+        rows.sort(key=lambda x: x[0], reverse=True)
+
+        for sc, url, title in rows[:8]:
+            ok, text, reason = fetch_page_text_debug(url)
+            dom = get_domain(url)
+            tlen = len(re.sub(r"\s+"," ", (text or "")).strip()) if text else 0
+            print(f"- score={sc:4d} ok={ok} reason={reason:12s} len={tlen:5d} domain={dom} url={url}")
+
+    show("NORMAL", q1)
+    print("")
+    show("WIKI_AVOID", q2)
+
 def cmd_repair_evidence(arg: str) -> None:
     """
     /repair_evidence
