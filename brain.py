@@ -3094,13 +3094,11 @@ def main() -> None:
                 cmd_confidence(user); continue
             if user.startswith("/confirm"):
                 cmd_confirm(user); continue
-            if user.startswith("/lowest"):
-                cmd_lowest(user); continue
-
-
             if user.startswith("/lowestdomains"):
                 cmd_lowestdomains(user); continue
 
+            if user.startswith("/lowest"):
+                cmd_lowest(user); continue
             if user.startswith("/needsources"):
                 cmd_needsources(user); continue
 
