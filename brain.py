@@ -1090,8 +1090,13 @@ def choose_best_source(candidates: List[Dict[str, str]]) -> Optional[Dict[str, s
     return scored[0][1]
 
 def choose_preferred_source(candidates: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    """
+    Prefer non-Wikipedia sources whenever possible.
+    Wikipedia should be fallback-only unless there are no usable non-wiki candidates.
+    """
     if not candidates:
         return None
+
     scored = []
     for c in candidates:
         url = (c.get("url") or "").strip()
@@ -1099,17 +1104,27 @@ def choose_preferred_source(candidates: List[Dict[str, str]]) -> Optional[Dict[s
         if not url:
             continue
         scored.append((source_score(url, title), c))
+
     if not scored:
         return None
+
     scored.sort(key=lambda x: x[0], reverse=True)
     best_score, best = scored[0]
     best_domain = get_domain(best.get("url", ""))
-    nonwiki = [(sc, c) for (sc, c) in scored if "wikipedia.org" not in get_domain(c.get("url",""))]
+
+    nonwiki = [(sc, c) for (sc, c) in scored if "wikipedia.org" not in get_domain(c.get("url", ""))]
+
+    # HARD RULE: if Wikipedia is best and we have ANY non-wiki candidate that isn't total trash, choose it.
+    # (This keeps wikipedia as a true fallback.)
     if "wikipedia.org" in best_domain and nonwiki:
         nonwiki.sort(key=lambda x: x[0], reverse=True)
         sc2, c2 = nonwiki[0]
-        if sc2 >= (best_score - 60):
+
+        # If the best non-wiki is catastrophically low, allow wiki fallback.
+        # Otherwise, prefer non-wiki even if it scored lower.
+        if sc2 > -500:
             return c2
+
     return best
 
 def choose_preferred_source_excluding(candidates: List[Dict[str, str]], avoid_domains: List[str]) -> Optional[Dict[str, str]]:
