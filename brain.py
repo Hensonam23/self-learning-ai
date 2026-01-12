@@ -3211,6 +3211,10 @@ def main() -> None:
                 cmd_needsources(user); continue
 
 
+
+            if user.startswith("/debugsources"):
+                cmd_debugsources(user); continue
+
             if user.startswith("/repair_evidence"):
                 cmd_repair_evidence(user); continue
 
