@@ -2602,6 +2602,9 @@ def cmd_needsources(arg: str) -> None:
     k = load_knowledge()
     rows = []
     for topic, entry in k.items():
+        junk2, why2 = is_junk_topic(topic)
+        if junk2:
+            continue
         if not isinstance(entry, dict):
             continue
         domains = entry.get("evidence_domains") or []
