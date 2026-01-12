@@ -3278,7 +3278,91 @@ def handle_sigint(_sig, _frame):
     global STOP
     STOP = True
 
+
+# CLI_HEADLESS_MODE_PATCH_V1
+def _cli_int_after(flag: str, default: int) -> int:
+    try:
+        i = sys.argv.index(flag)
+        if i + 1 < len(sys.argv):
+            return int(sys.argv[i + 1])
+    except Exception:
+        pass
+    return default
+
+def _call_webqueue(limit: int):
+    fn = globals().get("run_webqueue")
+    if not callable(fn):
+        return None
+    try:
+        return fn(limit=limit, autoupgrade=True)
+    except TypeError:
+        try:
+            return fn(limit=limit)
+        except TypeError:
+            return fn(limit)
+
+def _call_curiosity(n: int):
+    # try a few likely function names without assuming exact signature
+    for name in ("run_curiosity", "run_curiosity_queue", "run_curiosity_seed"):
+        fn = globals().get(name)
+        if not callable(fn):
+            continue
+        try:
+            return fn(limit=n)
+        except TypeError:
+            try:
+                return fn(n)
+            except TypeError:
+                try:
+                    return fn(n=n)
+                except TypeError:
+                    continue
+    return None
+
+def run_cli_mode() -> bool:
+    """
+    Headless mode for systemd: run and exit.
+    Supports:
+      --webqueue --limit N
+      --curiosity --n N
+    """
+    args = sys.argv[1:]
+    if not args:
+        return False
+
+    if "--webqueue" in args:
+        limit = _cli_int_after("--limit", 3)
+        res = _call_webqueue(limit)
+        try:
+            # res is usually a dict
+            if isinstance(res, dict):
+                print(f"webqueue: learned={res.get('learned')} attempted={res.get('attempted')} skipped={res.get('skipped')} finalized={res.get('finalized')} limit={res.get('limit')}")
+            else:
+                print(f"webqueue: ran limit={limit}")
+        except Exception:
+            print(f"webqueue: ran limit={limit}")
+        return True
+
+    if "--curiosity" in args:
+        n = _cli_int_after("--n", 3)
+        res = _call_curiosity(n)
+        try:
+            if isinstance(res, dict):
+                print(f"curiosity: considered={res.get('considered')} queued={res.get('queued')} limit={res.get('limit')}")
+            else:
+                print(f"curiosity: ran n={n}")
+        except Exception:
+            print(f"curiosity: ran n={n}")
+        return True
+
+    return False
+
+
 def main() -> None:
+    # headless CLI mode (systemd)
+    if run_cli_mode():
+        return
+
     ensure_dirs()
     signal.signal(signal.SIGINT, handle_sigint)
 
