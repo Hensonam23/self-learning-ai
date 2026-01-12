@@ -2571,8 +2571,9 @@ def cmd_needsources(arg: str) -> None:
     if n < 1:
         n = 1
 
+    k = load_knowledge()
     rows = []
-    for topic, entry in (knowledge or {}).items():
+    for topic, entry in k.items():
         if not isinstance(entry, dict):
             continue
         domains = entry.get("evidence_domains") or []
@@ -2581,7 +2582,7 @@ def cmd_needsources(arg: str) -> None:
         if dcount < n:
             rows.append((topic, conf, dcount))
 
-    rows.sort(key=lambda x: (x[2], x[1], x[0]))  # fewest domains, then lowest confidence
+    rows.sort(key=lambda x: (x[2], x[1], x[0]))  # fewest domains, then lowest confidence, then topic
     print(f"Topics needing sources (< {n} domains):")
     if not rows:
         print("- none")
