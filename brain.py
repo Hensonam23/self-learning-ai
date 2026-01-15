@@ -3338,6 +3338,60 @@ def _call_curiosity(n: int):
     return None
 
 
+def _call_selftest_headless() -> int:
+    """
+    Headless selftest runner:
+      - runs existing selftest logic (prefers underlying function if present; otherwise uses cmd_selftest)
+      - prints ONE short summary line
+      - returns exit code 0 (pass) / 1 (fail)
+    """
+    import io
+    import contextlib
+    import time
+
+    t0 = time.time()
+    buf = io.StringIO()
+
+    ok = True
+    try:
+        # Prefer an underlying function if one exists (future-proof)
+        fn = (globals().get("selftest_tick") or
+              globals().get("run_selftest") or
+              globals().get("selftest"))
+
+        if callable(fn):
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                res = fn()
+            if isinstance(res, dict):
+                ok = bool(res.get("ok", res.get("passed", res.get("pass", True))))
+            elif isinstance(res, bool):
+                ok = res
+            else:
+                # fall back to heuristic on captured output
+                out = buf.getvalue().lower()
+                ok = not ("fail" in out or "failed" in out or "error" in out or "exception" in out)
+
+        elif callable(globals().get("cmd_selftest")):
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                globals()["cmd_selftest"]("/selftest")
+            out = buf.getvalue().lower()
+            ok = not ("fail" in out or "failed" in out or "error" in out or "exception" in out)
+
+        else:
+            print("selftest: ok=0 error=no_selftest_command")
+            return 1
+
+    except Exception as e:
+        print(f"selftest: ok=0 error={type(e).__name__}")
+        return 1
+
+    dt = time.time() - t0
+    print(f"selftest: ok={'1' if ok else '0'} duration_s={dt:.3f}")
+    return 0 if ok else 1
+
+
+
+
 def run_cli_mode() -> bool:
     """
     Headless mode for systemd: run and exit.
@@ -3373,6 +3427,11 @@ def run_cli_mode() -> bool:
         except Exception:
             pass  # legacy wrapper log removed
         return True
+
+    import sys as _sys
+    if "--selftest" in _sys.argv:
+        code = _call_selftest_headless()
+        _sys.exit(code)
 
     return False
 

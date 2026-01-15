@@ -210,6 +210,17 @@ def _brain_headless_curiosity_args(n: int) -> List[str]:
     return [PYTHON_BIN, str(BRAIN_PATH), "--curiosity", "--n", str(int(n))]
 
 
+@app.get("/")
+async def root() -> Dict[str, Any]:
+    # Intentionally no auth here: this is a harmless "service is up" message for browsers.
+    return {
+        "ok": True,
+        "app": APP_NAME,
+        "docs": "/docs",
+        "hint": "Most endpoints require header x-api-key. Try /health with curl.",
+    }
+
+
 @app.get("/health")
 async def health(request: Request) -> Dict[str, Any]:
     _require_auth(request)
@@ -288,3 +299,10 @@ async def run_curiosity(
     _require_auth(request)
     _require_confirm(confirm)
     return await _run_process(_brain_headless_curiosity_args(n), timeout_s=timeout_s)
+
+
+@app.post("/run/selftest", response_model=RunResult)
+async def run_selftest(request: Request, timeout_s: Optional[int] = None) -> RunResult:
+    _require_auth(request)
+    args = [PYTHON_BIN, str(BRAIN_PATH), "--selftest"]
+    return await _run_process(args, timeout_s=timeout_s)
