@@ -10,6 +10,7 @@ from typing import List, Optional, Dict, Any
 
 import fcntl
 from fastapi import FastAPI, HTTPException, Request, Query
+from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, Field
 
 APP_NAME = "MachineSpirit API"
@@ -347,3 +348,42 @@ async def run_selftest(request: Request, timeout_s: Optional[int] = None) -> Run
     _require_auth(request)
     args = [PYTHON_BIN, str(BRAIN_PATH), "--selftest"]
     return await _run_process(args, timeout_s=timeout_s)
+
+def custom_openapi():
+    """
+    Swagger/OpenAPI:
+      - adds an Authorize button for x-api-key
+      - marks protected endpoints as requiring ApiKeyAuth
+    """
+    if getattr(app, "openapi_schema", None):
+        return app.openapi_schema
+
+    schema = get_openapi(
+        title=getattr(app, "title", "MachineSpirit API"),
+        version=str(getattr(app, "version", "0.0.0")),
+        routes=app.routes,
+    )
+
+    schema.setdefault("components", {}).setdefault("securitySchemes", {})
+    schema["components"]["securitySchemes"]["ApiKeyAuth"] = {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key",
+    }
+
+    public_paths = {"/", "/openapi.json", "/docs", "/redoc"}
+
+    for path, methods in schema.get("paths", {}).items():
+        if path in public_paths:
+            continue
+        for method, op in methods.items():
+            if method.lower() in {"get","post","put","delete","patch","options","head"}:
+                op.setdefault("security", [])
+                req = {"ApiKeyAuth": []}
+                if req not in op["security"]:
+                    op["security"].append(req)
+
+    app.openapi_schema = schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi

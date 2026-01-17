@@ -58,3 +58,5 @@ brain.py.bak.*
 patch_*.py
 apply_*.py
 dev_backups/
+.machinespirit.lock
+ms_api.py.bak.*
