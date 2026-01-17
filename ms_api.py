@@ -5,7 +5,6 @@ import asyncio
 import os
 import re
 import time
-import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -16,7 +15,7 @@ from ms_theme import apply_theme, load_theme, save_theme, ui_intensity_choices
 
 
 APP_NAME = "MachineSpirit API"
-VERSION = "0.3.7"
+VERSION = "0.3.6"
 
 BASE_DIR = Path(__file__).resolve().parent
 REPO_DIR = Path(os.environ.get("MS_REPO_DIR", str(BASE_DIR))).resolve()
@@ -26,19 +25,15 @@ PYTHON_BIN = os.environ.get("MS_PYTHON", "/usr/bin/python3")
 MS_API_KEY = os.environ.get("MS_API_KEY", "")
 
 LOCK_PATH = Path(os.environ.get("MS_LOCK_PATH", str(REPO_DIR / ".machinespirit.lock")))
-KNOWLEDGE_PATH = Path(os.environ.get("MS_KNOWLEDGE_PATH", str(REPO_DIR / "data" / "local_knowledge.json")))
+
+# "Unrestricted-ish" web learning (automatic)
+AUTO_WEBLEARN = os.environ.get("MS_AUTO_WEBLEARN", "1").strip().lower() in ("1", "true", "yes", "on")
+AUTO_WEBLEARN_MAX_TRIES = int(os.environ.get("MS_AUTO_WEBLEARN_MAX_TRIES", "2"))
+AUTO_WEBLEARN_TIMEOUT_S = int(os.environ.get("MS_AUTO_WEBLEARN_TIMEOUT_S", "60"))
+AUTO_WEBLEARN_MIN_LEN = int(os.environ.get("MS_AUTO_WEBLEARN_MIN_LEN", "140"))
+
 
 app = FastAPI(title=APP_NAME, version=VERSION)
-
-# Prevent overlapping brain subprocess calls
-_BRAIN_LOCK = asyncio.Lock()
-# Prevent overlapping writes to knowledge json
-_KNOW_LOCK = asyncio.Lock()
-
-
-def _iso_now() -> str:
-    # good enough ISO-ish without importing datetime
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
 
 
 # ----------------------------
@@ -58,17 +53,12 @@ class AskResponse(BaseModel):
     error: Optional[str] = None
     raw: Optional[Dict[str, Any]] = None
     theme: Optional[Dict[str, str]] = None
+    did_research: Optional[bool] = None
 
 
 class ThemeRequest(BaseModel):
     theme: str
     intensity: str
-
-
-class OverrideRequest(BaseModel):
-    topic: str
-    answer: str
-    confidence: Optional[float] = 0.95
 
 
 # ----------------------------
@@ -83,87 +73,7 @@ def _require_auth(request: Request) -> None:
 
 
 # ----------------------------
-# Knowledge overwrite helpers
-# ----------------------------
-def _load_knowledge_root() -> Tuple[Dict[str, Any], Dict[str, Any], str]:
-    """
-    Returns (root_obj, mapping, mode)
-
-    mode:
-      - "map": root_obj IS the mapping (topic -> entry)
-      - "knowledge": root_obj["knowledge"] is the mapping
-      - "topics": root_obj["topics"] is the mapping
-    """
-    if not KNOWLEDGE_PATH.exists():
-        return {}, {}, "map"
-
-    try:
-        root = json.loads(KNOWLEDGE_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}, {}, "map"
-
-    if isinstance(root, dict):
-        if isinstance(root.get("knowledge"), dict):
-            return root, root["knowledge"], "knowledge"
-        if isinstance(root.get("topics"), dict):
-            return root, root["topics"], "topics"
-        # assume it's already a map
-        return root, root, "map"
-
-    # unknown shape
-    return {}, {}, "map"
-
-
-def _save_knowledge_root(root: Dict[str, Any], mapping: Dict[str, Any], mode: str) -> None:
-    if mode == "knowledge":
-        root = dict(root or {})
-        root["knowledge"] = mapping
-        out_obj = root
-    elif mode == "topics":
-        root = dict(root or {})
-        root["topics"] = mapping
-        out_obj = root
-    else:
-        out_obj = mapping
-
-    KNOWLEDGE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = KNOWLEDGE_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(out_obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    tmp.replace(KNOWLEDGE_PATH)
-
-
-def _overwrite_topic(topic: str, answer: str, confidence: float) -> Dict[str, Any]:
-    root, mp, mode = _load_knowledge_root()
-    mp = dict(mp or {})
-
-    t = (topic or "").strip()
-    if not t:
-        raise HTTPException(status_code=422, detail="topic is required")
-    a = (answer or "").strip()
-    if not a:
-        raise HTTPException(status_code=422, detail="answer is required")
-
-    entry = mp.get(t)
-    if not isinstance(entry, dict):
-        entry = {}
-
-    # hard replace (what you asked for)
-    entry["answer"] = a
-    entry["confidence"] = float(confidence if confidence is not None else 0.95)
-    entry["taught_by_user"] = True
-    entry["updated"] = _iso_now()
-    entry["sources"] = ["user (ui correction)"]
-    entry["notes"] = "Corrected by user in UI (overrode previous answer)."
-    # wipe noisy evidence if it exists (optional, but matches "delete previous")
-    entry.pop("evidence", None)
-
-    mp[t] = entry
-    _save_knowledge_root(root, mp, mode)
-    return {"topic": t, "confidence": entry["confidence"]}
-
-
-# ----------------------------
-# Brain helpers
+# Brain subprocess helpers
 # ----------------------------
 def _brain_repl_args() -> List[str]:
     return [PYTHON_BIN, str(BRAIN_PATH)]
@@ -176,6 +86,15 @@ def _normalize_topic(text: str) -> str:
 
 
 def _clean_repl_stdout(raw: str) -> str:
+    """
+    Turns brain REPL stdout into a clean answer.
+
+    Handles prompt styles:
+      - '> CIDR'
+      - '>CIDR'
+    Stops at:
+      - '> Shutting down.'
+    """
     if not raw:
         return ""
 
@@ -189,6 +108,7 @@ def _clean_repl_stdout(raw: str) -> str:
     for line in lines:
         s = line.strip()
 
+        # drop banner
         if s.startswith("Machine Spirit brain online."):
             continue
 
@@ -196,21 +116,26 @@ def _clean_repl_stdout(raw: str) -> str:
         if pm:
             prompt_text = (pm.group(1) or "").strip()
 
+            # end-of-session prompt
             if "shutting down" in prompt_text.lower():
                 break
 
+            # first prompt is the topic
             if (not saw_topic) and prompt_text:
                 topic = prompt_text
                 saw_topic = True
                 continue
 
+            # any later prompt means we reached the end
             break
 
+        # skip any stray shutdown lines
         if "shutting down" in s.lower():
             continue
 
         body.append(line.rstrip())
 
+    # trim leading blank lines
     while body and body[0].strip() == "":
         body.pop(0)
 
@@ -223,204 +148,94 @@ def _clean_repl_stdout(raw: str) -> str:
     return body_text.strip()
 
 
+def _looks_like_block_or_captcha(text: str) -> bool:
+    t = (text or "").lower()
+    if not t:
+        return False
+    markers = [
+        "we apologize for the inconvenience",
+        "made us think that you are a bot",
+        "captcha",
+        "cloudflare",
+        "radware",
+        "request unblock",
+        "access denied",
+        "unusual traffic",
+        "verify you are human",
+        "attention required",
+    ]
+    return any(m in t for m in markers)
+
+
 def _looks_low_quality(answer: str) -> bool:
-    a = (answer or "").strip().lower()
+    a = (answer or "").strip()
+    al = a.lower()
+
     if not a:
         return True
-    if "may refer to" in a:
+
+    # brain disclaimers / no-answer patterns
+    if "i do not have a taught answer" in al:
         return True
-    if re.search(r"(?is)sources:\s*-\s*$", answer.strip()):
+    if "ask using a normal topic name instead" in al:
         return True
-    junk = [
-        "agree & join linkedin",
-        "cookie policy",
-        "sign in to view more content",
-        "create your free account",
-        "by clicking continue",
-    ]
-    if any(j in a for j in junk):
+    if "if my reply is wrong or weak, correct me" in al:
         return True
+
+    # junk patterns
+    if "may refer to" in al:
+        return True
+    if al.endswith("sources:\n-") or al.endswith("sources:\n- "):
+        return True
+
+    # blocked/captcha pages
+    if _looks_like_block_or_captcha(a):
+        return True
+
+    # super short answers are usually not useful
+    if len(a) < 40:
+        return True
+
     return False
 
 
-def _strip_known_web_junk(text: str) -> str:
-    if not text:
-        return ""
-    drop_contains = [
-        "Agree & Join LinkedIn",
-        "By clicking Continue",
-        "Cookie Policy",
-        "Sign in to view more content",
-        "Create your free account",
-        "Welcome back",
-        "Forgot password",
-    ]
-    out: List[str] = []
-    for ln in text.splitlines():
-        if any(bad.lower() in ln.lower() for bad in drop_contains):
-            continue
-        out.append(ln.rstrip())
-
-    cleaned: List[str] = []
-    blank = 0
-    for ln in out:
-        if ln.strip() == "":
-            blank += 1
-            if blank <= 1:
-                cleaned.append("")
-        else:
-            blank = 0
-            cleaned.append(ln)
-    return "\n".join(cleaned).strip()
-
-
-def _already_structured(text: str) -> bool:
-    t = text or ""
-    return bool(re.search(r"(?im)^\s*definition\s*:\s*$", t)) and bool(re.search(r"(?im)^\s*key points\s*:\s*$", t))
-
-
-def _split_sources(text: str) -> Tuple[str, List[str]]:
-    if not text:
-        return "", []
-    m = re.search(r"(?is)\n\s*sources\s*:\s*\n", text)
-    if not m:
-        return text.strip(), []
-    main = text[: m.start()].rstrip()
-    tail = text[m.end():].strip()
-
-    src: List[str] = []
-    for ln in tail.splitlines():
-        s = ln.strip()
-        if not s:
-            continue
-        if s.startswith("-"):
-            s = s[1:].strip()
-        src.append(s)
-
-    seen = set()
-    uniq: List[str] = []
-    for s in src:
-        k = s.lower()
-        if k in seen:
-            continue
-        seen.add(k)
-        uniq.append(s)
-    return main.strip(), uniq
-
-
-def _bullets_from_text(text: str, max_items: int = 6) -> List[str]:
-    if not text:
-        return []
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    existing = [ln.lstrip("-• ").strip() for ln in lines if ln.lstrip().startswith(("-", "•"))]
-    existing = [x for x in existing if x]
-    if existing:
-        return existing[:max_items]
-
-    blob = " ".join(lines)
-    parts = re.split(r"(?<=[.!?])\s+", blob)
-    parts = [p.strip() for p in parts if p.strip()]
-    return parts[:max_items]
-
-
-def _synthesize_answer(cleaned: str, topic: str) -> str:
-    text = _strip_known_web_junk(cleaned)
-
-    if _already_structured(text):
-        return text.strip()
-
-    if len(text.strip()) < 140:
-        return text.strip()
-
-    main, sources = _split_sources(text)
-
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", main) if p.strip()]
-    first = paragraphs[0] if paragraphs else main.strip()
-
-    sent = re.split(r"(?<=[.!?])\s+", first)
-    sent = [s.strip() for s in sent if s.strip()]
-    definition = " ".join(sent[:2]).strip()
-
-    rest = "\n\n".join(paragraphs[1:]).strip() if len(paragraphs) > 1 else ""
-    bullets = _bullets_from_text(rest, max_items=6)
-
-    if not bullets:
-        remainder = main.replace(first, "", 1).strip()
-        bullets = _bullets_from_text(remainder, max_items=6)
-
-    out: List[str] = []
-    if topic:
-        out.append(topic.strip())
-        out.append("")
-
-    out.append("Definition:")
-    out.append(f"- {definition}" if definition else "- (no clean definition yet)")
-    out.append("")
-    out.append("Key points:")
-    if bullets:
-        for b in bullets[:6]:
-            out.append(f"- {b}")
-    else:
-        out.append("- (no clean key points yet)")
-
-    if sources:
-        out.append("")
-        out.append("Sources:")
-        for s in sources[:6]:
-            out.append(f"- {s}")
-
-    return "\n".join(out).strip()
-
-
-FALLBACK_MINI: Dict[str, str] = {
-    "nat": (
-        "NAT (Network Address Translation)\n\n"
-        "Definition:\n"
-        "- A router feature that translates private IP addresses (like 192.168.x.x) to a public IP address so multiple devices can share one internet connection.\n\n"
-        "Key points:\n"
-        "- Common in home networks.\n"
-        "- Helps conserve IPv4 addresses.\n"
-        "- Not a firewall by itself, but it reduces unsolicited inbound connections.\n\n"
-        "Sources:\n"
-        "- RFC 3022: https://www.rfc-editor.org/rfc/rfc3022\n"
-    ),
-}
-
-
-async def _run_brain_repl(topic_line: str, timeout_s: int) -> Dict[str, Any]:
+async def _run_brain_repl(one_line: str, timeout_s: int) -> Dict[str, Any]:
+    """
+    Runs brain.py as a subprocess, feeds one line, reads stdout/stderr.
+    """
     LOCK_PATH.touch(exist_ok=True)
 
-    async with _BRAIN_LOCK:
-        t0 = time.time()
-        proc = await asyncio.create_subprocess_exec(
-            *_brain_repl_args(),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(REPO_DIR),
+    t0 = time.time()
+    proc = await asyncio.create_subprocess_exec(
+        *_brain_repl_args(),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=str(REPO_DIR),
+    )
+
+    try:
+        out_b, err_b = await asyncio.wait_for(
+            proc.communicate(input=(one_line + "\n").encode("utf-8")),
+            timeout=timeout_s,
         )
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise HTTPException(status_code=504, detail="brain.py timed out")
 
-        try:
-            out_b, err_b = await asyncio.wait_for(
-                proc.communicate(input=(topic_line + "\n").encode("utf-8")),
-                timeout=timeout_s,
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            raise HTTPException(status_code=504, detail="brain.py timed out")
+    dt = time.time() - t0
+    stdout = (out_b or b"").decode("utf-8", errors="replace")
+    stderr = (err_b or b"").decode("utf-8", errors="replace")
+    rc = int(proc.returncode or 0)
 
-        dt = time.time() - t0
-        stdout = (out_b or b"").decode("utf-8", errors="replace")
-        stderr = (err_b or b"").decode("utf-8", errors="replace")
-        rc = int(proc.returncode or 0)
-
-        return {
-            "exit_code": rc,
-            "duration_s": dt,
-            "stdout": stdout,
-            "stderr": stderr,
-            "args": _brain_repl_args(),
-        }
+    return {
+        "exit_code": rc,
+        "duration_s": dt,
+        "stdout": stdout,
+        "stderr": stderr,
+        "args": _brain_repl_args(),
+        "input": one_line,
+    }
 
 
 # ----------------------------
@@ -432,7 +247,13 @@ async def root() -> Dict[str, Any]:
         "ok": True,
         "app": APP_NAME,
         "version": VERSION,
-        "ui_hint": "Main UI is on port 8020 (MachineSpirit UI).",
+        "ui_hint": "Main UI is on port 8020 (/ui).",
+        "auto_weblearn": {
+            "enabled": AUTO_WEBLEARN,
+            "max_tries": AUTO_WEBLEARN_MAX_TRIES,
+            "timeout_s": AUTO_WEBLEARN_TIMEOUT_S,
+            "min_len": AUTO_WEBLEARN_MIN_LEN,
+        },
     }
 
 
@@ -449,6 +270,12 @@ async def health(request: Request) -> Dict[str, Any]:
         "python": PYTHON_BIN,
         "lock_path": str(LOCK_PATH),
         "theme": {"theme": cfg.theme, "intensity": cfg.intensity},
+        "auto_weblearn": {
+            "enabled": AUTO_WEBLEARN,
+            "max_tries": AUTO_WEBLEARN_MAX_TRIES,
+            "timeout_s": AUTO_WEBLEARN_TIMEOUT_S,
+            "min_len": AUTO_WEBLEARN_MIN_LEN,
+        },
     }
 
 
@@ -456,11 +283,12 @@ async def health(request: Request) -> Dict[str, Any]:
 async def get_theme(request: Request) -> Dict[str, Any]:
     _require_auth(request)
     cfg = load_theme()
+    choices = ui_intensity_choices()
     return {
         "ok": True,
         "theme": cfg.theme,
         "intensity": cfg.intensity,
-        "choices": ui_intensity_choices(),
+        "choices": choices,
     }
 
 
@@ -469,17 +297,6 @@ async def set_theme_endpoint(request: Request, payload: ThemeRequest) -> Dict[st
     _require_auth(request)
     cfg = save_theme(payload.theme, payload.intensity)
     return {"ok": True, "theme": cfg.theme, "intensity": cfg.intensity}
-
-
-@app.post("/override")
-async def override_answer(request: Request, payload: OverrideRequest) -> Dict[str, Any]:
-    """
-    Hard replace the saved answer for a topic (user correction).
-    """
-    _require_auth(request)
-    async with _KNOW_LOCK:
-        info = _overwrite_topic(payload.topic, payload.answer, payload.confidence or 0.95)
-    return {"ok": True, **info}
 
 
 @app.post("/ask", response_model=AskResponse)
@@ -491,18 +308,9 @@ async def ask(request: Request, req: AskRequest) -> AskResponse:
     if not text:
         raise HTTPException(status_code=422, detail="text is required")
 
-    # Allow changing theme by typing /theme into chat/UI
+    # Allow /theme commands through UI/API chat too
     if text.lower().startswith("/theme"):
         parts = text.split()
-
-        def _map_intensity(s: str) -> str:
-            s = (s or "").strip().lower()
-            if s in ("1", "light", "lite"):
-                return "light"
-            if s in ("2", "heavy", "hard"):
-                return "heavy"
-            return "light"
-
         if len(parts) == 1 or (len(parts) == 2 and parts[1].lower() == "status"):
             cfg = load_theme()
             choices = ui_intensity_choices()
@@ -510,57 +318,96 @@ async def ask(request: Request, req: AskRequest) -> AskResponse:
                 f"Theme is currently: {cfg.theme} ({cfg.intensity})\n\n"
                 "Set it like:\n"
                 "- /theme off\n"
-                "- /theme set Warhammer 40k 1\n"
-                "- /theme set Warhammer 40k 2\n"
                 "- /theme set Warhammer 40k light\n"
                 "- /theme set Warhammer 40k heavy\n\n"
                 f"{choices['light']['label']} - {choices['light']['desc']}\n"
                 f"{choices['heavy']['label']} - {choices['heavy']['desc']}\n"
             )
-            return AskResponse(ok=True, topic="theme", answer=msg.strip(), duration_s=time.time() - t0,
-                               theme={"theme": cfg.theme, "intensity": cfg.intensity})
+            return AskResponse(
+                ok=True,
+                topic="theme",
+                answer=msg.strip(),
+                duration_s=time.time() - t0,
+                error=None,
+                raw=None,
+                theme={"theme": cfg.theme, "intensity": cfg.intensity},
+                did_research=False,
+            )
 
         if len(parts) >= 2 and parts[1].lower() in ("off", "none", "disable", "disabled"):
             cfg = save_theme("none", "light")
-            return AskResponse(ok=True, topic="theme", answer="Theme disabled.", duration_s=time.time() - t0,
-                               theme={"theme": cfg.theme, "intensity": cfg.intensity})
+            return AskResponse(
+                ok=True,
+                topic="theme",
+                answer="Theme disabled.",
+                duration_s=time.time() - t0,
+                error=None,
+                raw=None,
+                theme={"theme": cfg.theme, "intensity": cfg.intensity},
+                did_research=False,
+            )
 
         if len(parts) >= 3 and parts[1].lower() == "set":
             intensity = "light"
-            theme_name = " ".join(parts[2:]).strip()
-            if parts[-1].lower() in ("light", "heavy", "1", "2"):
-                intensity = _map_intensity(parts[-1])
+            if parts[-1].lower() in ("light", "heavy"):
+                intensity = parts[-1].lower()
                 theme_name = " ".join(parts[2:-1]).strip()
+            else:
+                theme_name = " ".join(parts[2:]).strip()
 
             if not theme_name:
-                raise HTTPException(status_code=422, detail="Theme name is required (example: /theme set Warhammer 40k 1)")
+                raise HTTPException(status_code=422, detail="Theme name is required (example: /theme set Warhammer 40k light)")
 
             cfg = save_theme(theme_name, intensity)
-            return AskResponse(ok=True, topic="theme", answer=f"Theme set to: {cfg.theme} ({cfg.intensity}).",
-                               duration_s=time.time() - t0, theme={"theme": cfg.theme, "intensity": cfg.intensity})
+            return AskResponse(
+                ok=True,
+                topic="theme",
+                answer=f"Theme set to: {cfg.theme} ({cfg.intensity}).",
+                duration_s=time.time() - t0,
+                error=None,
+                raw=None,
+                theme={"theme": cfg.theme, "intensity": cfg.intensity},
+                did_research=False,
+            )
 
-        raise HTTPException(status_code=422, detail="Theme command format: /theme, /theme off, or /theme set <name> [1|2|light|heavy]")
+        raise HTTPException(status_code=422, detail="Theme command format: /theme, /theme off, or /theme set <name> [light|heavy]")
 
+    # Normal ask
     normalized = _normalize_topic(text)
+    topic_key = normalized.lower().strip()
+
+    # 1) Try normal memory answer first
     raw_res = await _run_brain_repl(normalized, timeout_s=int(req.timeout_s or 25))
     cleaned = _clean_repl_stdout(raw_res.get("stdout", ""))
 
-    topic_key = normalized.strip().lower()
+    did_research = False
 
-    if _looks_low_quality(cleaned):
-        if topic_key in FALLBACK_MINI:
-            cleaned = FALLBACK_MINI[topic_key]
-        else:
+    # 2) If weak / blocked / missing, auto-run web learn (no extra commands needed)
+    if AUTO_WEBLEARN and _looks_low_quality(cleaned):
+        for attempt in range(max(1, AUTO_WEBLEARN_MAX_TRIES)):
+            did_research = True
+            learn_cmd = f"/weblearn {normalized}"
+            raw_learn = await _run_brain_repl(learn_cmd, timeout_s=AUTO_WEBLEARN_TIMEOUT_S)
+            learned = _clean_repl_stdout(raw_learn.get("stdout", ""))
+
+            # If learning succeeded and looks decent, use it
+            if (not _looks_low_quality(learned)) and (len(learned) >= AUTO_WEBLEARN_MIN_LEN):
+                cleaned = learned
+                raw_res = raw_learn if req.raw else raw_res
+                break
+
+            # If still garbage/captcha, keep looping (second try sometimes lands on a different source)
+            cleaned = learned if learned.strip() else cleaned
+
+        # If still junk, at least tell the truth (don’t silently store captcha garbage)
+        if _looks_like_block_or_captcha(cleaned):
             cleaned = (
                 f"{normalized}\n\n"
-                "I don’t have a clean answer stored yet.\n\n"
-                "Next:\n"
-                "- Run learning (safe): /run/webqueue?limit=3&confirm=true\n"
-                "- Or in brain.py: /weblearn <topic>\n"
+                "That site is blocking automated access (captcha/blocked page), so I couldn’t pull a clean answer right now.\n\n"
+                "If you want, ask again in a minute, or give me a specific URL from a normal docs page (Cisco/Juniper/IETF/etc) and I’ll learn from it.\n"
             ).strip()
-    else:
-        cleaned = _synthesize_answer(cleaned, topic=normalized)
 
+    # apply theme wrapper
     cfg = load_theme()
     themed = apply_theme(cleaned, topic=normalized, cfg=cfg)
 
@@ -569,6 +416,8 @@ async def ask(request: Request, req: AskRequest) -> AskResponse:
         topic=topic_key,
         answer=themed,
         duration_s=float(raw_res.get("duration_s", time.time() - t0)),
+        error=None,
         raw=(raw_res if req.raw else None),
         theme={"theme": cfg.theme, "intensity": cfg.intensity},
+        did_research=did_research,
     )
