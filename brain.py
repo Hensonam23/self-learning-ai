@@ -3390,6 +3390,74 @@ def _call_selftest_headless() -> int:
     return 0 if ok else 1
 
 
+def _call_ask_headless(text: str) -> int:
+    """
+    Headless ask:
+      - prints ONLY the answer content (no banner/prompt)
+      - returns exit code 0 on success, 1 on failure
+    """
+    try:
+        q = (text or "").strip()
+        if not q:
+            print("ask: ok=0 error=empty")
+            return 1
+
+        # Preferred: direct function if it exists
+        fn = (globals().get("answer_topic") or
+              globals().get("answer") or
+              globals().get("ask") or
+              globals().get("respond"))
+
+        if callable(fn):
+            res = fn(q)
+            if isinstance(res, str):
+                out = res.strip()
+                if out:
+                    print(out)
+                    return 0
+                print("ask: ok=0 error=empty_answer")
+                return 1
+
+        # Fallback: use the same pipeline cmd_curiosity uses (cmd_* pattern)
+        # If there is a command handler we can call safely:
+        cmd = globals().get("cmd_answer") or globals().get("cmd_ask")
+        if callable(cmd):
+            # Capture output
+            import io, contextlib
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                cmd(q)
+            out = buf.getvalue().strip()
+            if out:
+                print(out)
+                return 0
+            print("ask: ok=0 error=empty_answer")
+            return 1
+
+        # Last resort: run the REPL processing function if present (without printing banner)
+        repl = globals().get("process_user_input") or globals().get("handle_input")
+        if callable(repl):
+            import io, contextlib
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                repl(q)
+            out = buf.getvalue().strip()
+            if out:
+                print(out)
+                return 0
+            print("ask: ok=0 error=empty_answer")
+            return 1
+
+        print("ask: ok=0 error=no_handler")
+        return 1
+
+    except Exception as e:
+        print(f"ask: ok=0 error={type(e).__name__}")
+        return 1
+
+
+
+
 
 
 def run_cli_mode() -> bool:
@@ -3431,6 +3499,16 @@ def run_cli_mode() -> bool:
     import sys as _sys
     if "--selftest" in _sys.argv:
         code = _call_selftest_headless()
+        _sys.exit(code)
+
+    import sys as _sys
+    if "--ask" in _sys.argv:
+        try:
+            i = _sys.argv.index("--ask")
+            text = _sys.argv[i+1] if i+1 < len(_sys.argv) else ""
+        except Exception:
+            text = ""
+        code = _call_ask_headless(text)
         _sys.exit(code)
 
     return False

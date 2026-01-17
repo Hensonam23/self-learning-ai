@@ -1,14 +1,4 @@
 #!/usr/bin/env python3
-"""
-MachineSpirit API
-- Non-invasive wrapper: runs brain.py as a subprocess
-- Safe-by-default:
-    * If MS_API_KEY is set: require header x-api-key
-    * If not set: localhost only
-- Confirm-before-action: mutating endpoints require confirm=true
-- Cross-process lock: prevents API + timers from running brain.py at the same time
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -23,28 +13,23 @@ from fastapi import FastAPI, HTTPException, Request, Query
 from pydantic import BaseModel, Field
 
 APP_NAME = "MachineSpirit API"
+API_VERSION = "0.3.1"
 
 REPO_DIR = Path(__file__).resolve().parent
 BRAIN_PATH = Path(os.environ.get("MS_BRAIN_PATH", str(REPO_DIR / "brain.py"))).resolve()
 
-# IMPORTANT:
-# - uvicorn runs in the venv python
-# - brain subprocess should use /usr/bin/python3 for consistency with timers
+# Important: set MS_PYTHON=/usr/bin/python3 in ~/.config/machinespirit/api.env
 PYTHON_BIN = os.environ.get("MS_PYTHON", sys.executable)
 
 DEFAULT_TIMEOUT_S = int(os.environ.get("MS_TIMEOUT_S", "60"))
-
-# If set, require header x-api-key == MS_API_KEY. If not set, localhost only.
 MS_API_KEY = os.environ.get("MS_API_KEY", "").strip()
 
-# Cross-process lock file (shared with systemd services)
 LOCK_PATH = Path(os.environ.get("MS_LOCK_PATH", str(REPO_DIR / ".machinespirit.lock"))).resolve()
-LOCK_WAIT_S = float(os.environ.get("MS_LOCK_WAIT_S", "0") or "0")  # 0 = don't wait
+LOCK_WAIT_S = float(os.environ.get("MS_LOCK_WAIT_S", "0") or "0")
 
-# Serialize API requests (does not cover systemd timers, that's why we also use LOCK_PATH)
 RUN_LOCK = asyncio.Lock()
 
-app = FastAPI(title=APP_NAME, version="0.3.0")
+app = FastAPI(title=APP_NAME, version=API_VERSION)
 
 
 class RunResult(BaseModel):
@@ -54,23 +39,21 @@ class RunResult(BaseModel):
     duration_s: float
     stdout: str
     stderr: str
-    answer: Optional[str] = None  # Cleaned answer for /ask
+    answer: Optional[str] = None
 
 
 class AskRequest(BaseModel):
-    text: str = Field(..., description="User question / prompt to feed to brain REPL (single line).")
-    timeout_s: Optional[int] = Field(None, description="Override default timeout seconds for this request.")
+    text: str = Field(..., description="User topic/question (single line).")
+    timeout_s: Optional[int] = Field(None, description="Override timeout seconds.")
 
 
 class CommandRequest(BaseModel):
-    line: str = Field(..., description="A single command line exactly as you'd type in brain.py interactive mode.")
-    timeout_s: Optional[int] = Field(None, description="Override default timeout seconds for this request.")
+    line: str = Field(..., description="A single command line as typed into brain.py interactive.")
+    timeout_s: Optional[int] = Field(None, description="Override timeout seconds.")
 
 
 def _client_ip(request: Request) -> str:
-    if request.client is None:
-        return ""
-    return request.client.host or ""
+    return (request.client.host if request.client else "") or ""
 
 
 def _require_auth(request: Request) -> None:
@@ -81,83 +64,111 @@ def _require_auth(request: Request) -> None:
             raise HTTPException(status_code=401, detail="Unauthorized (missing/invalid x-api-key).")
     else:
         if ip not in ("127.0.0.1", "::1"):
-            raise HTTPException(
-                status_code=403,
-                detail="Forbidden: API is localhost-only unless MS_API_KEY is set.",
-            )
+            raise HTTPException(status_code=403, detail="Forbidden: localhost-only unless MS_API_KEY is set.")
 
 
 def _require_confirm(confirm: bool) -> None:
     if not confirm:
         raise HTTPException(status_code=400, detail="This endpoint mutates state. Re-run with confirm=true")
+
+
+def _strip_ansi(s: str) -> str:
+    # Basic ANSI escape strip
+    import re
+    return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", s or "")
+
+
+def _letters_only(s: str) -> str:
+    import re
+    return re.sub(r"[^a-z]+", "", (s or "").lower())
+
+
 def _clean_repl_stdout(raw: str) -> str:
     """
-    Clean REPL output so UI can display it without banner/prompt/shutdown noise.
-    This version is robust to ANSI escapes + hidden control/zero-width chars.
+    Remove REPL banner/prompt/shutdown from brain stdout.
     """
     if not raw:
         return ""
 
-    import re as _re
+    import re
+    out: List[str] = []
+    prompt_topic: Optional[str] = None
 
-    # Strip common ANSI escape sequences
-    _ansi = _re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-
-    def _strip_ansi(s: str) -> str:
-        return _ansi.sub("", s)
-
-    def _norm_letters(s: str) -> str:
-        # Keep only lowercase letters to make matching immune to weird chars/spaces
-        s = s.lower()
-        return _re.sub(r"[^a-z]+", "", s)
-
-    lines = raw.splitlines()
-    out = []
-    prompt_topic = None
-
-    for line in lines:
-        # Remove ANSI escapes, and replace control chars with spaces
+    for line in raw.splitlines():
         line2 = _strip_ansi(line)
+        # replace control chars with spaces
         line2 = "".join((ch if ch >= " " else " ") for ch in line2)
-
         s = line2.strip()
         if not s:
-            out.append("")  # preserve spacing a bit
+            out.append("")
             continue
 
-        norm = _norm_letters(s)
+        norm = _letters_only(s)
 
-        # Banner detection (robust)
+        # banner
         if norm.startswith("machinespiritbrainonline"):
             continue
         if ("typeamessage" in norm) and ("ctrlc" in norm):
             continue
 
-        # Prompt detection (robust): allow leading spaces before '>'
-        m = _re.match(r"^\s*>\s*(.+?)\s*$", line2)
+        # prompt "> TOPIC" (allow leading spaces)
+        m = re.match(r"^\s*>\s*(.+?)\s*$", line2)
         if m:
             maybe = m.group(1).strip()
             if maybe:
                 prompt_topic = maybe
             continue
 
-        # Shutdown detection (robust)
+        # shutdown (this catches normal + weird versions)
         if "shuttingdown" in norm:
             continue
 
         out.append(line2.rstrip())
 
-    # Remove leading empty lines
+    # drop leading blanks
     while out and out[0].strip() == "":
         out.pop(0)
 
-    # Put topic at top if captured
+    # Add prompt topic on top if it looks like a simple topic
     if prompt_topic:
         if not out or out[0].strip() != prompt_topic:
             out = [prompt_topic, ""] + out
 
     cleaned = "\n".join(out).strip()
     return cleaned + ("\n" if cleaned else "")
+
+
+def _finalize_answer(cleaned: str, requested_text: str) -> str:
+    """
+    Guaranteed final cleanup:
+      - removes ANY shutdown line even if it slipped through
+      - ensures topic header for simple one-word topics (like 'cidr')
+    """
+    lines = (cleaned or "").splitlines()
+    out: List[str] = []
+
+    for ln in lines:
+        if "shuttingdown" in _letters_only(ln):
+            continue
+        out.append(ln.rstrip())
+
+    while out and out[0].strip() == "":
+        out.pop(0)
+
+    req = (requested_text or "").strip()
+
+    # Only enforce a header when request looks like a "topic", not a full question.
+    # (prevents weird headers for long questions)
+    if req and ("\n" not in req):
+        words = [w for w in req.split() if w.strip()]
+        looks_like_topic = (len(words) <= 3) and (len(req) <= 40) and (not req.endswith("?"))
+        if looks_like_topic:
+            first = next((x for x in out if x.strip()), "")
+            if _letters_only(first) != _letters_only(req):
+                out = [req.upper(), ""] + out
+
+    final = "\n".join(out).strip()
+    return final + ("\n" if final else "")
 
 
 async def _acquire_lock(wait_s: float):
@@ -251,8 +262,7 @@ def _brain_headless_curiosity_args(n: int) -> List[str]:
 
 @app.get("/")
 async def root() -> Dict[str, Any]:
-    # No auth here: harmless "service is up" message for browsers.
-    return {"ok": True, "app": APP_NAME, "docs": "/docs", "hint": "Most endpoints require x-api-key. Try /health."}
+    return {"ok": True, "app": APP_NAME, "version": API_VERSION, "docs": "/docs", "hint": "Most endpoints require x-api-key. Try /health."}
 
 
 @app.get("/health")
@@ -261,6 +271,7 @@ async def health(request: Request) -> Dict[str, Any]:
     return {
         "ok": True,
         "app": APP_NAME,
+        "version": API_VERSION,
         "brain_path": str(BRAIN_PATH),
         "repo_dir": str(REPO_DIR),
         "python": PYTHON_BIN,
@@ -273,9 +284,10 @@ async def health(request: Request) -> Dict[str, Any]:
 @app.post("/ask", response_model=RunResult)
 async def ask(req: AskRequest, request: Request) -> RunResult:
     _require_auth(request)
-    stdin = req.text.rstrip("\n") + "\n"
-    res = await _run_process(_brain_repl_args(), stdin_text=stdin, timeout_s=req.timeout_s)
-    res.answer = _clean_repl_stdout(res.stdout)
+    args = [PYTHON_BIN, str(BRAIN_PATH), "--ask", req.text]
+    res = await _run_process(args, timeout_s=req.timeout_s)
+    # stdout is already clean from --ask; still run finalize as a safety net
+    res.answer = _finalize_answer(res.stdout, req.text)
     return res
 
 
@@ -286,8 +298,7 @@ async def teach(req: CommandRequest, request: Request, confirm: bool = Query(Fal
     line = req.line.strip()
     if not line:
         raise HTTPException(status_code=400, detail="Empty line.")
-    stdin = line + "\n"
-    return await _run_process(_brain_repl_args(), stdin_text=stdin, timeout_s=req.timeout_s)
+    return await _run_process(_brain_repl_args(), stdin_text=line + "\n", timeout_s=req.timeout_s)
 
 
 @app.get("/queuehealth", response_model=RunResult)
