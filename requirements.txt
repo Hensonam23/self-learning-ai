@@ -1,3 +1,4 @@
-python-dotenv
-pyttsx3
-flask>=2.3,<3.1
+fastapi
+uvicorn
+httpx
+python-multipart
