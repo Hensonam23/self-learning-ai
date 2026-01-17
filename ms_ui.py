@@ -1,203 +1,137 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import datetime as _dt
+import json
 import os
 import re
-import json
-import time
-import threading
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Tuple
 
 import requests
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
-
 APP_NAME = "MachineSpirit UI"
-VERSION = "0.3.7"
+VERSION = "0.3.8"
 
-REPO_DIR = Path(__file__).resolve().parent
-DATA_DIR = REPO_DIR / "data"
-KNOWLEDGE_PATH = DATA_DIR / "local_knowledge.json"
+BASE_DIR = Path(__file__).resolve().parent
+REPO_DIR = Path(os.environ.get("MS_REPO_DIR", str(BASE_DIR))).resolve()
 
-CFG_DIR = Path(os.path.expanduser("~/.config/machinespirit"))
-SECRETS_PATH = CFG_DIR / "secrets.env"
+API_BASE = (os.environ.get("MS_API_BASE", "http://127.0.0.1:8010") or "http://127.0.0.1:8010").rstrip("/")
+SECRETS_FILE = Path(os.path.expanduser("~/.config/machinespirit/secrets.env"))
 
-API_BASE = os.environ.get("MS_API_BASE", "http://127.0.0.1:8010").rstrip("/")
-MS_API_KEY = os.environ.get("MS_API_KEY", "").strip()
+KNOWLEDGE_PATH = Path(
+    os.environ.get("MS_KNOWLEDGE_PATH", str(REPO_DIR / "data" / "local_knowledge.json"))
+).resolve()
 
 app = FastAPI(title=APP_NAME, version=VERSION)
 
-_KNOW_LOCK = threading.Lock()
 
-
-# -----------------------------
+# ----------------------------
 # Helpers
-# -----------------------------
+# ----------------------------
 def _iso_now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+    return _dt.datetime.now().isoformat(timespec="seconds")
 
 
-def _load_env_file(path: Path) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    if not path.exists():
-        return out
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            s = line.strip()
-            if not s or s.startswith("#") or "=" not in s:
-                continue
-            k, v = s.split("=", 1)
-            out[k.strip()] = v.strip()
-    except Exception:
-        return {}
-    return out
+def _load_api_key() -> str:
+    k = (os.environ.get("MS_API_KEY", "") or "").strip()
+    if k:
+        return k
 
+    if SECRETS_FILE.exists():
+        try:
+            txt = SECRETS_FILE.read_text(encoding="utf-8", errors="replace")
+            for line in txt.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("MS_API_KEY="):
+                    return line.split("=", 1)[1].strip()
+        except Exception:
+            pass
 
-def _ensure_api_key_loaded() -> None:
-    global MS_API_KEY
-    if MS_API_KEY:
-        return
-    env = _load_env_file(SECRETS_PATH)
-    MS_API_KEY = (env.get("MS_API_KEY", "") or "").strip()
+    return ""
 
 
 def _api_headers() -> Dict[str, str]:
-    _ensure_api_key_loaded()
-    if not MS_API_KEY:
-        return {"Content-Type": "application/json"}
-    return {"Content-Type": "application/json", "X-API-Key": MS_API_KEY}
+    key = _load_api_key()
+    if not key:
+        raise HTTPException(status_code=500, detail="MS_API_KEY is not set for the UI service")
+    return {"Content-Type": "application/json", "X-API-Key": key}
 
 
-def _api_get(path: str, timeout: int = 8) -> Dict[str, Any]:
-    url = f"{API_BASE}{path}"
+def _normalize_topic(s: str) -> str:
+    t = (s or "").strip()
+    t = re.sub(r"^\s*(what is|what's|define|explain)\s+", "", t, flags=re.IGNORECASE).strip()
+    m = re.match(r'^\s*\{\s*"text"\s*:\s*"(.+)"\s*\}\s*$', t)
+    if m:
+        t = m.group(1).strip()
+        t = re.sub(r"^\s*(what is|what's|define|explain)\s+", "", t, flags=re.IGNORECASE).strip()
+    return t
+
+
+def _read_json(path: Path, default: Any) -> Any:
     try:
-        r = requests.get(url, headers=_api_headers(), timeout=timeout)
-        data = r.json() if r.content else {}
-        if r.status_code >= 400:
-            detail = data.get("detail") if isinstance(data, dict) else None
-            raise HTTPException(status_code=r.status_code, detail=detail or f"API GET failed: {r.status_code}")
-        return data if isinstance(data, dict) else {"ok": True, "data": data}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"API GET error: {type(e).__name__}: {e}")
-
-
-def _api_post(path: str, payload: Dict[str, Any], timeout: int = 18) -> Dict[str, Any]:
-    url = f"{API_BASE}{path}"
-    try:
-        r = requests.post(url, headers=_api_headers(), json=payload, timeout=timeout)
-        data = r.json() if r.content else {}
-        if r.status_code >= 400:
-            detail = data.get("detail") if isinstance(data, dict) else None
-            raise HTTPException(status_code=r.status_code, detail=detail or f"API POST failed: {r.status_code}")
-        return data if isinstance(data, dict) else {"ok": True, "data": data}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"API POST error: {type(e).__name__}: {e}")
-
-
-def _load_knowledge_root():
-    """
-    Returns (root_obj, mapping, mode)
-
-    mode:
-      - "map": root_obj IS the mapping (topic -> entry)
-      - "knowledge": root_obj["knowledge"] is the mapping
-      - "topics": root_obj["topics"] is the mapping
-    """
-    if not KNOWLEDGE_PATH.exists():
-        return {}, {}, "map"
-
-    try:
-        root = json.loads(KNOWLEDGE_PATH.read_text(encoding="utf-8"))
+        if not path.exists():
+            return default
+        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except Exception:
-        return {}, {}, "map"
-
-    if isinstance(root, dict):
-        if isinstance(root.get("knowledge"), dict):
-            return root, root["knowledge"], "knowledge"
-        if isinstance(root.get("topics"), dict):
-            return root, root["topics"], "topics"
-        return root, root, "map"
-
-    return {}, {}, "map"
+        return default
 
 
-def _save_knowledge_root(root, mapping, mode: str) -> None:
-    if mode == "knowledge":
-        out_obj = dict(root or {})
-        out_obj["knowledge"] = mapping
-    elif mode == "topics":
-        out_obj = dict(root or {})
-        out_obj["topics"] = mapping
-    else:
-        out_obj = mapping
-
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = str(KNOWLEDGE_PATH) + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(out_obj, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-    os.replace(tmp, KNOWLEDGE_PATH)
+def _write_json_atomic(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
 
 
-def overwrite_topic(topic: str, answer: str, confidence: float = 0.95) -> str:
-    t = (topic or "").strip()
-    a = (answer or "").strip()
-    if not t:
-        raise HTTPException(status_code=422, detail="override requires topic")
-    if not a:
-        raise HTTPException(status_code=422, detail="override requires answer")
+def _ensure_dict_db(db: Any) -> Dict[str, Any]:
+    return db if isinstance(db, dict) else {}
 
-    root, mp, mode = _load_knowledge_root()
-    mp = dict(mp or {})
 
-    # prefer existing key if it exists case-insensitive (prevents duplicates)
-    key_l = t.lower()
-    chosen_key = None
-    if key_l in mp:
-        chosen_key = key_l
-    else:
-        for k in mp.keys():
-            if isinstance(k, str) and k.lower() == key_l:
-                chosen_key = k
-                break
-    if not chosen_key:
-        chosen_key = key_l
+def _override_knowledge(topic: str, new_answer: str) -> Tuple[bool, str]:
+    topic_n = _normalize_topic(topic).lower()
+    ans = (new_answer or "").strip()
+    if not topic_n:
+        return False, "No topic to override."
+    if not ans:
+        return False, "Missing corrected answer."
 
-    entry = mp.get(chosen_key)
+    db_raw = _read_json(KNOWLEDGE_PATH, {})
+    db = _ensure_dict_db(db_raw)
+
+    entry = db.get(topic_n)
     if not isinstance(entry, dict):
         entry = {}
 
-    entry["answer"] = a
-    entry["confidence"] = float(confidence if confidence is not None else 0.95)
+    entry["answer"] = ans
     entry["taught_by_user"] = True
+    entry["notes"] = "override via UI conversation"
     entry["updated"] = _iso_now()
-    entry["sources"] = ["user (ui correction)"]
-    entry["notes"] = "Corrected by user in UI (overrode previous answer)."
-    entry.pop("evidence", None)
 
-    mp[chosen_key] = entry
-    _save_knowledge_root(root, mp, mode)
-    return chosen_key
+    try:
+        old_c = float(entry.get("confidence", 0.0) or 0.0)
+    except Exception:
+        old_c = 0.0
+    entry["confidence"] = max(old_c, 0.90)
+
+    if "sources" not in entry or not isinstance(entry.get("sources"), list):
+        entry["sources"] = entry.get("sources") if isinstance(entry.get("sources"), list) else []
+
+    db[topic_n] = entry
+    _write_json_atomic(KNOWLEDGE_PATH, db)
+    return True, topic_n
 
 
-# -----------------------------
+# ----------------------------
 # Models
-# -----------------------------
+# ----------------------------
 class AskIn(BaseModel):
     text: str
-
-
-class OverrideIn(BaseModel):
-    topic: str
-    answer: str
-    confidence: Optional[float] = 0.95
 
 
 class ThemeIn(BaseModel):
@@ -205,9 +139,14 @@ class ThemeIn(BaseModel):
     intensity: str
 
 
-# -----------------------------
+class OverrideIn(BaseModel):
+    topic: str
+    answer: str
+
+
+# ----------------------------
 # Routes
-# -----------------------------
+# ----------------------------
 @app.get("/")
 def root():
     return RedirectResponse(url="/ui")
@@ -218,58 +157,198 @@ def health():
     return {"ok": True, "service": "machinespirit-ui", "version": VERSION, "api": API_BASE}
 
 
-@app.get("/ui")
+@app.get("/ui", response_class=HTMLResponse)
 def ui():
     html = HTML_TEMPLATE.replace("__API_BASE__", API_BASE)
-    return HTMLResponse(
-        content=html,
-        headers={
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
-            "Expires": "0",
-        },
-    )
+    return HTMLResponse(content=html)
 
 
 @app.get("/api/theme")
-def api_theme():
-    data = _api_get("/theme")
-    return data
+def api_theme_get():
+    try:
+        r = requests.get(f"{API_BASE}/theme", headers=_api_headers(), timeout=10)
+        if r.status_code != 200:
+            return JSONResponse(status_code=200, content={"ok": False, "detail": f"API error: {r.status_code} {r.text}"})
+        return r.json()
+    except Exception as e:
+        return {"ok": False, "detail": f"{type(e).__name__}: {e}"}
 
 
 @app.post("/api/theme")
 def api_theme_set(payload: ThemeIn):
-    data = _api_post("/theme", {"theme": payload.theme, "intensity": payload.intensity})
-    return data
-
-
-@app.post("/api/theme/off")
-def api_theme_off():
-    data = _api_post("/theme", {"theme": "none", "intensity": "light"})
-    return data
+    try:
+        r = requests.post(f"{API_BASE}/theme", headers=_api_headers(), json=payload.model_dump(), timeout=10)
+        if r.status_code != 200:
+            return JSONResponse(status_code=200, content={"ok": False, "detail": f"API error: {r.status_code} {r.text}"})
+        return r.json()
+    except Exception as e:
+        return {"ok": False, "detail": f"{type(e).__name__}: {e}"}
 
 
 @app.post("/api/ask")
-def api_ask(payload: AskIn):
-    text = (payload.text or "").strip()
-    if not text:
-        raise HTTPException(status_code=422, detail="text is required")
-    data = _api_post("/ask", {"text": text})
-    ans = data.get("answer") if isinstance(data, dict) else None
-    if not ans:
-        return JSONResponse({"answer": "UI error: no answer returned", "raw": data}, status_code=502)
-    return {"answer": ans}
+async def api_ask(payload: dict):
+    """
+    UI backend ask handler.
 
+    IMPORTANT behavior:
+    - Detect conversational corrections like:
+        "No, it's actually: ..."
+        "no its: ..."
+        "no it is: ..."
+      (works with smart quotes too)
+    - Apply correction to the LAST asked topic and store it (without sending the long correction into brain.py).
+    - Normal asks are forwarded to the API as usual.
+    """
+    import os, json, time, datetime, asyncio
+    import requests
+
+    def iso_now() -> str:
+        return datetime.datetime.now().isoformat(timespec="seconds")
+
+    def norm_spaces(s: str) -> str:
+        return re.sub(r"\s+", " ", (s or "").strip())
+
+    def normalize_topic(s: str) -> str:
+        s = norm_spaces(s)
+        s = re.sub(r"^\s*(what is|what's|define|explain)\s+", "", s, flags=re.I).strip()
+        return s
+
+    def unsmart(s: str) -> str:
+        # normalize smart quotes + common mojibake
+        s = (s or "")
+        s = s.replace("\u2019", "'").replace("\u2018", "'").replace("\u201c", '"').replace("\u201d", '"')
+        s = s.replace("â��", "'").replace("â��", "'").replace("â��", '"').replace("â��", '"')
+        return s
+
+    def extract_correction(text: str):
+        t = unsmart(text).strip()
+
+        # accepts:
+        # no its: ...
+        # no it's: ...
+        # no it is: ...
+        # no, it's actually: ...
+        # correction: ...
+        # actually: ...
+        pat = re.compile(
+            r"^\s*(?:no|nah|nope|actually|correction|correct|fix)\s*(?:,|\s)*"
+            r"(?:(?:it\s*(?:is|'?s))|its|that\s*(?:is|'?s)|the\s*correct\s*(?:answer\s*)?(?:is|'?s)|answer\s*(?:is|'?s))?"
+            r"\s*[:\-–—]\s*(.+)$",
+            re.I | re.S
+        )
+        m = pat.match(t)
+        if not m:
+            return None
+        return m.group(1).strip()
+
+    # ---- read text
+    if not isinstance(payload, dict):
+        payload = {}
+    text_in = payload.get("text") or ""
+    text_in = str(text_in)
+
+    # ---- shared state (last asked topic)
+    st = globals().setdefault("_UI_STATE", {"last_topic": "", "last_user": ""})
+
+    # ---- correction flow
+    corr = extract_correction(text_in)
+    if corr:
+        topic = st.get("last_topic") or ""
+        topic = normalize_topic(topic)
+        topic_key = topic.lower().strip()
+
+        if not topic_key:
+            return {"ok": True, "answer": "I can save corrections, but I need you to ask a question first."}
+
+        # If the correction starts with the topic name, strip it out to keep the stored answer clean.
+        corr2 = corr
+        first_line = corr2.splitlines()[0].strip() if corr2.strip() else ""
+        if first_line and len(first_line) <= 80:
+            # common case: "BGP route selection\n\nDefinition: ..."
+            if first_line.lower() == topic_key:
+                corr2 = "\n".join(corr2.splitlines()[1:]).lstrip()
+
+        corr2 = corr2.strip()
+        if not corr2:
+            return {"ok": True, "answer": f"Correction detected for '{topic}', but the corrected text was empty."}
+
+        # Write to brain knowledge file directly (replace previous)
+        repo_dir = Path(__file__).resolve().parent
+        data_dir = repo_dir / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        kpath = data_dir / "local_knowledge.json"
+
+        data = {}
+        if kpath.exists():
+            try:
+                data = json.loads(kpath.read_text(encoding="utf-8", errors="replace") or "{}")
+            except Exception:
+                # salvage: rename bad file so we don't brick the system
+                bad = data_dir / f"local_knowledge.bad.{int(time.time())}.json"
+                kpath.rename(bad)
+                data = {}
+
+        if not isinstance(data, dict):
+            data = {}
+
+        entry = data.get(topic_key) if isinstance(data.get(topic_key), dict) else {}
+        entry["answer"] = corr2
+        entry["confidence"] = float(max(float(entry.get("confidence") or 0.0), 0.95))
+        entry["taught_by_user"] = True
+        entry["updated"] = iso_now()
+        if "sources" not in entry:
+            entry["sources"] = []
+
+        data[topic_key] = entry
+
+        tmp = kpath.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        tmp.replace(kpath)
+
+        return {"ok": True, "answer": f"Saved correction for: {topic}"}
+
+    # ---- normal ask flow
+    # record last asked topic so corrections apply to the right thing
+    st["last_user"] = text_in
+    st["last_topic"] = normalize_topic(text_in)
+
+    api_base = os.environ.get("MS_API_BASE", "http://127.0.0.1:8010").rstrip("/")
+    api_key = os.environ.get("MS_API_KEY", "")
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["X-API-Key"] = api_key
+
+    def do_req():
+        return requests.post(
+            f"{api_base}/ask",
+            headers=headers,
+            json={"text": text_in},
+            timeout=30
+        )
+
+    try:
+        r = await asyncio.to_thread(do_req)
+        if r.status_code != 200:
+            return {"ok": False, "answer": f"API error ({r.status_code}): {r.text[:2000]}"}
+        j = r.json()
+        ans = (j.get("answer") or "").strip()
+        if not ans:
+            ans = "No answer returned."
+        return {"ok": True, "answer": ans}
+    except Exception as e:
+        return {"ok": False, "answer": f"UI backend error: {type(e).__name__}: {e}"}
 
 @app.post("/api/override")
 def api_override(payload: OverrideIn):
-    with _KNOW_LOCK:
-        t = overwrite_topic(payload.topic, payload.answer, payload.confidence or 0.95)
-    return {"ok": True, "answer": f"Got it — I replaced my saved answer for '{t}'."}
+    ok, msg = _override_knowledge(payload.topic, payload.answer)
+    if not ok:
+        return {"ok": False, "detail": msg}
+    return {"ok": True, "topic": msg}
 
 
 # -----------------------------
-# HTML template
+# HTML template (raw string)
 # -----------------------------
 HTML_TEMPLATE = r"""<!doctype html>
 <html lang="en">
@@ -385,17 +464,15 @@ HTML_TEMPLATE = r"""<!doctype html>
       background:rgba(10, 12, 18, 0.35);
     }
 
-    details summary{
-      cursor:pointer;
-      user-select:none;
-      font-weight:700;
-      font-size:14px;
-      list-style:none;
-      outline:none;
+    .panelhead{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:10px;
     }
-    details summary::-webkit-details-marker{ display:none; }
 
-    .hint{ margin-top:6px; color:var(--muted); font-size:12px; }
+    .panel h3{ margin:0; font-size:14px; font-weight:700; }
+    .panel .hint{ margin-top:6px; color:var(--muted); font-size:12px; }
 
     .theme-panel{
       display:grid;
@@ -522,39 +599,46 @@ HTML_TEMPLATE = r"""<!doctype html>
 
       <div class="actions">
         <div id="themePill" class="pill">Theme: loading...</div>
+        <button class="btn" id="themeToggleBtn">Theme</button>
         <button class="btn" id="resetBtn">Reset chat</button>
       </div>
     </div>
 
     <div class="wrap">
       <div class="card">
-        <div class="panel">
-          <details id="themeDetails">
-            <summary>Theme settings</summary>
-            <div class="hint">
-              Ask normally. To correct: you can type <b>No, it's actually ...</b> OR just start with <b>NAT is ...</b>
-            </div>
 
-            <div class="theme-panel">
-              <div class="field">
-                <label>Theme name</label>
-                <input id="themeName" placeholder="Warhammer 40k" />
-              </div>
-
-              <div class="field">
-                <label>Intensity</label>
-                <select id="themeIntensity">
-                  <option value="light">Light</option>
-                  <option value="heavy">Heavy</option>
-                </select>
-              </div>
-
-              <div class="theme-actions">
-                <button class="btn" id="applyThemeBtn">Apply</button>
-                <button class="btn" id="offThemeBtn">Off</button>
+        <!-- Collapsed by default -->
+        <div class="panel" id="themePanel" style="display:none;">
+          <div class="panelhead">
+            <div>
+              <h3>Theme settings</h3>
+              <div class="hint">
+                Ask normally (example: <b>bgp route selection</b>).
+                Fix the last answer by typing: <b>No, it's actually: ...</b>
               </div>
             </div>
-          </details>
+            <button class="btn" id="themeCloseBtn">Close</button>
+          </div>
+
+          <div class="theme-panel">
+            <div class="field">
+              <label>Theme name</label>
+              <input id="themeName" placeholder="Warhammer 40k" />
+            </div>
+
+            <div class="field">
+              <label>Intensity</label>
+              <select id="themeIntensity">
+                <option value="light">Light</option>
+                <option value="heavy">Heavy</option>
+              </select>
+            </div>
+
+            <div class="theme-actions">
+              <button class="btn" id="applyThemeBtn">Apply</button>
+              <button class="btn" id="offThemeBtn">Off</button>
+            </div>
+          </div>
         </div>
 
         <div id="chat" class="chat"></div>
@@ -562,7 +646,7 @@ HTML_TEMPLATE = r"""<!doctype html>
 
         <div class="inputbar">
           <textarea id="msg" placeholder="Type a message..."></textarea>
-          <button class="sendbtn" id="sendBtn">Send</button>
+          <button id="sendBtn" class="sendbtn">Send</button>
         </div>
       </div>
     </div>
@@ -575,73 +659,39 @@ HTML_TEMPLATE = r"""<!doctype html>
   const resetBtn = document.getElementById("resetBtn");
 
   const themePill = document.getElementById("themePill");
-  const themeName = document.getElementById("themeName");
-  const themeIntensity = document.getElementById("themeIntensity");
+  const themeToggleBtn = document.getElementById("themeToggleBtn");
+  const themePanel = document.getElementById("themePanel");
+  const themeCloseBtn = document.getElementById("themeCloseBtn");
+
+  const themeNameEl = document.getElementById("themeName");
+  const themeIntensityEl = document.getElementById("themeIntensity");
   const applyThemeBtn = document.getElementById("applyThemeBtn");
   const offThemeBtn = document.getElementById("offThemeBtn");
 
-  const STORAGE_KEY = "ms_chat_v1";
+  const STORE_KEY = "machinespirit_chat_v1";
 
-  // conversational correction state
   let lastTopic = "";
-
-  function normalizeTopic(s){
-    s = (s || "").trim();
-    s = s.replace(/^(what is|what's|define|explain)\s+/i, "").trim();
-    return s;
-  }
-
-  function extractCorrection(s){
-    const t = (s || "").trim();
-
-    // "No, it's actually ...", "Actually, ...", "Correction: ..."
-    let m = t.match(/^(no|nah|not quite|correction|actually)[,!\s]+(?:it'?s\s+|it\s+is\s+)?(?:actually\s+)?(.+)$/i);
-    if (m && m[2]) return m[2].trim();
-
-    // "That's wrong, it's ..."
-    m = t.match(/^that'?s\s+wrong[,!\s]+(?:it'?s\s+|it\s+is\s+)?(.+)$/i);
-    if (m && m[1]) return m[1].trim();
-
-    return null;
-  }
-
-  function looksLikeAutoCorrection(text){
-    // If they just type "NAT is ..." right after asking about NAT,
-    // treat it as a correction (no command needed).
-    if (!lastTopic) return false;
-
-    const t = (text || "").trim();
-    if (!t) return false;
-    if (t.startsWith("/")) return false;
-
-    const lt = String(lastTopic || "").trim().toLowerCase();
-    const tl = t.toLowerCase();
-
-    // must start with the last topic (or last topic + punctuation)
-    if (!(tl.startsWith(lt + " ") || tl.startsWith(lt + ":") || tl.startsWith(lt + "—") || tl.startsWith(lt + "-"))) {
-      return false;
-    }
-
-    // typical "definition" phrasing
-    const defish = (
-      tl.startsWith(lt + " is ") ||
-      tl.startsWith(lt + " means ") ||
-      tl.startsWith(lt + " stands for ") ||
-      tl.startsWith(lt + " = ") ||
-      tl.startsWith(lt + ":")
-    );
-
-    // require some length so we don't trigger on short replies
-    if (defish && t.length >= (lt.length + 12)) return true;
-
-    return false;
-  }
+  let lastQuestion = "";
 
   function nowHHMM(){
     const d = new Date();
     const hh = String(d.getHours()).padStart(2,"0");
     const mm = String(d.getMinutes()).padStart(2,"0");
-    return hh + ":" + mm;
+    return `${hh}:${mm}`;
+  }
+
+  function loadChat(){
+    try{
+      const raw = localStorage.getItem(STORE_KEY);
+      if(!raw) return [];
+      const arr = JSON.parse(raw);
+      if(Array.isArray(arr)) return arr;
+    }catch(e){}
+    return [];
+  }
+
+  function saveChat(arr){
+    try{ localStorage.setItem(STORE_KEY, JSON.stringify(arr)); }catch(e){}
   }
 
   function linkify(text){
@@ -650,26 +700,11 @@ HTML_TEMPLATE = r"""<!doctype html>
     return s.replace(urlRe, (m) => `<a href="${m}" target="_blank" rel="noopener noreferrer">${m}</a>`);
   }
 
-  function loadChat(){
-    try{
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return [];
-      const arr = JSON.parse(raw);
-      return Array.isArray(arr) ? arr : [];
-    }catch(e){
-      return [];
-    }
-  }
-
-  function saveChat(arr){
-    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(arr)); }catch(e){}
-  }
-
   function appendMessage(role, name, content, when){
     const row = document.createElement("div");
     row.className = "row " + (role === "user" ? "user" : "ai");
 
-    if (role !== "user"){
+    if(role !== "user"){
       const av = document.createElement("div");
       av.className = "avatar";
       av.textContent = "MS";
@@ -681,24 +716,26 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     const meta = document.createElement("div");
     meta.className = "meta";
+
     const nm = document.createElement("div");
     nm.className = "name";
-    nm.textContent = name || (role === "user" ? "You" : "MachineSpirit");
+    nm.textContent = name;
+
     const tm = document.createElement("div");
     tm.textContent = when || nowHHMM();
+
     meta.appendChild(nm);
     meta.appendChild(tm);
+    bubble.appendChild(meta);
 
     const body = document.createElement("div");
     body.className = "content";
     body.innerHTML = linkify(content);
-
-    bubble.appendChild(meta);
     bubble.appendChild(body);
 
     row.appendChild(bubble);
 
-    if (role === "user"){
+    if(role === "user"){
       const spacer = document.createElement("div");
       spacer.style.width = "30px";
       row.appendChild(spacer);
@@ -711,7 +748,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   function renderAll(){
     chatEl.innerHTML = "";
     const arr = loadChat();
-    for (const m of arr){
+    for(const m of arr){
       appendMessage(m.role, m.name, m.content, m.when);
     }
   }
@@ -721,103 +758,174 @@ HTML_TEMPLATE = r"""<!doctype html>
     const msg = { role, name, content, when: nowHHMM() };
     arr.push(msg);
     saveChat(arr);
-    appendMessage(msg.role, msg.name, msg.content, msg.when);
+    appendMessage(role, name, content, msg.when);
   }
 
-  async function refreshThemePill(){
+  function normalizeTopic(s){
+    let t = (s || "").trim();
+    t = t.replace(/^\s*(what is|what's|define|explain)\s+/i, "").trim();
+    return t;
+  }
+
+  function topicFromAnswer(ans){
+    const s = (ans || "");
+    let m = s.match(/VOX-CAST\s*\/\/\s*([^\n+]+?)\s*\+{3}/i);
+    if(m && m[1]) return m[1].trim();
+
+    const lines = s.split("\n").map(x => x.trim()).filter(Boolean);
+    for(const line of lines){
+      if(line.startsWith("+++")) continue;
+      if(/^definition:$/i.test(line)) continue;
+      if(/^key points:$/i.test(line)) continue;
+      if(/^sources:$/i.test(line)) continue;
+      if(line.length <= 80) return line;
+    }
+    return "";
+  }
+
+  function extractCorrection(s){
+    const t = (s || "").trim();
+
+    let m = t.match(/^(?:no[, ]+)?(?:nah[, ]+)?(?:not quite[, ]+)?(?:correction[:, ]+)?(?:it'?s\s+)?actually[:\s]+(.+)$/i);
+    if(m && m[1]) return m[1].trim();
+
+    m = t.match(/^that'?s wrong[, ]+(?:it'?s\s+)?(.+)$/i);
+    if(m && m[1]) return m[1].trim();
+
+    m = t.match(/^correction[:\s]+(.+)$/i);
+    if(m && m[1]) return m[1].trim();
+
+    return "";
+  }
+
+  function setThemePanel(open){
+    themePanel.style.display = open ? "block" : "none";
+  }
+
+  async function refreshTheme(){
     try{
       const r = await fetch("/api/theme");
       const out = await r.json().catch(() => ({}));
-      if (!r.ok){
+      if(!out || out.ok === false){
         themePill.textContent = "Theme: (api error)";
         return;
       }
-      const theme = out.theme || "none";
-      const intensity = out.intensity || "light";
-      themePill.textContent = `Theme: ${theme} (${intensity})`;
-      themeName.value = (theme && theme !== "none") ? theme : "";
-      themeIntensity.value = intensity;
+      const label = `${out.theme || "none"} (${out.intensity || "light"})`;
+      themePill.textContent = "Theme: " + label;
+
+      themeNameEl.value = out.theme && out.theme !== "none" ? out.theme : "Warhammer 40k";
+      themeIntensityEl.value = (out.intensity === "heavy") ? "heavy" : "light";
     }catch(e){
-      themePill.textContent = "Theme: (offline)";
+      themePill.textContent = "Theme: (api error)";
     }
   }
 
-  async function ask(text){
-    const corrected = extractCorrection(text);
-    const autoCorr = looksLikeAutoCorrection(text);
-    const isCorrection = !!((corrected && lastTopic) || autoCorr);
-
-    const endpoint = isCorrection ? "/api/override" : "/api/ask";
-    const payload = isCorrection
-      ? { topic: lastTopic, answer: (corrected ? corrected : (text || "").trim()) }
-      : { text: text };
-
-    // set last topic only when asking (not correcting), and ignore slash commands
-    if (!isCorrection && !(text || "").trim().startsWith("/")){
-      lastTopic = normalizeTopic(text).toLowerCase();
-    }
-
-    const r = await fetch(endpoint, {
+  async function applyTheme(){
+    const theme = (themeNameEl.value || "").trim() || "Warhammer 40k";
+    const intensity = themeIntensityEl.value || "light";
+    const r = await fetch("/api/theme", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ theme, intensity })
     });
+    await r.json().catch(() => ({}));
+    await refreshTheme();
+    setThemePanel(false);
+  }
 
-    const out = await r.json().catch(() => ({}));
-    if (!r.ok) return out.answer || out.detail || "UI error: failed to ask";
-    return out.answer || out.text || out.response || JSON.stringify(out);
+  async function offTheme(){
+    const r = await fetch("/api/theme", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ theme: "none", intensity: "light" })
+    });
+    await r.json().catch(() => ({}));
+    await refreshTheme();
+    setThemePanel(false);
+  }
+
+  async function ask(text){
+    const r = await fetch("/api/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text })
+    });
+    return await r.json().catch(() => ({}));
+  }
+
+  async function override(topic, answer){
+    const r = await fetch("/api/override", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ topic, answer })
+    });
+    return await r.json().catch(() => ({}));
   }
 
   async function sendCurrent(){
     const text = (msgEl.value || "").trim();
-    if (!text) return;
+    if(!text) return;
 
     msgEl.value = "";
     pushAndRender("user", "You", text);
 
-    const reply = await ask(text);
-    pushAndRender("ai", "MachineSpirit", reply);
+    const correction = extractCorrection(text);
+    if(correction){
+      if(!lastTopic){
+        pushAndRender("ai", "MachineSpirit", "I don’t know what to replace yet. Ask a question first, then correct it.");
+        return;
+      }
+      const res = await override(lastTopic, correction);
+      if(res && res.ok){
+        pushAndRender("ai", "MachineSpirit", `Got it — I replaced my saved answer for "${res.topic}".`);
+      }else{
+        pushAndRender("ai", "MachineSpirit", `Override failed: ${res.detail || "unknown error"}`);
+      }
+      return;
+    }
+
+    lastQuestion = normalizeTopic(text);
+
+    const out = await ask(text);
+    if(!out || out.ok === false){
+      pushAndRender("ai", "MachineSpirit", out.detail || "API error: failed to ask");
+      return;
+    }
+
+    const ans = out.answer || out.text || out.response || JSON.stringify(out);
+    pushAndRender("ai", "MachineSpirit", ans);
+
+    const t = topicFromAnswer(ans) || lastQuestion;
+    lastTopic = normalizeTopic(t);
+    refreshTheme();
   }
 
   sendBtn.addEventListener("click", sendCurrent);
   msgEl.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey){
+    if(e.key === "Enter" && !e.shiftKey){
       e.preventDefault();
       sendCurrent();
     }
   });
 
   resetBtn.addEventListener("click", () => {
-    try{ localStorage.removeItem(STORAGE_KEY); }catch(e){}
+    localStorage.removeItem(STORE_KEY);
+    chatEl.innerHTML = "";
     lastTopic = "";
-    renderAll();
+    lastQuestion = "";
+    refreshTheme();
   });
 
-  applyThemeBtn.addEventListener("click", async () => {
-    const name = (themeName.value || "").trim() || "none";
-    const intensity = (themeIntensity.value || "light").trim();
-    try{
-      const r = await fetch("/api/theme", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ theme: name, intensity: intensity }),
-      });
-      await r.json().catch(() => ({}));
-    }catch(e){}
-    refreshThemePill();
-  });
+  themeToggleBtn.addEventListener("click", () => setThemePanel(themePanel.style.display === "none"));
+  themeCloseBtn.addEventListener("click", () => setThemePanel(false));
+  themePill.addEventListener("click", () => setThemePanel(true));
 
-  offThemeBtn.addEventListener("click", async () => {
-    try{
-      const r = await fetch("/api/theme/off", { method: "POST" });
-      await r.json().catch(() => ({}));
-    }catch(e){}
-    refreshThemePill();
-  });
+  applyThemeBtn.addEventListener("click", applyTheme);
+  offThemeBtn.addEventListener("click", offTheme);
 
-  // boot
   renderAll();
-  refreshThemePill();
+  refreshTheme();
+  setThemePanel(false);
 </script>
 </body>
 </html>
