@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import json
 import re
 import time
 from pathlib import Path
@@ -361,3 +362,77 @@ async def ask(request: Request, req: AskRequest) -> AskResponse:
         raw=(raw_res if req.raw else None),
         theme={"theme": cfg.theme, "intensity": cfg.intensity},
     )
+
+# =========================
+# Theme endpoints (added)
+# =========================
+from fastapi import Body
+
+_THEME_PATH = os.path.expanduser("~/.config/machinespirit/theme.json")
+
+_THEME_CHOICES = {
+    "light": {"label": "1) Light", "desc": "Small flavor, stays very readable (recommended)."},
+    "heavy": {"label": "2) Heavy", "desc": "More roleplay voice, still keeps the answer clear."},
+}
+
+def _theme_load():
+    try:
+        with open(_THEME_PATH, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        theme = d.get("theme")
+        intensity = (d.get("intensity") or "light").lower().strip()
+        if intensity not in ("light", "heavy"):
+            intensity = "light"
+        return {"theme": theme, "intensity": intensity}
+    except Exception:
+        return {"theme": None, "intensity": "light"}
+
+def _theme_save(theme, intensity):
+    os.makedirs(os.path.dirname(_THEME_PATH), exist_ok=True)
+    if intensity not in ("light", "heavy"):
+        intensity = "light"
+    data = {"theme": theme, "intensity": intensity}
+    with open(_THEME_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    return data
+
+@app.get("/theme")
+def theme_get():
+    s = _theme_load()
+    return {"ok": True, **s, "choices": _THEME_CHOICES}
+
+@app.post("/theme")
+@app.post("/theme/set")
+def theme_set(payload: dict = Body(...)):
+    theme = (payload.get("theme") or "").strip()
+    intensity = (payload.get("intensity") or "light").strip().lower()
+    if not theme:
+        theme = None
+    saved = _theme_save(theme, intensity)
+    return {"ok": True, **saved, "choices": _THEME_CHOICES}
+
+@app.post("/theme/off")
+def theme_off():
+    """
+    Disable theme (back to none/light).
+    Return JSON (no 500) so the UI can show clean status.
+    """
+    try:
+        # Use explicit strings (not None) to avoid strip/JSON edge cases.
+        _theme_save("none", "light")
+        st = _theme_load()
+        # st is expected to include choices; if not, still return something usable.
+        if not isinstance(st, dict):
+            return {"ok": True, "theme": "none", "intensity": "light"}
+        st["ok"] = True
+        return st
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+@app.post("/theme/disable")
+@app.post("/theme/clear")
+def theme_off():
+    saved = _theme_save(None, "light")
+    return {"ok": True, **saved, "choices": _THEME_CHOICES}
+
