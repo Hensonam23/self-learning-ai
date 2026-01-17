@@ -1,0 +1,16 @@
+[Unit]
+Description=MachineSpirit FastAPI (LAN)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/self-learning-ai
+EnvironmentFile=%h/.config/machinespirit/api.env
+ExecStart=%h/self-learning-ai/.venv/bin/python -m uvicorn ms_api:app --host 0.0.0.0 --port 8010
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:%h/self-learning-ai/data/logs/api_service.log
+StandardError=append:%h/self-learning-ai/data/logs/api_service.log
+
+[Install]
+WantedBy=default.target

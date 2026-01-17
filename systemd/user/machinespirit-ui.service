@@ -1,0 +1,16 @@
+[Unit]
+Description=MachineSpirit UI (LAN)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/self-learning-ai
+Environment=MS_API_BASE=http://127.0.0.1:8010
+EnvironmentFile=%h/.config/machinespirit/api.env
+ExecStart=%h/self-learning-ai/.venv/bin/python -m uvicorn ms_ui:app --host 0.0.0.0 --port 8020
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
