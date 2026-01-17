@@ -90,47 +90,68 @@ def _require_auth(request: Request) -> None:
 def _require_confirm(confirm: bool) -> None:
     if not confirm:
         raise HTTPException(status_code=400, detail="This endpoint mutates state. Re-run with confirm=true")
-
-
 def _clean_repl_stdout(raw: str) -> str:
     """
-    Clean REPL output so UI can display it without the banner/prompt.
-    Keeps the topic (from the "> TOPIC" line) as the first line when present.
+    Clean REPL output so UI can display it without banner/prompt/shutdown noise.
+    This version is robust to ANSI escapes + hidden control/zero-width chars.
     """
     if not raw:
         return ""
 
+    import re as _re
+
+    # Strip common ANSI escape sequences
+    _ansi = _re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+    def _strip_ansi(s: str) -> str:
+        return _ansi.sub("", s)
+
+    def _norm_letters(s: str) -> str:
+        # Keep only lowercase letters to make matching immune to weird chars/spaces
+        s = s.lower()
+        return _re.sub(r"[^a-z]+", "", s)
+
     lines = raw.splitlines()
-    out: List[str] = []
-    prompt_topic: Optional[str] = None
+    out = []
+    prompt_topic = None
 
     for line in lines:
-        s = line.strip()
+        # Remove ANSI escapes, and replace control chars with spaces
+        line2 = _strip_ansi(line)
+        line2 = "".join((ch if ch >= " " else " ") for ch in line2)
 
-        # Banner lines
-        if s.startswith("Machine Spirit brain online."):
-            continue
-        if "Type a message" in s and "Ctrl+C" in s:
+        s = line2.strip()
+        if not s:
+            out.append("")  # preserve spacing a bit
             continue
 
-        # Prompt line: "> CIDR"
-        if s.startswith(">"):
-            maybe = s.lstrip(">").strip()
+        norm = _norm_letters(s)
+
+        # Banner detection (robust)
+        if norm.startswith("machinespiritbrainonline"):
+            continue
+        if ("typeamessage" in norm) and ("ctrlc" in norm):
+            continue
+
+        # Prompt detection (robust): allow leading spaces before '>'
+        m = _re.match(r"^\s*>\s*(.+?)\s*$", line2)
+        if m:
+            maybe = m.group(1).strip()
             if maybe:
                 prompt_topic = maybe
             continue
 
-        # Shutdown noise
-        if "shutting down" in s.lower():
+        # Shutdown detection (robust)
+        if "shuttingdown" in norm:
             continue
 
-        out.append(line)
+        out.append(line2.rstrip())
 
-    # Trim leading blanks
+    # Remove leading empty lines
     while out and out[0].strip() == "":
         out.pop(0)
 
-    # Put the topic at top (nice display)
+    # Put topic at top if captured
     if prompt_topic:
         if not out or out[0].strip() != prompt_topic:
             out = [prompt_topic, ""] + out
