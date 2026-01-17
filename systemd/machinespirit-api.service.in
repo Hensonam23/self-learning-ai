@@ -1,0 +1,15 @@
+[Unit]
+Description=MachineSpirit API (FastAPI/Uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_DIR@
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=%h/.config/machinespirit/secrets.env
+ExecStart=@REPO_DIR@/.venv/bin/python -m uvicorn ms_api:app --host 0.0.0.0 --port 8010
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

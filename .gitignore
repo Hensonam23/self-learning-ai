@@ -69,3 +69,5 @@ ms_api.py.bak.*
 
 # local locks
 .machinespirit.lock
+data/api_key.txt
+data/api_key_header.txt
