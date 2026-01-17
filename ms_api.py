@@ -285,13 +285,22 @@ async def health(request: Request) -> Dict[str, Any]:
 @app.post("/ask", response_model=RunResult)
 async def ask(req: AskRequest, request: Request) -> RunResult:
     _require_auth(request)
-    args = [PYTHON_BIN, str(BRAIN_PATH), "--ask", req.text]
-    res = await _run_process(args, timeout_s=req.timeout_s)
-    # stdout is already clean from --ask; still run finalize as a safety net
-    res.answer = _finalize_answer(res.stdout, req.text)
+
+    # Run the brain in REPL mode and feed the topic as a single line.
+    topic = (req.text or "").strip()
+    if not topic:
+        raise HTTPException(status_code=422, detail="text is required")
+
+    stdin_text = topic + "\n"
+    res = await _run_process(_brain_repl_args(), stdin_text=stdin_text, timeout_s=req.timeout_s)
+
+    # If you have cleaner logic, keep using it; otherwise answer=stdout is fine.
+    try:
+        res.answer = _clean_repl_stdout(res.stdout)
+    except Exception:
+        res.answer = res.stdout or ""
+
     return res
-
-
 @app.post("/teach", response_model=RunResult)
 async def teach(req: CommandRequest, request: Request, confirm: bool = Query(False)) -> RunResult:
     _require_auth(request)
