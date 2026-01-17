@@ -1,622 +1,871 @@
 #!/usr/bin/env python3
-from __future__ import annotations
-
 import os
-import re
-import time
-from typing import Any, Dict, List, Tuple
+import json
+import urllib.request
+import urllib.error
+from typing import Any, Dict, Optional
 
-import httpx
-from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
 
-APP_NAME = "MachineSpirit UI"
-VERSION = "0.2.2"
+APP_TITLE = "MachineSpirit UI"
 
-# UI talks to the API service (default: localhost:8010)
-MS_API_BASE = os.environ.get("MS_API_BASE", "http://127.0.0.1:8010").rstrip("/")
-MS_API_KEY = os.environ.get("MS_API_KEY", "")
+# API that answers questions
+API_BASE = os.environ.get("MS_API_URL", "http://127.0.0.1:8010").rstrip("/")
+API_ASK_URL = os.environ.get("MS_API_ASK_URL", f"{API_BASE}/ask")
 
-app = FastAPI(title=APP_NAME, version=VERSION)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
 
-# In-memory chat (LAN prototype)
-# key = client ip, value = list[(role, text, ts)]
-HISTORY: Dict[str, List[Tuple[str, str, float]]] = {}
+# Optional client API key support (for when ms_api requires an inbound key)
+API_KEY_FILE = os.path.join(DATA_DIR, "api_key.txt")
+API_KEY_HEADER_FILE = os.path.join(DATA_DIR, "api_key_header.txt")
+API_KEY_DEFAULT_HEADER = os.environ.get("MS_API_KEY_HEADER", "X-API-Key")
 
+# Theme store fallback (only used if ms_theme module not available)
+FALLBACK_THEME_PATH = os.path.join(DATA_DIR, "theme_state.json")
 
-def _client_id(req: Request) -> str:
-    return (req.client.host if req.client else "unknown")
+DEFAULT_THEME_STATE = {
+    "enabled": True,
+    "theme": "Warhammer 40k",
+    "intensity": 2,  # 1=light, 2=heavy
+}
 
+app = FastAPI(title=APP_TITLE)
 
-async def _api_post(path: str, json_data: Dict[str, Any]) -> Dict[str, Any]:
-    headers = {"Content-Type": "application/json"}
-    if MS_API_KEY:
-        headers["x-api-key"] = MS_API_KEY
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.post(f"{MS_API_BASE}{path}", headers=headers, json=json_data)
-        r.raise_for_status()
-        return r.json()
+# LAN-friendly default; tighten later if needed
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+# -----------------------------
+# Utilities
+# -----------------------------
 
-async def _api_get(path: str) -> Dict[str, Any]:
-    headers: Dict[str, str] = {}
-    if MS_API_KEY:
-        headers["x-api-key"] = MS_API_KEY
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.get(f"{MS_API_BASE}{path}", headers=headers)
-        r.raise_for_status()
-        return r.json()
+def _intensity_label(level: int) -> str:
+    try:
+        return "heavy" if int(level) >= 2 else "light"
+    except Exception:
+        return "heavy"
 
+def _atomic_write_json(path: str, obj: Dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
 
-def _escape(s: str) -> str:
-    s = s or ""
+def _read_json(path: str) -> Optional[Dict[str, Any]]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def _read_secret_line(path: str) -> Optional[str]:
+    try:
+        s = open(path, "r", encoding="utf-8").read().strip()
+        return s if s else None
+    except Exception:
+        return None
+
+def _get_client_api_key() -> Optional[str]:
     return (
-        s.replace("&", "&amp;")
-         .replace("<", "&lt;")
-         .replace(">", "&gt;")
-         .replace('"', "&quot;")
+        os.environ.get("MS_API_KEY")
+        or os.environ.get("MACHINESPIRIT_API_KEY")
+        or _read_secret_line(API_KEY_FILE)
     )
 
+def _get_client_api_key_header() -> str:
+    return _read_secret_line(API_KEY_HEADER_FILE) or API_KEY_DEFAULT_HEADER
 
-_URL_RE = re.compile(r"(https?://[^\s<>()]+)")
+def _normalize_theme_state(raw: Dict[str, Any]) -> Dict[str, Any]:
+    st = dict(DEFAULT_THEME_STATE)
 
-def _linkify(escaped_text: str) -> str:
-    # escaped_text is already HTML-escaped. We only turn URLs into <a> tags.
-    def repl(m: re.Match) -> str:
-        url = m.group(1)
-        return f'<a href="{url}" target="_blank" rel="noreferrer">{url}</a>'
-    return _URL_RE.sub(repl, escaped_text)
+    if "enabled" in raw:
+        st["enabled"] = bool(raw.get("enabled"))
+    elif "off" in raw:
+        st["enabled"] = not bool(raw.get("off"))
 
+    if "theme" in raw and raw.get("theme") is not None:
+        name = str(raw.get("theme")).strip()
+        if name:
+            st["theme"] = name
+    elif "name" in raw and raw.get("name") is not None:
+        name = str(raw.get("name")).strip()
+        if name:
+            st["theme"] = name
 
-def _render_message(role: str, text: str, ts: float) -> str:
-    who = "You" if role == "user" else "MachineSpirit"
-    t = time.strftime("%I:%M %p", time.localtime(ts)).lstrip("0")
+    lvl = raw.get("intensity", raw.get("level", raw.get("mode", st["intensity"])))
+    try:
+        lvl_int = int(lvl)
+    except Exception:
+        lvl_int = st["intensity"]
 
-    safe = _escape(text)
-    safe = _linkify(safe)
+    if lvl_int < 1:
+        lvl_int = 1
+    if lvl_int > 2:
+        lvl_int = 2
+    st["intensity"] = lvl_int
+    return st
 
-    # Preserve formatting (bullets/newlines) without turning it into a giant code block.
-    # Looks like chat, but keeps readability.
-    body_html = f'<div class="msg-text">{safe}</div>'
+def _load_theme_state() -> Dict[str, Any]:
+    # Prefer ms_theme module if available
+    try:
+        import ms_theme  # type: ignore
 
-    if role == "user":
-        return f"""
-        <div class="row row-user">
-          <div class="meta meta-user">{who} <span class="time">{t}</span></div>
-          <div class="bubble bubble-user">{body_html}</div>
-        </div>
-        """
-    else:
-        return f"""
-        <div class="row row-bot">
-          <div class="avatar">MS</div>
-          <div class="stack">
-            <div class="meta meta-bot">{who} <span class="time">{t}</span></div>
-            <div class="bubble bubble-bot">{body_html}</div>
-          </div>
-        </div>
-        """
+        for fn_name in ["get_theme_state", "load_theme_state", "get_theme", "load_theme"]:
+            fn = getattr(ms_theme, fn_name, None)
+            if callable(fn):
+                st = fn()
+                if isinstance(st, dict):
+                    return _normalize_theme_state(st)
 
+        for attr in ["THEME_PATH", "THEME_STATE_PATH", "THEME_FILE", "THEME_JSON_PATH"]:
+            p = getattr(ms_theme, attr, None)
+            if isinstance(p, str) and p:
+                st = _read_json(p)
+                if isinstance(st, dict):
+                    return _normalize_theme_state(st)
+    except Exception:
+        pass
 
-def _render_page(
-    messages: List[Tuple[str, str, float]],
-    theme_info: Dict[str, Any],
-    notice: str = ""
-) -> str:
-    theme_name = (theme_info.get("theme") or "none")
-    intensity = (theme_info.get("intensity") or "light")
+    st = _read_json(FALLBACK_THEME_PATH)
+    if isinstance(st, dict):
+        return _normalize_theme_state(st)
 
-    choices = theme_info.get("choices") or {}
-    light_desc = (choices.get("light") or {}).get("desc", "Small flavor, very readable.")
-    heavy_desc = (choices.get("heavy") or {}).get("desc", "More roleplay voice, more flavor.")
+    return _normalize_theme_state(DEFAULT_THEME_STATE)
 
-    msgs_html = "\n".join(_render_message(r, t, ts) for (r, t, ts) in messages[-80:])
+def _save_theme_state(state: Dict[str, Any]) -> None:
+    state = _normalize_theme_state(state)
 
-    notice_html = ""
-    if notice:
-        notice_html = f'<div class="notice">{_escape(notice)}</div>'
+    try:
+        import ms_theme  # type: ignore
 
-    theme_badge = f"Theme: {_escape(theme_name)} ({_escape(intensity)})"
+        for fn_name in ["set_theme_state", "save_theme_state", "set_theme", "save_theme"]:
+            fn = getattr(ms_theme, fn_name, None)
+            if callable(fn):
+                try:
+                    fn(state)
+                    return
+                except TypeError:
+                    try:
+                        fn(
+                            theme=state.get("theme"),
+                            intensity=state.get("intensity"),
+                            enabled=state.get("enabled"),
+                        )
+                        return
+                    except Exception:
+                        pass
 
-    return f"""<!doctype html>
-<html>
+        for attr in ["THEME_PATH", "THEME_STATE_PATH", "THEME_FILE", "THEME_JSON_PATH"]:
+            p = getattr(ms_theme, attr, None)
+            if isinstance(p, str) and p:
+                _atomic_write_json(p, state)
+                return
+    except Exception:
+        pass
+
+    _atomic_write_json(FALLBACK_THEME_PATH, state)
+
+def _http_post_json(url: str, payload: Dict[str, Any], timeout: int = 20) -> Dict[str, Any]:
+    data = json.dumps(payload).encode("utf-8")
+
+    headers = {"Content-Type": "application/json"}
+
+    # If API key exists, attach it (fixes your 401 issue)
+    key = _get_client_api_key()
+    if key:
+        hdr = _get_client_api_key_header().strip()
+        if hdr.lower() == "authorization":
+            if not key.lower().startswith("bearer "):
+                key = "Bearer " + key
+        headers[hdr] = key
+
+    req = urllib.request.Request(
+        url=url,
+        data=data,
+        headers=headers,
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            try:
+                return json.loads(raw.decode("utf-8", errors="replace"))
+            except Exception:
+                return {"answer": raw.decode("utf-8", errors="replace")}
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = str(e)
+        return {"error": f"HTTPError {e.code}", "detail": body}
+    except Exception as e:
+        return {"error": "Request failed", "detail": str(e)}
+
+def _handle_theme_command(text: str) -> Optional[str]:
+    t = (text or "").strip()
+    if not t.startswith("/theme"):
+        return None
+
+    parts = t.split()
+
+    if len(parts) == 1:
+        st = _load_theme_state()
+        if st.get("enabled"):
+            return (
+                "Theme commands:\n"
+                "/theme off\n"
+                "/theme set <theme name> 1  (light)\n"
+                "/theme set <theme name> 2  (heavy)\n\n"
+                f"Current: {st.get('theme')} ({_intensity_label(st.get('intensity', 2))})"
+            )
+        return (
+            "Theme commands:\n"
+            "/theme off\n"
+            "/theme set <theme name> 1  (light)\n"
+            "/theme set <theme name> 2  (heavy)\n\n"
+            "Current: OFF"
+        )
+
+    if len(parts) == 2 and parts[1].lower() == "off":
+        st = _load_theme_state()
+        st["enabled"] = False
+        _save_theme_state(st)
+        return "Theme is now OFF."
+
+    if len(parts) >= 4 and parts[1].lower() == "set":
+        try:
+            lvl = int(parts[-1])
+        except Exception:
+            lvl = 2
+        name = " ".join(parts[2:-1]).strip()
+        if not name:
+            return "Missing theme name. Example: /theme set Warhammer 40k 2"
+
+        st = _load_theme_state()
+        st["enabled"] = True
+        st["theme"] = name
+        st["intensity"] = 2 if lvl >= 2 else 1
+        _save_theme_state(st)
+        return f"Theme set to: {st['theme']} ({_intensity_label(st['intensity'])})"
+
+    return "Unknown theme command. Type /theme to see examples."
+
+# -----------------------------
+# HTML template (raw string)
+# -----------------------------
+
+HTML_TEMPLATE = r"""<!doctype html>
+<html lang="en">
 <head>
-  <meta charset="utf-8" />
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
+  <meta http-equiv="Pragma" content="no-cache"/>
+  <meta http-equiv="Expires" content="0"/>
   <title>MachineSpirit UI</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root {{
-      --bg: #0b0b0c;
-      --panel: rgba(18, 18, 22, 0.72);
-      --panel2: rgba(18, 18, 22, 0.55);
-      --line: rgba(255,255,255,0.08);
-      --text: #f2f2f2;
-      --muted: rgba(255,255,255,0.65);
-      --user: #2a3b66;
-      --bot: rgba(255,255,255,0.06);
-      --shadow: 0 10px 28px rgba(0,0,0,0.45);
-    }}
+    :root{
+      --panel: rgba(18, 20, 30, 0.68);
+      --border: rgba(255,255,255,0.08);
+      --text: rgba(255,255,255,0.92);
+      --muted: rgba(255,255,255,0.60);
+      --bubble-ai: rgba(24, 26, 38, 0.85);
+      --bubble-user: rgba(34, 72, 160, 0.65);
+      --shadow: 0 10px 30px rgba(0,0,0,0.35);
+      --radius: 14px;
+      --maxw: 980px;
+      --font: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Arial, sans-serif;
+    }
 
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-      background: radial-gradient(1200px 700px at 25% 0%, rgba(72,88,170,0.25), transparent 55%),
-                  radial-gradient(900px 600px at 70% 10%, rgba(156,72,170,0.15), transparent 60%),
-                  var(--bg);
-      color: var(--text);
-    }}
+    /* FIX: stop background repeating/tiling */
+    html, body { height: 100%; }
 
-    header {{
-      position: sticky;
-      top: 0;
-      z-index: 5;
-      background: rgba(10,10,12,0.72);
-      backdrop-filter: blur(10px);
-      border-bottom: 1px solid var(--line);
-    }}
+    body{
+      margin:0;
+      font-family:var(--font);
+      color:var(--text);
 
-    .topbar {{
-      max-width: 1100px;
-      margin: 0 auto;
-      padding: 12px 16px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-    }}
+      background-color:#0b0f1a;
+      background-image:
+        radial-gradient(circle at 20% 10%, rgba(80, 120, 255, 0.22), transparent 45%),
+        radial-gradient(circle at 80% 30%, rgba(180, 70, 255, 0.18), transparent 50%),
+        radial-gradient(circle at 40% 85%, rgba(0, 180, 255, 0.10), transparent 55%),
+        linear-gradient(180deg, rgba(10, 12, 22, 0.92), rgba(10, 12, 22, 0.92));
+      background-repeat:no-repeat;
+      background-size:cover;
+      background-attachment:fixed;
+      background-position:center top;
 
-    .brand {{
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }}
-    .brand .title {{
-      font-size: 18px;
-      font-weight: 800;
-      letter-spacing: 0.2px;
-    }}
-    .brand .sub {{
-      font-size: 12px;
-      color: var(--muted);
-    }}
+      min-height:100vh;
+      overflow:hidden;
+    }
 
-    .actions {{
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex-wrap: wrap;
-      justify-content: flex-end;
-    }}
+    a{ color:rgba(140, 190, 255, 0.92); text-decoration:none; }
+    a:hover{ text-decoration:underline; }
 
-    .badge {{
-      font-size: 12px;
-      color: rgba(255,255,255,0.78);
-      padding: 6px 10px;
-      border: 1px solid var(--line);
-      background: rgba(255,255,255,0.04);
-      border-radius: 999px;
-    }}
+    .app{ height:100vh; display:flex; flex-direction:column; }
 
-    .btn {{
-      border: 1px solid var(--line);
-      background: rgba(255,255,255,0.04);
-      color: var(--text);
-      padding: 7px 10px;
-      border-radius: 10px;
-      cursor: pointer;
-      font-size: 12px;
-      text-decoration: none;
-    }}
-    .btn:hover {{
-      background: rgba(255,255,255,0.07);
-    }}
+    .topbar{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      padding:14px 18px;
+      background:rgba(10, 12, 18, 0.55);
+      border-bottom:1px solid var(--border);
+      backdrop-filter:blur(10px);
+    }
 
-    main {{
-      max-width: 1100px;
-      margin: 0 auto;
-      padding: 16px;
-    }}
+    .brand{ display:flex; flex-direction:column; gap:2px; }
+    .brand .title{ font-weight:700; font-size:16px; line-height:18px; }
+    .brand .sub{ font-size:12px; color:var(--muted); }
 
-    .panel {{
-      border: 1px solid var(--line);
-      background: var(--panel);
-      border-radius: 16px;
-      box-shadow: var(--shadow);
-      overflow: hidden;
-    }}
+    .actions{ display:flex; gap:10px; align-items:center; }
 
-    details {{
-      border-bottom: 1px solid var(--line);
-      background: rgba(255,255,255,0.02);
-    }}
-    summary {{
-      cursor: pointer;
-      padding: 12px 14px;
-      font-weight: 700;
-    }}
-    .theme-box {{
-      padding: 12px 14px 14px 14px;
-      display: grid;
-      grid-template-columns: 1fr 260px 200px;
-      gap: 10px;
-      align-items: end;
-    }}
-    .theme-box label {{
-      display: block;
-      font-size: 12px;
-      color: var(--muted);
-      margin-bottom: 6px;
-    }}
-    input[type="text"], select {{
-      width: 100%;
-      padding: 10px 10px;
-      border-radius: 10px;
-      border: 1px solid var(--line);
-      background: rgba(0,0,0,0.25);
-      color: var(--text);
-      outline: none;
-    }}
-    .theme-actions {{
-      display: flex;
-      gap: 8px;
-    }}
-    .hint {{
-      font-size: 12px;
-      color: var(--muted);
-      margin-top: 10px;
-      line-height: 1.35;
-    }}
-    .notice {{
-      margin: 10px 14px 0 14px;
-      padding: 10px 12px;
-      border: 1px solid var(--line);
-      background: rgba(255,255,255,0.03);
-      border-radius: 12px;
-      color: rgba(255,255,255,0.9);
-      font-size: 13px;
-    }}
+    .pill{
+      font-size:12px;
+      padding:6px 10px;
+      border-radius:999px;
+      background:rgba(255,255,255,0.06);
+      border:1px solid var(--border);
+      color:var(--text);
+      white-space:nowrap;
+    }
 
-    .chat {{
-      padding: 14px;
-      max-height: calc(100vh - 250px);
-      overflow: auto;
-    }}
+    .btn{
+      font-size:12px;
+      padding:7px 10px;
+      border-radius:10px;
+      border:1px solid var(--border);
+      background:rgba(255,255,255,0.06);
+      color:var(--text);
+      cursor:pointer;
+    }
+    .btn:hover{ background:rgba(255,255,255,0.10); }
 
-    .row {{
-      display: flex;
-      gap: 10px;
-      margin: 10px 0;
-      align-items: flex-start;
-    }}
+    .wrap{
+      flex:1;
+      display:flex;
+      justify-content:center;
+      padding:14px 16px 18px 16px;
+      overflow:hidden;
+    }
 
-    .row-user {{
-      justify-content: flex-end;
-    }}
+    .card{
+      width:min(var(--maxw), 100%);
+      height:100%;
+      display:flex;
+      flex-direction:column;
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:18px;
+      box-shadow:var(--shadow);
+      overflow:hidden;
+      backdrop-filter:blur(12px);
+    }
 
-    .avatar {{
-      width: 34px;
-      height: 34px;
-      border-radius: 999px;
-      background: rgba(255,255,255,0.06);
-      border: 1px solid var(--line);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-weight: 800;
-      color: rgba(255,255,255,0.82);
-      flex: 0 0 auto;
-    }}
+    .panel{
+      padding:12px 14px;
+      border-bottom:1px solid var(--border);
+      background:rgba(10, 12, 18, 0.35);
+    }
 
-    .stack {{
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      max-width: 720px;
-      width: 100%;
-    }}
+    .panel h3{ margin:0; font-size:14px; font-weight:700; }
+    .panel .hint{ margin-top:6px; color:var(--muted); font-size:12px; }
 
-    .meta {{
-      font-size: 11px;
-      color: var(--muted);
-      padding: 0 6px;
-    }}
-    .meta-user {{
-      text-align: right;
-    }}
-    .time {{
-      opacity: 0.7;
-      margin-left: 6px;
-    }}
+    .theme-panel{
+      display:grid;
+      grid-template-columns: 1fr 220px 200px; /* FIX overlap: give buttons real space */
+      gap:12px;
+      margin-top:10px;
+      padding-top:10px;
+      border-top:1px dashed rgba(255,255,255,0.12);
+      align-items:end;
+    }
 
-    .bubble {{
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      padding: 12px 12px;
-      box-shadow: 0 8px 18px rgba(0,0,0,0.25);
-    }}
+    .field label{ display:block; font-size:12px; color:var(--muted); margin-bottom:6px; }
 
-    .bubble-user {{
-      background: rgba(42, 59, 102, 0.75);
-      max-width: 520px;
-    }}
+    .field input, .field select{
+      width:100%;
+      padding:10px 10px;
+      border-radius:12px;
+      border:1px solid var(--border);
+      background:rgba(0,0,0,0.25);
+      color:var(--text);
+      outline:none;
+    }
+    .field input:focus, .field select:focus{ border-color:rgba(140, 190, 255, 0.45); }
 
-    .bubble-bot {{
-      background: var(--bot);
-      max-width: 720px;
-    }}
+    .theme-actions{
+      display:grid;
+      grid-template-columns: 1fr 1fr; /* FIX overlap */
+      gap:10px;
+    }
+    .theme-actions .btn{ width:100%; }
 
-    .msg-text {{
-      white-space: pre-wrap;
-      line-height: 1.42;
-      font-size: 14px;
-      color: rgba(255,255,255,0.92);
-    }}
-    .msg-text a {{
-      color: #9fb4ff;
-      text-decoration: none;
-    }}
-    .msg-text a:hover {{
-      text-decoration: underline;
-    }}
+    .chat{
+      flex:1;
+      overflow:auto;
+      padding:14px 14px 10px 14px;
+    }
 
-    .composer {{
-      border-top: 1px solid var(--line);
-      background: rgba(0,0,0,0.18);
-      padding: 12px 14px;
-      display: flex;
-      gap: 10px;
-      align-items: flex-end;
-    }}
+    .row{ display:flex; margin:10px 0; gap:10px; align-items:flex-start; }
+    .row.user{ justify-content:flex-end; }
 
-    textarea {{
-      width: 100%;
-      min-height: 46px;
-      max-height: 140px;
-      resize: vertical;
-      padding: 10px 12px;
-      border-radius: 12px;
-      border: 1px solid var(--line);
-      background: rgba(0,0,0,0.25);
-      color: var(--text);
-      outline: none;
-      font-size: 14px;
-      line-height: 1.35;
-    }}
+    .avatar{
+      width:30px; height:30px;
+      border-radius:999px;
+      display:grid;
+      place-items:center;
+      background:rgba(255,255,255,0.08);
+      border:1px solid var(--border);
+      color:var(--text);
+      font-weight:800;
+      flex:0 0 auto;
+    }
 
-    .send {{
-      padding: 10px 14px;
-      border-radius: 12px;
-      border: 1px solid var(--line);
-      background: rgba(120, 160, 255, 0.18);
-      color: var(--text);
-      cursor: pointer;
-      font-weight: 700;
-    }}
-    .send:hover {{
-      background: rgba(120, 160, 255, 0.25);
-    }}
+    .bubble{
+      max-width:74%;
+      border-radius:var(--radius);
+      padding:12px 12px;
+      border:1px solid var(--border);
+      background:var(--bubble-ai);
+      box-shadow:0 6px 18px rgba(0,0,0,0.25);
+    }
+    .row.user .bubble{ background:var(--bubble-user); }
 
-    .empty {{
-      padding: 18px;
-      color: var(--muted);
-      text-align: center;
-      border: 1px dashed rgba(255,255,255,0.12);
-      border-radius: 16px;
-      background: rgba(255,255,255,0.02);
-    }}
+    .meta{
+      display:flex;
+      gap:8px;
+      align-items:baseline;
+      margin-bottom:6px;
+      color:var(--muted);
+      font-size:11px;
+    }
+    .meta .name{ font-weight:700; color:rgba(255,255,255,0.78); }
+    .content{ white-space:pre-wrap; line-height:1.35; font-size:13px; }
 
-    @media (max-width: 820px) {{
-      .theme-box {{
-        grid-template-columns: 1fr;
-      }}
-      .stack {{
-        max-width: 100%;
-      }}
-      .bubble-user, .bubble-bot {{
-        max-width: 100%;
-      }}
-      .chat {{
-        max-height: calc(100vh - 340px);
-      }}
-    }}
+    .small{ font-size:12px; color:var(--muted); padding:0 14px 12px 14px; }
+
+    .inputbar{
+      padding:12px 12px;
+      border-top:1px solid var(--border);
+      background:rgba(10, 12, 18, 0.45);
+      display:grid;
+      grid-template-columns: 1fr 96px;
+      gap:10px;
+    }
+
+    textarea{
+      resize:none;
+      height:44px;
+      padding:10px 10px;
+      border-radius:12px;
+      border:1px solid var(--border);
+      background:rgba(0,0,0,0.20);
+      color:var(--text);
+      outline:none;
+      font-family:var(--font);
+      font-size:13px;
+      line-height:1.2;
+    }
+    textarea:focus{ border-color:rgba(140, 190, 255, 0.45); }
+
+    .sendbtn{
+      height:44px;
+      border-radius:12px;
+      border:1px solid var(--border);
+      background:rgba(255,255,255,0.08);
+      color:var(--text);
+      cursor:pointer;
+      font-weight:700;
+    }
+    .sendbtn:hover{ background:rgba(255,255,255,0.12); }
+
+    @media (max-width: 900px){
+      .theme-panel{ grid-template-columns: 1fr; }
+      .bubble{ max-width:86%; }
+    }
   </style>
 </head>
 <body>
-  <header>
+  <div class="app">
     <div class="topbar">
       <div class="brand">
         <div class="title">MachineSpirit UI</div>
-        <div class="sub">LAN chat • API: {_escape(MS_API_BASE)}</div>
+        <div class="sub">LAN chat • API: __API_BASE__</div>
       </div>
+
       <div class="actions">
-        <span class="badge">{theme_badge}</span>
-        <a class="btn" href="/ui/reset">Reset chat</a>
-        <a class="btn" href="/ui#theme">Theme settings</a>
+        <div id="themePill" class="pill">Theme: loading...</div>
+        <button class="btn" id="resetBtn">Reset chat</button>
       </div>
     </div>
-  </header>
 
-  <main>
-    <div class="panel">
-      <details id="theme">
-        <summary>Theme settings</summary>
-        <form method="post" action="/ui/theme">
-          <div class="theme-box">
-            <div>
+    <div class="wrap">
+      <div class="card">
+        <div class="panel">
+          <h3>Theme settings</h3>
+          <div class="hint">Try: <b>what is nat</b> or type <b>/theme</b> in chat</div>
+
+          <div class="theme-panel">
+            <div class="field">
               <label>Theme name</label>
-              <input type="text" name="theme" value="{_escape(theme_name)}" placeholder="Warhammer 40k" />
-              <div class="hint">Tip: you can also type <b>/theme</b> in chat.</div>
+              <input id="themeName" type="text" placeholder="Warhammer 40k" />
             </div>
-            <div>
+
+            <div class="field">
               <label>Intensity</label>
-              <select name="intensity">
-                <option value="light" {"selected" if intensity=="light" else ""}>1) Light — { _escape(light_desc) }</option>
-                <option value="heavy" {"selected" if intensity=="heavy" else ""}>2) Heavy — { _escape(heavy_desc) }</option>
+              <select id="themeIntensity">
+                <option value="1">Light</option>
+                <option value="2">Heavy</option>
               </select>
             </div>
+
             <div class="theme-actions">
-              <button class="btn" type="submit" name="action" value="save">Save theme</button>
-              <button class="btn" type="submit" name="action" value="off">Disable theme</button>
+              <button class="btn" id="applyThemeBtn">Apply</button>
+              <button class="btn" id="themeOffBtn">Off</button>
             </div>
           </div>
-        </form>
-      </details>
+        </div>
 
-      {notice_html}
+        <div id="chat" class="chat"></div>
 
-      <div class="chat" id="chat">
-        {msgs_html if msgs_html else '<div class="empty">Ask something like: <b>what is nat</b></div>'}
+        <div class="small">Enter = send. Shift+Enter = new line.</div>
+
+        <div class="inputbar">
+          <textarea id="msg" placeholder="Type a message..."></textarea>
+          <button class="sendbtn" id="sendBtn">Send</button>
+        </div>
       </div>
-
-      <form method="post" action="/ui/ask" class="composer" id="composer">
-        <textarea name="text" id="msg" placeholder="Type a message… (Enter = send, Shift+Enter = new line)"></textarea>
-        <button class="send" type="submit">Send</button>
-      </form>
     </div>
-  </main>
+  </div>
 
-  <script>
-    // Auto-scroll to bottom
-    const chat = document.getElementById("chat");
-    if (chat) chat.scrollTop = chat.scrollHeight;
+<script>
+  const chatEl = document.getElementById("chat");
+  const msgEl = document.getElementById("msg");
+  const sendBtn = document.getElementById("sendBtn");
+  const resetBtn = document.getElementById("resetBtn");
+  const themePill = document.getElementById("themePill");
+  const themeName = document.getElementById("themeName");
+  const themeIntensity = document.getElementById("themeIntensity");
+  const applyThemeBtn = document.getElementById("applyThemeBtn");
+  const themeOffBtn = document.getElementById("themeOffBtn");
 
-    // Enter to send, Shift+Enter new line
-    const ta = document.getElementById("msg");
-    const form = document.getElementById("composer");
-    if (ta && form) {{
-      ta.addEventListener("keydown", (e) => {{
-        if (e.key === "Enter" && !e.shiftKey) {{
-          e.preventDefault();
-          form.submit();
-        }}
-      }});
-      ta.focus();
-    }}
-  </script>
+  const LS_CHAT = "machinespirit_chat_v1";
+
+  function escapeHtml(s) {
+    return (s || "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
+
+  function linkify(text) {
+    const escaped = escapeHtml(text);
+    const urlRe = /(https?:\/\/[^\s)]+)|((?:www\.)[^\s)]+)/g;
+    return escaped.replace(urlRe, (match) => {
+      let href = match;
+      if (!href.startsWith("http")) href = "http://" + href;
+      return `<a href="${href}" target="_blank" rel="noopener noreferrer">${match}</a>`;
+    });
+  }
+
+  function loadChat() {
+    try {
+      const raw = localStorage.getItem(LS_CHAT);
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return arr;
+    } catch (e) {}
+    return [];
+  }
+
+  function saveChat(arr) {
+    try { localStorage.setItem(LS_CHAT, JSON.stringify(arr)); } catch (e) {}
+  }
+
+  function nowHHMM() {
+    const d = new Date();
+    return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
+
+  function appendMessage(role, name, content, when) {
+    const row = document.createElement("div");
+    row.className = "row " + (role === "user" ? "user" : "ai");
+
+    if (role !== "user") {
+      const av = document.createElement("div");
+      av.className = "avatar";
+      av.textContent = "MS";
+      row.appendChild(av);
+    }
+
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.innerHTML = `<span class="name">${escapeHtml(name)}</span><span>${escapeHtml(when)}</span>`;
+    bubble.appendChild(meta);
+
+    const body = document.createElement("div");
+    body.className = "content";
+    body.innerHTML = linkify(content);
+    bubble.appendChild(body);
+
+    row.appendChild(bubble);
+
+    if (role === "user") {
+      const spacer = document.createElement("div");
+      spacer.style.width = "30px";
+      row.appendChild(spacer);
+    }
+
+    chatEl.appendChild(row);
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+
+  function renderAll() {
+    chatEl.innerHTML = "";
+    const arr = loadChat();
+    for (const m of arr) appendMessage(m.role, m.name, m.content, m.when);
+  }
+
+  function pushAndRender(role, name, content) {
+    const arr = loadChat();
+    const msg = { role, name, content, when: nowHHMM() };
+    arr.push(msg);
+    saveChat(arr);
+    appendMessage(role, name, content, msg.when);
+  }
+
+  async function ask(text) {
+    const r = await fetch("/api/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok) return out.answer || out.detail || "UI error: failed to ask";
+    return out.answer || out.text || out.response || JSON.stringify(out);
+  }
+
+  async function sendCurrent() {
+    const text = (msgEl.value || "").trim();
+    if (!text) return;
+
+    msgEl.value = "";
+    pushAndRender("user", "You", text);
+
+    // typing indicator
+    pushAndRender("ai", "MachineSpirit", "…");
+
+    const arr = loadChat();
+    try {
+      const answer = await ask(text);
+      arr[arr.length - 1] = { role: "ai", name: "MachineSpirit", content: answer, when: nowHHMM() };
+      saveChat(arr);
+      renderAll();
+    } catch (e) {
+      arr[arr.length - 1] = { role: "ai", name: "MachineSpirit", content: "UI error: " + e.message, when: nowHHMM() };
+      saveChat(arr);
+      renderAll();
+    }
+  }
+
+  async function getTheme() {
+    const r = await fetch("/api/theme");
+    if (!r.ok) throw new Error("theme fetch failed");
+    return await r.json();
+  }
+
+  function setThemePill(st) {
+    if (!st || !st.enabled) {
+      themePill.textContent = "Theme: off";
+      return;
+    }
+    const label = st.intensity_label || (st.intensity >= 2 ? "heavy" : "light");
+    themePill.textContent = "Theme: " + st.theme + " (" + label + ")";
+  }
+
+  async function refreshThemeUI() {
+    try {
+      const st = await getTheme();
+      setThemePill(st);
+      themeName.value = st.theme || "";
+      themeIntensity.value = String(st.intensity || 2);
+    } catch (e) {
+      themePill.textContent = "Theme: error";
+    }
+  }
+
+  async function postTheme(payload) {
+    const r = await fetch("/api/theme", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(out.detail || "theme set failed");
+    return out;
+  }
+
+  sendBtn.addEventListener("click", () => sendCurrent());
+
+  msgEl.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !ev.shiftKey) {
+      ev.preventDefault();
+      sendCurrent();
+    }
+  });
+
+  resetBtn.addEventListener("click", () => {
+    localStorage.removeItem(LS_CHAT);
+    renderAll();
+  });
+
+  applyThemeBtn.addEventListener("click", async () => {
+    const name = (themeName.value || "").trim();
+    const lvl = parseInt(themeIntensity.value || "2", 10);
+    if (!name) {
+      pushAndRender("ai", "MachineSpirit", "Missing theme name. Example: Warhammer 40k");
+      return;
+    }
+    try {
+      const st = await postTheme({ enabled: true, theme: name, intensity: lvl });
+      await refreshThemeUI();
+      pushAndRender("ai", "MachineSpirit", "Theme set to: " + st.theme + " (" + st.intensity_label + ")");
+    } catch (e) {
+      pushAndRender("ai", "MachineSpirit", "Theme error: " + e.message);
+    }
+  });
+
+  themeOffBtn.addEventListener("click", async () => {
+    try {
+      await postTheme({ enabled: false });
+      await refreshThemeUI();
+      pushAndRender("ai", "MachineSpirit", "Theme is now OFF.");
+    } catch (e) {
+      pushAndRender("ai", "MachineSpirit", "Theme error: " + e.message);
+    }
+  });
+
+  (async function init() {
+    renderAll();
+    await refreshThemeUI();
+    msgEl.focus();
+  })();
+</script>
 </body>
 </html>
 """
 
+# -----------------------------
+# Routes
+# -----------------------------
 
-@app.get("/", response_class=HTMLResponse)
-async def home() -> HTMLResponse:
-    return RedirectResponse(url="/ui/ask", status_code=302)
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse(url="/ui")
 
-
-# If someone opens /ui/ask directly, show the UI (not “Method Not Allowed”).
-@app.get("/ui/ask", response_class=HTMLResponse)
-async def ui_get(request: Request) -> HTMLResponse:
-    return RedirectResponse(url="/ui", status_code=302)
-
+@app.get("/health")
+def health():
+    return {"ok": True, "service": "machinespirit-ui"}
 
 @app.get("/ui", response_class=HTMLResponse)
-async def ui(request: Request) -> HTMLResponse:
-    cid = _client_id(request)
-    messages = HISTORY.get(cid, [])
-    try:
-        t = await _api_get("/theme")
-    except Exception:
-        t = {"theme": "none", "intensity": "light", "choices": {}}
-    return HTMLResponse(_render_page(messages, t))
-
-
-@app.get("/ui/reset", response_class=HTMLResponse)
-async def ui_reset(request: Request) -> HTMLResponse:
-    cid = _client_id(request)
-    HISTORY[cid] = []
-    return RedirectResponse(url="/ui", status_code=302)
-
-
-@app.post("/ui/theme", response_class=HTMLResponse)
-async def ui_theme(
-    request: Request,
-    theme: str = Form(""),
-    intensity: str = Form("light"),
-    action: str = Form("save"),
-) -> HTMLResponse:
-    cid = _client_id(request)
-    messages = HISTORY.get(cid, [])
-
-    notice = ""
-    try:
-        if action == "off":
-            await _api_post("/theme", {"theme": "none", "intensity": "light"})
-            notice = "Theme disabled."
-        else:
-            theme_clean = (theme or "").strip() or "none"
-            intensity_clean = (intensity or "light").strip().lower()
-            if intensity_clean not in ("light", "heavy"):
-                intensity_clean = "light"
-            await _api_post("/theme", {"theme": theme_clean, "intensity": intensity_clean})
-            notice = f"Theme saved: {theme_clean} ({intensity_clean})."
-    except Exception as e:
-        notice = f"Theme update failed: {type(e).__name__}"
-
-    try:
-        t = await _api_get("/theme")
-    except Exception:
-        t = {"theme": "none", "intensity": "light", "choices": {}}
-
-    return HTMLResponse(_render_page(messages, t, notice=notice))
-
-
-@app.post("/ui/ask", response_class=HTMLResponse)
-async def ui_ask(request: Request, text: str = Form("")) -> HTMLResponse:
-    cid = _client_id(request)
-    messages = HISTORY.setdefault(cid, [])
-
-    text = (text or "").strip()
-    if not text:
-        return RedirectResponse(url="/ui", status_code=302)
-
-    messages.append(("user", text, time.time()))
-    notice = ""
-
-    try:
-        data = await _api_post("/ask", {"text": text})
-        answer = (data.get("answer") or "").strip() or "(no answer returned)"
-        messages.append(("bot", answer, time.time()))
-
-        # Keep UI header theme accurate
-        t = data.get("theme") or {}
-        if not isinstance(t, dict):
-            t = {}
-        # If API didn’t include choices, refresh them once
-        if "choices" not in t:
-            try:
-                full = await _api_get("/theme")
-                t["choices"] = full.get("choices") or {}
-            except Exception:
-                t["choices"] = {}
-    except Exception as e:
-        messages.append(("bot", f"(API error: {type(e).__name__})", time.time()))
-        t = {"theme": "none", "intensity": "light", "choices": {}}
-        notice = "API call failed. Check machinespirit-api.service."
-
-    # cap history per client
-    if len(messages) > 120:
-        HISTORY[cid] = messages[-120:]
-
-    return HTMLResponse(_render_page(HISTORY[cid], t, notice=notice))
-
-
-# Handy JSON endpoints on the UI service (for quick tests)
-@app.get("/api/meta")
-async def api_meta() -> JSONResponse:
-    return JSONResponse({"ok": True, "ui": "machinespirit-ui", "version": VERSION, "api_base": MS_API_BASE})
-
+def ui_page():
+    html = HTML_TEMPLATE.replace("__API_BASE__", API_BASE)
+    return HTMLResponse(content=html)
 
 @app.get("/api/theme")
-async def api_theme() -> JSONResponse:
-    try:
-        t = await _api_get("/theme")
-        return JSONResponse(t)
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"})
+def api_get_theme():
+    st = _load_theme_state()
+    out = {
+        "enabled": bool(st.get("enabled", True)),
+        "theme": str(st.get("theme", "")),
+        "intensity": int(st.get("intensity", 2)),
+    }
+    out["intensity_label"] = _intensity_label(out["intensity"])
+    return out
 
+@app.post("/api/theme")
+async def api_set_theme(req: Request):
+    try:
+        payload = await req.json()
+    except Exception:
+        payload = {}
+
+    st = _load_theme_state()
+
+    if "enabled" in payload:
+        st["enabled"] = bool(payload.get("enabled"))
+    if "theme" in payload and payload.get("theme") is not None:
+        name = str(payload.get("theme")).strip()
+        if name:
+            st["theme"] = name
+            st["enabled"] = True
+    if "intensity" in payload and payload.get("intensity") is not None:
+        try:
+            lvl = int(payload.get("intensity"))
+        except Exception:
+            lvl = int(st.get("intensity", 2))
+        st["intensity"] = 2 if lvl >= 2 else 1
+        st["enabled"] = True
+
+    _save_theme_state(st)
+
+    out = {
+        "enabled": bool(st.get("enabled", True)),
+        "theme": str(st.get("theme", "")),
+        "intensity": int(st.get("intensity", 2)),
+    }
+    out["intensity_label"] = _intensity_label(out["intensity"])
+    return out
 
 @app.post("/api/ask")
-async def api_ask_proxy(payload: Dict[str, Any]) -> JSONResponse:
-    data = await _api_post("/ask", payload)
-    return JSONResponse(data)
+async def api_ask(req: Request):
+    try:
+        payload = await req.json()
+    except Exception:
+        payload = {}
+
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return JSONResponse(status_code=400, content={"answer": "Missing text"})
+
+    # Local /theme handling so it always works even if API changes
+    theme_msg = _handle_theme_command(text)
+    if theme_msg is not None:
+        return {"answer": theme_msg}
+
+    api_resp = _http_post_json(API_ASK_URL, {"text": text}, timeout=25)
+
+    if isinstance(api_resp, dict):
+        for key in ["answer", "text", "response", "output", "result"]:
+            if key in api_resp and isinstance(api_resp[key], str) and api_resp[key].strip():
+                return {"answer": api_resp[key]}
+
+        if "error" in api_resp:
+            msg = f"API error: {api_resp.get('error')}\n{api_resp.get('detail','')}".strip()
+            return JSONResponse(status_code=502, content={"answer": msg})
+
+        return {"answer": json.dumps(api_resp, indent=2, ensure_ascii=False)}
+
+    return {"answer": str(api_resp)}
+
+@app.get("/ui/ask", include_in_schema=False)
+def ui_ask_get_redirect():
+    return RedirectResponse(url="/ui")
