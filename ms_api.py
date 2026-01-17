@@ -1,36 +1,46 @@
 #!/usr/bin/env python3
-from __future__ import annotations
-
-import asyncio
 import os
 import sys
+import re
 import time
+import asyncio
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import Optional, List, Dict, Any
 
 import fcntl
 from fastapi import FastAPI, HTTPException, Request, Query
-from fastapi.openapi.utils import get_openapi
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 APP_NAME = "MachineSpirit API"
-API_VERSION = "0.3.1"
+VERSION = "0.3.3"
 
-REPO_DIR = Path(__file__).resolve().parent
-BRAIN_PATH = Path(os.environ.get("MS_BRAIN_PATH", str(REPO_DIR / "brain.py"))).resolve()
+BASE_DIR = Path(__file__).resolve().parent
+BRAIN_PATH = Path(os.environ.get("MS_BRAIN_PATH", str(BASE_DIR / "brain.py"))).resolve()
+REPO_DIR = BASE_DIR
 
-# Important: set MS_PYTHON=/usr/bin/python3 in ~/.config/machinespirit/api.env
-PYTHON_BIN = os.environ.get("MS_PYTHON", sys.executable)
-
-DEFAULT_TIMEOUT_S = int(os.environ.get("MS_TIMEOUT_S", "60"))
-MS_API_KEY = os.environ.get("MS_API_KEY", "").strip()
+PYTHON_BIN = os.environ.get("MS_PYTHON_BIN", "/usr/bin/python3")
 
 LOCK_PATH = Path(os.environ.get("MS_LOCK_PATH", str(REPO_DIR / ".machinespirit.lock"))).resolve()
-LOCK_WAIT_S = float(os.environ.get("MS_LOCK_WAIT_S", "0") or "0")
+LOCK_WAIT_S = float(os.environ.get("MS_LOCK_WAIT_S", "0"))
 
-RUN_LOCK = asyncio.Lock()
+MS_API_KEY = (os.environ.get("MS_API_KEY") or "").strip()
 
-app = FastAPI(title=APP_NAME, version=API_VERSION)
+app = FastAPI(title=APP_NAME, version=VERSION)
+
+
+# ----------------------------
+# Models
+# ----------------------------
+class AskRequest(BaseModel):
+    text: str
+    timeout_s: Optional[float] = 20.0
+
+
+class AskResponse(BaseModel):
+    ok: bool
+    topic: Optional[str] = None
+    answer: str
+    duration_s: float = 0.0
 
 
 class RunResult(BaseModel):
@@ -38,232 +48,262 @@ class RunResult(BaseModel):
     exit_code: int
     args: List[str]
     duration_s: float
-    stdout: str
-    stderr: str
+    stdout: str = ""
+    stderr: str = ""
     answer: Optional[str] = None
 
 
-class AskRequest(BaseModel):
-    text: str = Field(..., description="User topic/question (single line).")
-    timeout_s: Optional[int] = Field(None, description="Override timeout seconds.")
-
-
-class CommandRequest(BaseModel):
-    line: str = Field(..., description="A single command line as typed into brain.py interactive.")
-    timeout_s: Optional[int] = Field(None, description="Override timeout seconds.")
-
-
-def _client_ip(request: Request) -> str:
-    return (request.client.host if request.client else "") or ""
-
-
+# ----------------------------
+# Auth
+# ----------------------------
 def _require_auth(request: Request) -> None:
-    ip = _client_ip(request)
-    if MS_API_KEY:
-        supplied = request.headers.get("x-api-key", "")
-        if supplied != MS_API_KEY:
-            raise HTTPException(status_code=401, detail="Unauthorized (missing/invalid x-api-key).")
-    else:
-        if ip not in ("127.0.0.1", "::1"):
-            raise HTTPException(status_code=403, detail="Forbidden: localhost-only unless MS_API_KEY is set.")
+    if not MS_API_KEY:
+        raise HTTPException(status_code=500, detail="Server misconfigured: MS_API_KEY is not set")
+
+    got = request.headers.get("x-api-key", "")
+    if not got or got != MS_API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized (missing/invalid x-api-key)")
 
 
-def _require_confirm(confirm: bool) -> None:
-    if not confirm:
-        raise HTTPException(status_code=400, detail="This endpoint mutates state. Re-run with confirm=true")
+# ----------------------------
+# Lock
+# ----------------------------
+class _FileLock:
+    def __init__(self, path: Path, wait_s: float):
+        self.path = path
+        self.wait_s = wait_s
+        self.f = None
 
+    async def __aenter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.f = open(self.path, "a+")
+        start = time.time()
 
-def _strip_ansi(s: str) -> str:
-    # Basic ANSI escape strip
-    import re
-    return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", s or "")
-
-
-def _letters_only(s: str) -> str:
-    import re
-    return re.sub(r"[^a-z]+", "", (s or "").lower())
-
-
-def _clean_repl_stdout(raw: str) -> str:
-    """
-    Remove REPL banner/prompt/shutdown from brain stdout.
-    """
-    if not raw:
-        return ""
-
-    import re
-    out: List[str] = []
-    prompt_topic: Optional[str] = None
-
-    for line in raw.splitlines():
-        line2 = _strip_ansi(line)
-        # replace control chars with spaces
-        line2 = "".join((ch if ch >= " " else " ") for ch in line2)
-        s = line2.strip()
-        if not s:
-            out.append("")
-            continue
-
-        norm = _letters_only(s)
-
-        # banner
-        if norm.startswith("machinespiritbrainonline"):
-            continue
-        if ("typeamessage" in norm) and ("ctrlc" in norm):
-            continue
-
-        # prompt "> TOPIC" (allow leading spaces)
-        m = re.match(r"^\s*>\s*(.+?)\s*$", line2)
-        if m:
-            maybe = m.group(1).strip()
-            if maybe:
-                prompt_topic = maybe
-            continue
-
-        # shutdown (this catches normal + weird versions)
-        if "shuttingdown" in norm:
-            continue
-
-        out.append(line2.rstrip())
-
-    # drop leading blanks
-    while out and out[0].strip() == "":
-        out.pop(0)
-
-    # Add prompt topic on top if it looks like a simple topic
-    if prompt_topic:
-        if not out or out[0].strip() != prompt_topic:
-            out = [prompt_topic, ""] + out
-
-    cleaned = "\n".join(out).strip()
-    return cleaned + ("\n" if cleaned else "")
-
-
-def _finalize_answer(cleaned: str, requested_text: str) -> str:
-    """
-    Guaranteed final cleanup:
-      - removes ANY shutdown line even if it slipped through
-      - ensures topic header for simple one-word topics (like 'cidr')
-    """
-    lines = (cleaned or "").splitlines()
-    out: List[str] = []
-
-    for ln in lines:
-        if "shuttingdown" in _letters_only(ln):
-            continue
-        out.append(ln.rstrip())
-
-    while out and out[0].strip() == "":
-        out.pop(0)
-
-    req = (requested_text or "").strip()
-
-    # Only enforce a header when request looks like a "topic", not a full question.
-    # (prevents weird headers for long questions)
-    if req and ("\n" not in req):
-        words = [w for w in req.split() if w.strip()]
-        looks_like_topic = (len(words) <= 3) and (len(req) <= 40) and (not req.endswith("?"))
-        if looks_like_topic:
-            first = next((x for x in out if x.strip()), "")
-            if _letters_only(first) != _letters_only(req):
-                out = [req.upper(), ""] + out
-
-    final = "\n".join(out).strip()
-    return final + ("\n" if final else "")
-
-
-async def _acquire_lock(wait_s: float):
-    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fh = open(LOCK_PATH, "a+")
-    deadline = time.time() + max(0.0, wait_s)
-
-    while True:
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return fh
-        except BlockingIOError:
-            if wait_s <= 0:
-                fh.close()
-                return None
-            if time.time() >= deadline:
-                fh.close()
-                return None
-            await asyncio.sleep(0.2)
-
-
-def _release_lock(fh) -> None:
-    try:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-    except Exception:
-        pass
-    try:
-        fh.close()
-    except Exception:
-        pass
-
-
-async def _run_process(args: List[str], stdin_text: Optional[str] = None, timeout_s: Optional[int] = None) -> RunResult:
-    if not BRAIN_PATH.exists():
-        raise HTTPException(status_code=500, detail=f"brain.py not found at {BRAIN_PATH}")
-
-    timeout = int(timeout_s or DEFAULT_TIMEOUT_S)
-    t0 = time.time()
-
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-
-    async with RUN_LOCK:
-        lock_fh = await _acquire_lock(LOCK_WAIT_S)
-        if lock_fh is None:
-            raise HTTPException(status_code=409, detail=f"Busy: brain lock held ({LOCK_PATH}). Try again.")
-
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                cwd=str(REPO_DIR),
-                env=env,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-
-            in_bytes = (stdin_text or "").encode("utf-8", errors="replace")
-
+        while True:
             try:
-                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(in_bytes), timeout=timeout)
-            except asyncio.TimeoutError:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-                await proc.wait()
-                dt = time.time() - t0
-                return RunResult(ok=False, exit_code=124, args=args, duration_s=dt, stdout="", stderr=f"Timeout after {timeout}s")
+                fcntl.flock(self.f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except BlockingIOError:
+                if self.wait_s <= 0:
+                    raise HTTPException(status_code=409, detail="Brain is busy (lock held). Try again.")
+                if (time.time() - start) > self.wait_s:
+                    raise HTTPException(status_code=409, detail="Brain is busy (lock timeout). Try again.")
+                await asyncio.sleep(0.05)
+
+    async def __aexit__(self, exc_type, exc, tb):
+        try:
+            if self.f:
+                fcntl.flock(self.f.fileno(), fcntl.LOCK_UN)
         finally:
-            _release_lock(lock_fh)
-
-    dt = time.time() - t0
-    stdout = (stdout_b or b"").decode("utf-8", errors="replace")
-    stderr = (stderr_b or b"").decode("utf-8", errors="replace")
-    code = int(proc.returncode or 0)
-    return RunResult(ok=(code == 0), exit_code=code, args=args, duration_s=dt, stdout=stdout, stderr=stderr)
+            try:
+                if self.f:
+                    self.f.close()
+            except Exception:
+                pass
 
 
+# ----------------------------
+# Brain runners
+# ----------------------------
 def _brain_repl_args() -> List[str]:
+    # REPL mode (stdin-driven)
     return [PYTHON_BIN, str(BRAIN_PATH)]
 
 
 def _brain_headless_webqueue_args(limit: int) -> List[str]:
-    return [PYTHON_BIN, str(BRAIN_PATH), "--webqueue", "--limit", str(int(limit))]
+    return [PYTHON_BIN, str(BRAIN_PATH), "--webqueue", "--limit", str(limit), "--confirm"]
 
 
 def _brain_headless_curiosity_args(n: int) -> List[str]:
-    return [PYTHON_BIN, str(BRAIN_PATH), "--curiosity", "--n", str(int(n))]
+    return [PYTHON_BIN, str(BRAIN_PATH), "--curiosity", "--n", str(n)]
 
 
+async def _run_process(args: List[str], stdin_text: Optional[str] = None, timeout_s: Optional[float] = None) -> RunResult:
+    t0 = time.time()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdin=asyncio.subprocess.PIPE if stdin_text is not None else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        try:
+            out_b, err_b = await asyncio.wait_for(
+                proc.communicate((stdin_text or "").encode("utf-8") if stdin_text is not None else None),
+                timeout=timeout_s if timeout_s else None,
+            )
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            raise HTTPException(status_code=408, detail="Brain timed out")
+
+        out = (out_b or b"").decode("utf-8", errors="replace")
+        err = (err_b or b"").decode("utf-8", errors="replace")
+        code = int(proc.returncode or 0)
+
+        return RunResult(
+            ok=(code == 0),
+            exit_code=code,
+            args=args,
+            duration_s=(time.time() - t0),
+            stdout=out,
+            stderr=err,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        return RunResult(
+            ok=False,
+            exit_code=1,
+            args=args,
+            duration_s=(time.time() - t0),
+            stdout="",
+            stderr=str(e),
+        )
+
+
+# ----------------------------
+# Output cleaning + “normal question” handling
+# ----------------------------
+_PROMPT_RE = re.compile(r'^\s*>\s*(.*)$')
+
+
+def _normalize_user_text(text: str) -> str:
+    t = (text or "").strip()
+    if not t:
+        return ""
+
+    # remove trailing question marks etc (keep it simple)
+    t = t.strip().rstrip("?").strip()
+
+    low = t.lower().strip()
+
+    # common natural language wrappers
+    prefixes = [
+        "what is ",
+        "what's ",
+        "whats ",
+        "define ",
+        "definition of ",
+        "explain ",
+        "tell me about ",
+    ]
+    for p in prefixes:
+        if low.startswith(p):
+            return t[len(p):].strip()
+
+    return t
+
+
+def _clean_repl_stdout(raw: str) -> str:
+    """
+    Turn REPL-style stdout into a clean answer.
+
+    Handles BOTH prompt styles:
+      - '>CIDR'
+      - '> CIDR'
+    And removes any shutdown prompt like:
+      - '> Shutting down.'
+    """
+    if not raw:
+        return ""
+
+    lines = raw.splitlines()
+    topic = ""
+    body: List[str] = []
+    seen_topic_prompt = False
+
+    for line in lines:
+        s = line.strip()
+
+        # Drop banner
+        if s.startswith("Machine Spirit brain online."):
+            continue
+
+        # Prompt lines
+        pm = _PROMPT_RE.match(line)
+        if pm:
+            prompt_text = (pm.group(1) or "").strip()
+
+            # stop on shutdown prompt
+            if "shutting down" in prompt_text.lower():
+                break
+
+            # first prompt is the topic
+            if not seen_topic_prompt and prompt_text:
+                topic = prompt_text
+                seen_topic_prompt = True
+                continue
+
+            # any later prompt means end of answer
+            break
+
+        # drop stray shutdown lines anywhere
+        if "shutting down" in s.lower():
+            continue
+
+        body.append(line.rstrip())
+
+    # trim leading blanks
+    while body and body[0].strip() == "":
+        body.pop(0)
+
+    body_text = "\n".join(body).strip()
+
+    if topic and body_text:
+        return f"{topic}\n\n{body_text}"
+    if topic:
+        return topic
+    return body_text
+
+
+def _parse_alias_suggestion(clean_answer: str) -> Optional[str]:
+    """
+    Detect:  Suggestion: /alias what is nat|nat
+    Return:  nat
+    """
+    s = (clean_answer or "").strip()
+    m = re.search(r'^Suggestion:\s*/alias\s+.+?\|(.+?)\s*$', s, flags=re.IGNORECASE)
+    if not m:
+        return None
+    return (m.group(1) or "").strip()
+
+
+def _looks_like_disambiguation(clean_answer: str) -> bool:
+    low = (clean_answer or "").lower()
+    return ("may refer to" in low) or (low.strip().endswith("may refer to:"))
+
+
+_FALLBACKS: Dict[str, str] = {
+    "nat": (
+        "NAT (Network Address Translation)\n\n"
+        "Definition:\n"
+        "- A router feature that translates private IP addresses (like 192.168.x.x) into a public IP address so many devices can share one internet connection.\n\n"
+        "Key points:\n"
+        "- Often used in home networks.\n"
+        "- Helps conserve public IPv4 addresses.\n"
+        "- Not a firewall by itself, but it can reduce unsolicited inbound connections.\n\n"
+        "Sources:\n"
+        "- RFC 3022 (Traditional NAT): https://www.rfc-editor.org/rfc/rfc3022"
+    )
+}
+
+
+async def _ask_topic(topic: str, timeout_s: float) -> RunResult:
+    # feed one line to REPL
+    stdin_text = topic.strip() + "\n"
+    return await _run_process(_brain_repl_args(), stdin_text=stdin_text, timeout_s=timeout_s)
+
+
+# ----------------------------
+# Routes
+# ----------------------------
 @app.get("/")
 async def root() -> Dict[str, Any]:
-    return {"ok": True, "app": APP_NAME, "version": API_VERSION, "docs": "/docs", "hint": "Most endpoints require x-api-key. Try /health."}
+    return {"ok": True, "app": APP_NAME, "version": VERSION}
 
 
 @app.get("/health")
@@ -272,104 +312,132 @@ async def health(request: Request) -> Dict[str, Any]:
     return {
         "ok": True,
         "app": APP_NAME,
-        "version": API_VERSION,
+        "version": VERSION,
         "brain_path": str(BRAIN_PATH),
         "repo_dir": str(REPO_DIR),
         "python": PYTHON_BIN,
-        "localhost_only": (not bool(MS_API_KEY)),
         "lock_path": str(LOCK_PATH),
         "lock_wait_s": LOCK_WAIT_S,
     }
 
 
-@app.post("/ask", response_model=RunResult)
-async def ask(req: AskRequest, request: Request) -> RunResult:
+@app.post("/ask", response_model=AskResponse)
+async def ask(req: AskRequest, request: Request) -> AskResponse:
+    """
+    Production-friendly endpoint:
+    Returns ONLY a clean answer (no stdout/stderr spam).
+    Also auto-handles natural language like "what is nat".
+    Also auto-follows alias suggestions from the brain.
+    """
     _require_auth(request)
 
-    # Run the brain in REPL mode and feed the topic as a single line.
-    topic = (req.text or "").strip()
+    raw_text = (req.text or "").strip()
+    topic = _normalize_user_text(raw_text)
     if not topic:
         raise HTTPException(status_code=422, detail="text is required")
 
-    stdin_text = topic + "\n"
-    res = await _run_process(_brain_repl_args(), stdin_text=stdin_text, timeout_s=req.timeout_s)
+    timeout_s = float(req.timeout_s or 20.0)
 
-    # If you have cleaner logic, keep using it; otherwise answer=stdout is fine.
-    try:
-        res.answer = _clean_repl_stdout(res.stdout)
-    except Exception:
-        res.answer = res.stdout or ""
+    async with _FileLock(LOCK_PATH, LOCK_WAIT_S):
+        res = await _ask_topic(topic, timeout_s)
+        clean = _clean_repl_stdout(res.stdout)
 
-    return res
-@app.post("/teach", response_model=RunResult)
-async def teach(req: CommandRequest, request: Request, confirm: bool = Query(False)) -> RunResult:
+        # If brain returns alias suggestion, auto-follow it
+        sug = _parse_alias_suggestion(clean)
+        if sug and sug.lower() != topic.lower():
+            topic = sug
+            res = await _ask_topic(topic, timeout_s)
+            clean = _clean_repl_stdout(res.stdout)
+
+        # If still weak/disambiguation for certain acronyms, try fallback
+        if topic.lower() in _FALLBACKS and _looks_like_disambiguation(clean):
+            clean = _FALLBACKS[topic.lower()]
+
+        ok = bool(clean.strip()) and res.exit_code == 0
+
+        return AskResponse(
+            ok=ok,
+            topic=topic,
+            answer=clean.strip(),
+            duration_s=res.duration_s,
+        )
+
+
+@app.post("/ask_debug", response_model=RunResult)
+async def ask_debug(req: AskRequest, request: Request) -> RunResult:
+    """
+    Debug endpoint:
+    Returns full stdout/stderr + answer.
+    """
     _require_auth(request)
-    _require_confirm(confirm)
-    line = req.line.strip()
-    if not line:
-        raise HTTPException(status_code=400, detail="Empty line.")
-    return await _run_process(_brain_repl_args(), stdin_text=line + "\n", timeout_s=req.timeout_s)
+
+    raw_text = (req.text or "").strip()
+    topic = _normalize_user_text(raw_text)
+    if not topic:
+        raise HTTPException(status_code=422, detail="text is required")
+
+    timeout_s = float(req.timeout_s or 20.0)
+
+    async with _FileLock(LOCK_PATH, LOCK_WAIT_S):
+        res = await _ask_topic(topic, timeout_s)
+        clean = _clean_repl_stdout(res.stdout)
+
+        sug = _parse_alias_suggestion(clean)
+        if sug and sug.lower() != topic.lower():
+            topic = sug
+            res = await _ask_topic(topic, timeout_s)
+            clean = _clean_repl_stdout(res.stdout)
+
+        if topic.lower() in _FALLBACKS and _looks_like_disambiguation(clean):
+            clean = _FALLBACKS[topic.lower()]
+
+        res.answer = clean.strip()
+        return res
 
 
 @app.get("/queuehealth", response_model=RunResult)
-async def queuehealth(request: Request, timeout_s: Optional[int] = None) -> RunResult:
+async def queuehealth(request: Request, timeout_s: float = Query(20.0)) -> RunResult:
     _require_auth(request)
-    return await _run_process(_brain_repl_args(), stdin_text="/queuehealth\n", timeout_s=timeout_s)
+    async with _FileLock(LOCK_PATH, LOCK_WAIT_S):
+        return await _run_process(_brain_repl_args(), stdin_text="/queuehealth\n", timeout_s=timeout_s)
 
 
 @app.get("/needsources", response_model=RunResult)
-async def needsources(
-    request: Request,
-    limit: Optional[int] = Query(None, ge=1, le=500),
-    timeout_s: Optional[int] = None,
-) -> RunResult:
+async def needsources(request: Request, limit: int = Query(20), timeout_s: float = Query(20.0)) -> RunResult:
     _require_auth(request)
-    cmd = "/needsources" + (f" {int(limit)}" if limit else "")
-    return await _run_process(_brain_repl_args(), stdin_text=cmd + "\n", timeout_s=timeout_s)
+    cmd = f"/needsources {int(limit)}"
+    async with _FileLock(LOCK_PATH, LOCK_WAIT_S):
+        return await _run_process(_brain_repl_args(), stdin_text=cmd + "\n", timeout_s=timeout_s)
 
 
 @app.post("/run/webqueue", response_model=RunResult)
-async def run_webqueue(
-    request: Request,
-    limit: int = Query(5, ge=1, le=100),
-    confirm: bool = Query(False),
-    timeout_s: Optional[int] = None,
-) -> RunResult:
+async def run_webqueue(request: Request, limit: int = Query(3), confirm: bool = Query(False), timeout_s: float = Query(120.0)) -> RunResult:
     _require_auth(request)
-    _require_confirm(confirm)
-    return await _run_process(_brain_headless_webqueue_args(limit), timeout_s=timeout_s)
+    if not confirm:
+        raise HTTPException(status_code=400, detail="confirm=true required")
+    async with _FileLock(LOCK_PATH, LOCK_WAIT_S):
+        return await _run_process(_brain_headless_webqueue_args(int(limit)), timeout_s=timeout_s)
 
 
 @app.post("/run/curiosity", response_model=RunResult)
-async def run_curiosity(
-    request: Request,
-    n: int = Query(10, ge=1, le=500),
-    confirm: bool = Query(False),
-    timeout_s: Optional[int] = None,
-) -> RunResult:
+async def run_curiosity(request: Request, n: int = Query(3), confirm: bool = Query(False), timeout_s: float = Query(120.0)) -> RunResult:
     _require_auth(request)
-    _require_confirm(confirm)
-    return await _run_process(_brain_headless_curiosity_args(n), timeout_s=timeout_s)
+    if not confirm:
+        raise HTTPException(status_code=400, detail="confirm=true required")
+    async with _FileLock(LOCK_PATH, LOCK_WAIT_S):
+        return await _run_process(_brain_headless_curiosity_args(int(n)), timeout_s=timeout_s)
 
 
-@app.post("/run/selftest", response_model=RunResult)
-async def run_selftest(request: Request, timeout_s: Optional[int] = None) -> RunResult:
-    _require_auth(request)
-    args = [PYTHON_BIN, str(BRAIN_PATH), "--selftest"]
-    return await _run_process(args, timeout_s=timeout_s)
-
+# Swagger/OpenAPI: mark everything except a few as requiring x-api-key
 def custom_openapi():
-    """
-    Swagger/OpenAPI:
-      - adds an Authorize button for x-api-key
-      - marks protected endpoints as requiring ApiKeyAuth
-    """
+    from fastapi.openapi.utils import get_openapi
+
     if getattr(app, "openapi_schema", None):
         return app.openapi_schema
 
     schema = get_openapi(
-        title=getattr(app, "title", "MachineSpirit API"),
-        version=str(getattr(app, "version", "0.0.0")),
+        title=app.title,
+        version=app.version,
         routes=app.routes,
     )
 
@@ -381,12 +449,11 @@ def custom_openapi():
     }
 
     public_paths = {"/", "/openapi.json", "/docs", "/redoc"}
-
     for path, methods in schema.get("paths", {}).items():
         if path in public_paths:
             continue
         for method, op in methods.items():
-            if method.lower() in {"get","post","put","delete","patch","options","head"}:
+            if method.lower() in {"get", "post", "put", "delete", "patch", "options", "head"}:
                 op.setdefault("security", [])
                 req = {"ApiKeyAuth": []}
                 if req not in op["security"]:
@@ -395,80 +462,5 @@ def custom_openapi():
     app.openapi_schema = schema
     return app.openapi_schema
 
+
 app.openapi = custom_openapi
-
-# -------------------------------------------------------------------
-# Cleaner override (v2)
-# Fixes the "Shutting down." showing up as the first line in /ask answer.
-#
-# Root cause:
-#   brain REPL prints a prompt line for the topic ("> CIDR" or ">CIDR")
-#   and then later prints a shutdown prompt ("> Shutting down.")
-#   Our older cleaner sometimes latched onto the shutdown prompt.
-# -------------------------------------------------------------------
-def _clean_repl_stdout(raw: str) -> str:
-    """
-    Turn REPL-style stdout into a clean answer.
-
-    Handles prompt styles:
-      - '>CIDR'
-      - '> CIDR'
-
-    Removes shutdown noise:
-      - 'Shutting down.'
-      - '> Shutting down.'
-    """
-    if not raw:
-        return ""
-
-    import re
-
-    prompt_re = re.compile(r'^\s*>\s*(.*)$')
-
-    lines = raw.splitlines()
-    topic = ""
-    body = []
-    seen_topic_prompt = False
-
-    for line in lines:
-        s = line.strip()
-
-        # Drop banner
-        if s.startswith("Machine Spirit brain online."):
-            continue
-
-        # Detect prompt lines
-        pm = prompt_re.match(line)
-        if pm:
-            prompt_text = (pm.group(1) or "").strip()
-
-            # Never include shutdown prompt
-            if "shutting down" in prompt_text.lower():
-                break
-
-            # First prompt becomes the topic header
-            if (not seen_topic_prompt) and prompt_text:
-                topic = prompt_text
-                seen_topic_prompt = True
-                continue
-
-            # Any later prompt means we reached end of answer
-            break
-
-        # Never include stray shutdown lines
-        if "shutting down" in s.lower():
-            continue
-
-        body.append(line.rstrip())
-
-    # Trim leading blanks
-    while body and body[0].strip() == "":
-        body.pop(0)
-
-    body_text = "\n".join(body).strip()
-
-    if topic and body_text:
-        return f"{topic}\n\n{body_text}"
-    if topic:
-        return topic
-    return body_text
