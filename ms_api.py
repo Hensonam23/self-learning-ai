@@ -2,22 +2,22 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
+import json
 import re
 import time
-import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import requests
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 from ms_theme import apply_theme, load_theme, save_theme, ui_intensity_choices
 
+
 APP_NAME = "MachineSpirit API"
-VERSION = "0.6.1"
+VERSION = "0.3.10"
 
 BASE_DIR = Path(__file__).resolve().parent
 REPO_DIR = Path(os.environ.get("MS_REPO_DIR", str(BASE_DIR))).resolve()
@@ -27,32 +27,21 @@ PYTHON_BIN = os.environ.get("MS_PYTHON", "/usr/bin/python3")
 MS_API_KEY = os.environ.get("MS_API_KEY", "")
 
 LOCK_PATH = Path(os.environ.get("MS_LOCK_PATH", str(REPO_DIR / ".machinespirit.lock")))
+KNOWLEDGE_PATH = Path(os.environ.get("MS_KNOWLEDGE_PATH", str(REPO_DIR / "data" / "local_knowledge.json")))
 
-# auto-improve weak answers
-AUTO_WEBLEARN = os.environ.get("MS_AUTO_WEBLEARN", "1").strip().lower() in ("1", "true", "yes", "on")
-AUTO_WEBLEARN_TIMEOUT_S = int(os.environ.get("MS_AUTO_WEBLEARN_TIMEOUT_S", "90"))
-AUTO_WEBLEARN_MAX_ATTEMPTS = int(os.environ.get("MS_AUTO_WEBLEARN_MAX_ATTEMPTS", "3"))
+AUTO_RESEARCH = os.environ.get("MS_AUTO_RESEARCH", "1").strip().lower() not in ("0", "false", "no", "off")
+AUTO_RESEARCH_TRIES = int(os.environ.get("MS_AUTO_RESEARCH_TRIES", "2"))  # 0=off, 1=weblearn, 2=weblearn+wiki
 
-# wikipedia definitional fallback (especially for games/media)
-AUTO_WIKI_FALLBACK = os.environ.get("MS_AUTO_WIKI_FALLBACK", "1").strip().lower() in ("1", "true", "yes", "on")
-
-CFG_DIR = Path(os.path.expanduser("~/.config/machinespirit"))
-OVERRIDES_PATH = Path(os.environ.get("MS_OVERRIDES_PATH", str(CFG_DIR / "overrides.json"))).expanduser()
-
-# avoid saving these as "definitions"
-DEFAULT_AVOID_DOMAINS = [
-    "fandom.com", "wikia.com",
-    "reddit.com", "quora.com",
-    "steamcommunity.com",
-    "indy100.com",  # rumor/leak/news pages kept poisoning definitions
-]
 
 app = FastAPI(title=APP_NAME, version=VERSION)
 
 
+# ----------------------------
+# Models
+# ----------------------------
 class AskRequest(BaseModel):
     text: str
-    timeout_s: Optional[int] = 25
+    timeout_s: Optional[int] = 30
     raw: Optional[bool] = False
 
 
@@ -63,10 +52,7 @@ class AskResponse(BaseModel):
     duration_s: float
     error: Optional[str] = None
     raw: Optional[Dict[str, Any]] = None
-    theme: Optional[Dict[str, str]] = None
-    did_research: Optional[bool] = None
-    used_override: Optional[bool] = None
-    saved_override: Optional[bool] = None
+    theme: Optional[Dict[str, Any]] = None
 
 
 class ThemeRequest(BaseModel):
@@ -74,6 +60,16 @@ class ThemeRequest(BaseModel):
     intensity: str
 
 
+class OverrideRequest(BaseModel):
+    topic: str
+    answer: str
+    confidence: Optional[float] = 0.95
+    sources: Optional[List[str]] = None
+
+
+# ----------------------------
+# Auth
+# ----------------------------
 def _require_auth(request: Request) -> None:
     if not MS_API_KEY:
         raise HTTPException(status_code=500, detail="MS_API_KEY is not set on server")
@@ -82,269 +78,107 @@ def _require_auth(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
-def _brain_args() -> List[str]:
-    return [PYTHON_BIN, str(BRAIN_PATH)]
-
-
-def _is_definition_query(original: str) -> bool:
-    s = (original or "").strip().lower()
-    return bool(re.match(r"^(what\s+is|what's|define|explain)\b", s))
-
-
+# ----------------------------
+# Topic normalization (prevents fallout 3 vs fallout 3?)
+# ----------------------------
 def _normalize_topic(text: str) -> str:
     s = (text or "").strip()
-    s = s.replace("’", "'").replace("“", '"').replace("”", '"')
     s = re.sub(r"^\s*(what is|what's|define|explain)\s+", "", s, flags=re.IGNORECASE).strip()
-    s = s.strip().strip('"\'')
-
-    # strip trailing punctuation like "fallout 3?" -> "fallout 3"
-    s = re.sub(r"[?!\.]+$", "", s).strip()
+    s = re.sub(r"\s+", " ", s).strip()
+    # strip trailing punctuation that creates duplicate topics
+    s = re.sub(r"[?!.:;,\s]+$", "", s).strip()
     return s
 
 
 def _topic_key(topic: str) -> str:
-    return _normalize_topic(topic).lower().strip()
+    k = (topic or "").strip().lower()
+    k = re.sub(r"\s+", " ", k).strip()
+    k = re.sub(r"[?!.:;,\s]+$", "", k).strip()
+    return k
 
 
-def _clean_repl_stdout(raw: str) -> str:
-    if not raw:
+# ----------------------------
+# Knowledge read/write (direct)
+# ----------------------------
+def _read_knowledge() -> Dict[str, Any]:
+    if not KNOWLEDGE_PATH.exists():
+        return {}
+    try:
+        data = json.loads(KNOWLEDGE_PATH.read_text(encoding="utf-8", errors="replace") or "{}")
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_knowledge(data: Dict[str, Any]) -> None:
+    KNOWLEDGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = KNOWLEDGE_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tmp.replace(KNOWLEDGE_PATH)
+
+
+def _store_override(topic: str, answer: str, confidence: float = 0.95, sources: Optional[List[str]] = None) -> None:
+    tkey = _topic_key(topic)
+    data = _read_knowledge()
+    entry = data.get(tkey) if isinstance(data.get(tkey), dict) else {}
+
+    entry["answer"] = (answer or "").strip()
+    entry["confidence"] = float(max(float(entry.get("confidence") or 0.0), confidence))
+    entry["taught_by_user"] = True  # prevents weaker web learns overwriting it
+    entry["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    entry["sources"] = list(dict.fromkeys([s for s in (sources or []) if isinstance(s, str) and s.strip()]))
+
+    data[tkey] = entry
+    _write_knowledge(data)
+
+
+# ----------------------------
+# Brain helpers
+# ----------------------------
+def _brain_args() -> List[str]:
+    return [PYTHON_BIN, str(BRAIN_PATH)]
+
+
+_PROMPT_RE = re.compile(r"^\s*>\s*(.*)$")
+
+
+def _extract_last_answer(stdout: str) -> str:
+    if not stdout:
         return ""
-    prompt_re = re.compile(r"^\s*>\s*(.*)$")
-    lines = raw.splitlines()
-
-    topic = ""
-    body: List[str] = []
-    saw_topic = False
-
-    for line in lines:
+    sections: List[Tuple[str, List[str]]] = []
+    prompt = ""
+    lines: List[str] = []
+    for line in stdout.splitlines():
         s = line.strip()
-
         if s.startswith("Machine Spirit brain online."):
             continue
-
-        pm = prompt_re.match(line)
-        if pm:
-            prompt_text = (pm.group(1) or "").strip()
-            if "shutting down" in prompt_text.lower():
-                break
-            if (not saw_topic) and prompt_text:
-                topic = prompt_text
-                saw_topic = True
-                continue
-            break
-
-        if "shutting down" in s.lower():
+        m = _PROMPT_RE.match(line)
+        if m:
+            if prompt or lines:
+                sections.append((prompt, lines))
+            prompt = (m.group(1) or "").strip()
+            lines = []
             continue
+        lines.append(line.rstrip())
+    if prompt or lines:
+        sections.append((prompt, lines))
 
-        body.append(line.rstrip())
-
-    while body and body[0].strip() == "":
-        body.pop(0)
-
-    body_text = "\n".join(body).strip()
-
-    if topic and body_text:
-        return f"{topic}\n\n{body_text}".strip()
-    if topic:
-        return topic.strip()
-    return body_text.strip()
-
-
-def _extract_domains_from_text(text: str) -> List[str]:
-    if not text:
-        return []
-    domains: List[str] = []
-    for m in re.finditer(r"https?://([A-Za-z0-9\.\-]+)", text):
-        d = (m.group(1) or "").lower().strip().lstrip(".")
-        if d and d not in domains:
-            domains.append(d)
-    return domains
-
-
-def _domain_is_lowtrust(d: str) -> bool:
-    d = (d or "").lower()
-    return any(x in d for x in DEFAULT_AVOID_DOMAINS)
-
-
-def _looks_like_block_or_captcha(text: str) -> bool:
-    t = (text or "").lower()
-    markers = [
-        "we apologize for the inconvenience",
-        "made us think that you are a bot",
-        "captcha",
-        "cloudflare",
-        "radware",
-        "request unblock",
-        "access denied",
-        "unusual traffic",
-        "verify you are human",
-        "attention required",
-    ]
-    return any(m in t for m in markers)
-
-
-def _looks_like_nav_legal_junk(text: str) -> bool:
-    t = (text or "").lower()
-    if not t:
-        return False
-    if "all rights reserved" in t:
-        return True
-    if "close global navigation" in t:
-        return True
-    if "log in" in t and "sign up" in t:
-        return True
-    menu_words = ["games", "shop", "support", "community", "news", "account", "redeem code", "merchandise"]
-    hits = sum(t.count(w) for w in menu_words)
-    return hits >= 8
-
-
-def _definition_line(answer: str) -> str:
-    """
-    Pull the first definition bullet line after 'Definition:' if present.
-    """
-    if not answer:
-        return ""
-    m = re.search(r"(?im)^\s*definition\s*:\s*$", answer)
-    if not m:
-        return ""
-    tail = answer[m.end():]
-    for line in tail.splitlines():
-        s = line.strip()
-        if not s:
+    for p, body in reversed(sections):
+        p = (p or "").strip()
+        if not p or p.lower().startswith("shutting down") or p.startswith("/"):
             continue
-        # common format "- blah"
-        if s.startswith("-"):
-            return s.lstrip("-").strip()
-        return s
-    return ""
+        text = "\n".join(body).strip()
+        text = re.sub(r"^\n+", "", text).strip()
+        if text:
+            return f"{p}\n\n{text}".strip()
+        return p.strip()
+
+    return stdout.strip()
 
 
-def _looks_like_rumor_news(def_line: str) -> bool:
-    t = (def_line or "").lower()
-    rumor_markers = [
-        "planned release",
-        "insider",
-        "leak",
-        "rumor",
-        "claims",
-        "reveal window",
-        "twitter",
-        "x / twitter",
-        "subreddit",
-        "responding to a post",
-        "reportedly",
-        "countdown",
-        "remaster",
-        "remake",
-    ]
-    return any(m in t for m in rumor_markers)
-
-
-def _topic_kind(topic: str) -> str:
-    t = (topic or "").lower()
-    entertainment = [
-        "fallout", "skyrim", "game", "video game", "movie", "tv", "series",
-        "anime", "song", "album", "band", "book", "novel",
-    ]
-    tech = [
-        "bgp", "ospf", "tcp", "udp", "dns", "dhcp", "nat", "subnet", "cidr",
-        "routing", "icmp", "ipv4", "ipv6", "asn", "autonomous system",
-    ]
-    if any(k in t for k in entertainment):
-        return "entertainment"
-    if any(k in t for k in tech):
-        return "tech"
-    return "general"
-
-
-def _looks_low_quality(answer: str, kind: str, is_def_q: bool) -> bool:
-    a = (answer or "").strip()
-    al = a.lower()
-
-    if not a:
-        return True
-
-    min_len = 80 if kind == "entertainment" else 130
-    if len(a) < min_len:
-        return True
-
-    if "refusing (junk topic)" in al:
-        return True
-    if "i tried researching that" in al:
-        return True
-    if "i do not have a taught answer" in al:
-        return True
-    if "ask using a normal topic name instead" in al:
-        return True
-    if "may refer to" in al:
-        return True
-    if _looks_like_block_or_captcha(a):
-        return True
-    if _looks_like_nav_legal_junk(a):
-        return True
-
-    # extra: definitional queries must look like an actual definition, not rumors/news
-    if is_def_q:
-        dl = _definition_line(a)
-        if dl:
-            # must include an "is a / is an / is the" style definition
-            has_is = (" is a " in dl.lower()) or (" is an " in dl.lower()) or (" is the " in dl.lower())
-            if not has_is:
-                return True
-            if _looks_like_rumor_news(dl):
-                return True
-
-    return False
-
-
-def _http_get_json(url: str, timeout_s: int = 12) -> Any:
-    req = urllib.request.Request(url, headers={"User-Agent": "MachineSpirit/0.6.1 (+local)"})
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-        data = resp.read()
-    return json.loads(data.decode("utf-8", errors="replace"))
-
-
-def _wiki_summary(query: str) -> Optional[Dict[str, str]]:
-    q = (query or "").strip()
-    if not q:
-        return None
-
-    try:
-        api = "https://en.wikipedia.org/w/api.php"
-        params = {"action": "opensearch", "search": q, "limit": "1", "namespace": "0", "format": "json"}
-        url = api + "?" + urllib.parse.urlencode(params)
-        data = _http_get_json(url, timeout_s=12)
-
-        if not (isinstance(data, list) and len(data) >= 2 and isinstance(data[1], list) and data[1]):
-            return None
-
-        title = (data[1][0] or "").strip()
-        if not title:
-            return None
-
-        safe = urllib.parse.quote(title.replace(" ", "_"))
-        s_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{safe}"
-        summary = _http_get_json(s_url, timeout_s=12)
-
-        extract = (summary.get("extract") or "").strip() if isinstance(summary, dict) else ""
-        page_url = ""
-        if isinstance(summary, dict):
-            cu = summary.get("content_urls") or {}
-            desktop = cu.get("desktop") or {}
-            page_url = (desktop.get("page") or "").strip()
-
-        if not extract:
-            return None
-
-        return {"title": title, "extract": extract, "url": page_url or f"https://en.wikipedia.org/wiki/{safe}"}
-    except Exception:
-        return None
-
-
-async def _run_brain(one_line: str, timeout_s: int) -> Dict[str, Any]:
+async def _run_brain(stdin_text: str, timeout_s: int) -> Dict[str, Any]:
     LOCK_PATH.touch(exist_ok=True)
     t0 = time.time()
-
     proc = await asyncio.create_subprocess_exec(
         *_brain_args(),
         stdin=asyncio.subprocess.PIPE,
@@ -352,73 +186,140 @@ async def _run_brain(one_line: str, timeout_s: int) -> Dict[str, Any]:
         stderr=asyncio.subprocess.PIPE,
         cwd=str(REPO_DIR),
     )
-
     try:
-        out_b, err_b = await asyncio.wait_for(
-            proc.communicate(input=(one_line + "\n").encode("utf-8")),
-            timeout=timeout_s,
-        )
+        out_b, err_b = await asyncio.wait_for(proc.communicate(input=stdin_text.encode("utf-8")), timeout=timeout_s)
     except asyncio.TimeoutError:
         proc.kill()
         raise HTTPException(status_code=504, detail="brain.py timed out")
 
-    dt = time.time() - t0
-    stdout = (out_b or b"").decode("utf-8", errors="replace")
-    stderr = (err_b or b"").decode("utf-8", errors="replace")
-    rc = int(proc.returncode or 0)
-
     return {
-        "exit_code": rc,
-        "duration_s": dt,
-        "stdout": stdout,
-        "stderr": stderr,
+        "duration_s": time.time() - t0,
+        "stdout": (out_b or b"").decode("utf-8", errors="replace"),
+        "stderr": (err_b or b"").decode("utf-8", errors="replace"),
+        "exit_code": int(proc.returncode or 0),
         "args": _brain_args(),
-        "input": one_line,
     }
 
 
-def _load_overrides() -> Dict[str, Any]:
+# ----------------------------
+# Quality filtering (prevents fandom/rumor pages being accepted)
+# ----------------------------
+def _extract_source_urls(answer: str) -> List[str]:
+    if not answer:
+        return []
+    urls: List[str] = []
+    in_sources = False
+    for line in answer.splitlines():
+        s = line.strip()
+        if s.lower().startswith("sources:"):
+            in_sources = True
+            continue
+        if in_sources:
+            m = re.search(r"(https?://\S+)", s)
+            if m:
+                urls.append(m.group(1).strip())
+    return urls
+
+
+def _is_bad_source_url(url: str) -> bool:
+    u = (url or "").lower()
+    # fandom/wikia are not good "definition" sources (too much nav/noise)
+    if "fandom.com" in u or "wikia.com" in u:
+        return True
+    # rumor/news/leak style sources are bad for "what is X" definitions
+    if any(x in u for x in ("gaming", "leak", "rumor", "rumour")):
+        return True
+    return False
+
+
+def _looks_low_quality(answer: str) -> bool:
+    a = (answer or "").strip()
+    if not a:
+        return True
+
+    al = a.lower()
+    junk_markers = [
+        "all rights reserved",
+        "close global navigation menu",
+        "we apologize for the inconvenience",
+        "made us think that you are a bot",
+        "captcha",
+        "log in",
+        "sign up",
+        "service status",
+        "emotes icons photomode seasons skins",  # fallout fandom nav garbage
+        "i tried researching that, but the sources i found were too low-quality",
+    ]
+    if any(m in al for m in junk_markers):
+        return True
+
+    urls = _extract_source_urls(a)
+    if any(_is_bad_source_url(u) for u in urls):
+        return True
+
+    # rumor/leak content masquerading as definition
+    rumor_words = ["remaster", "remake", "planned release", "insider", "leak", "rumor", "rumour"]
+    if "definition:" in al and any(w in al for w in rumor_words):
+        return True
+
+    return False
+
+
+# ----------------------------
+# Wikipedia fallback (clean)
+# ----------------------------
+def _wiki_summary(topic: str) -> Optional[Tuple[str, str]]:
+    q = (topic or "").strip()
+    if not q:
+        return None
     try:
-        if not OVERRIDES_PATH.exists():
-            return {}
-        data = json.loads(OVERRIDES_PATH.read_text(encoding="utf-8", errors="replace"))
-        return data if isinstance(data, dict) else {}
+        r = requests.get(
+            "https://en.wikipedia.org/w/api.php",
+            params={"action": "opensearch", "search": q, "limit": 1, "namespace": 0, "format": "json"},
+            timeout=12,
+            headers={"User-Agent": "MachineSpirit/0.3.10"},
+        )
+        r.raise_for_status()
+        data = r.json()
+        title = (data[1][0] if isinstance(data, list) and len(data) > 1 and data[1] else "") or ""
+        if not title:
+            return None
+
+        safe = requests.utils.quote(title.replace(" ", "_"))
+        rs = requests.get(
+            f"https://en.wikipedia.org/api/rest_v1/page/summary/{safe}",
+            timeout=12,
+            headers={"User-Agent": "MachineSpirit/0.3.10"},
+        )
+        rs.raise_for_status()
+        js = rs.json()
+        extract = (js.get("extract") or "").strip()
+        page_url = ""
+        if isinstance(js.get("content_urls"), dict):
+            page_url = ((js["content_urls"].get("desktop") or {}).get("page") or "").strip()
+
+        if not extract:
+            return None
+
+        out = []
+        out.append(topic.upper())
+        out.append("")
+        out.append("Definition:")
+        out.append(f"- {extract}")
+        out.append("")
+        out.append("Sources:")
+        out.append(f"- Wikipedia: {page_url}" if page_url else f"- Wikipedia: {title}")
+        return ("\n".join(out).strip(), page_url or f"https://en.wikipedia.org/wiki/{safe}")
     except Exception:
-        return {}
+        return None
 
 
-def _save_overrides(d: Dict[str, Any]) -> None:
-    CFG_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = OVERRIDES_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(d, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.chmod(str(tmp), 0o600)
-    tmp.replace(OVERRIDES_PATH)
-    try:
-        os.chmod(str(OVERRIDES_PATH), 0o600)
-    except Exception:
-        pass
-
-
-def _save_auto_override(topic: str, answer: str, sources: List[str]) -> bool:
-    key = _topic_key(topic)
-    if not key or not answer.strip():
-        return False
-
-    overrides = _load_overrides()
-    existing = overrides.get(key)
-    if isinstance(existing, dict) and existing.get("source") == "user_override":
-        return False
-
-    overrides[key] = {
-        "topic": _normalize_topic(topic),
-        "answer": answer.strip(),
-        "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "source": "auto_research",
-        "confidence": 0.78,
-        "sources": sources[:6],
-    }
-    _save_overrides(overrides)
-    return True
+# ----------------------------
+# Routes
+# ----------------------------
+@app.get("/")
+async def root() -> Dict[str, Any]:
+    return {"ok": True, "app": APP_NAME, "version": VERSION, "ui_hint": "UI runs on port 8020."}
 
 
 @app.get("/health")
@@ -433,13 +334,9 @@ async def health(request: Request) -> Dict[str, Any]:
         "repo_dir": str(REPO_DIR),
         "python": PYTHON_BIN,
         "lock_path": str(LOCK_PATH),
+        "auto_research": AUTO_RESEARCH,
+        "tries": AUTO_RESEARCH_TRIES,
         "theme": {"theme": cfg.theme, "intensity": cfg.intensity},
-        "auto": {
-            "weblearn": AUTO_WEBLEARN,
-            "weblearn_attempts": AUTO_WEBLEARN_MAX_ATTEMPTS,
-            "wiki_fallback": AUTO_WIKI_FALLBACK,
-        },
-        "overrides_path": str(OVERRIDES_PATH),
     }
 
 
@@ -447,8 +344,7 @@ async def health(request: Request) -> Dict[str, Any]:
 async def get_theme(request: Request) -> Dict[str, Any]:
     _require_auth(request)
     cfg = load_theme()
-    choices = ui_intensity_choices()
-    return {"ok": True, "theme": cfg.theme, "intensity": cfg.intensity, "choices": choices}
+    return {"ok": True, "theme": cfg.theme, "intensity": cfg.intensity, "choices": ui_intensity_choices()}
 
 
 @app.post("/theme")
@@ -458,18 +354,29 @@ async def set_theme_endpoint(request: Request, payload: ThemeRequest) -> Dict[st
     return {"ok": True, "theme": cfg.theme, "intensity": cfg.intensity}
 
 
+@app.post("/override")
+async def override_answer(request: Request, payload: OverrideRequest) -> Dict[str, Any]:
+    _require_auth(request)
+    t = _normalize_topic(payload.topic)
+    a = (payload.answer or "").strip()
+    if not t or not a:
+        raise HTTPException(status_code=422, detail="topic and answer are required")
+    _store_override(t, a, confidence=float(payload.confidence or 0.95), sources=payload.sources or [])
+    return {"ok": True, "topic": _topic_key(t)}
+
+
 @app.post("/ask", response_model=AskResponse)
 async def ask(request: Request, req: AskRequest) -> AskResponse:
     _require_auth(request)
     t0 = time.time()
 
-    original_text = (req.text or "").strip()
-    if not original_text:
+    text = (req.text or "").strip()
+    if not text:
         raise HTTPException(status_code=422, detail="text is required")
 
-    # Theme commands (kept)
-    if original_text.lower().startswith("/theme"):
-        parts = original_text.split()
+    # theme command passthrough (same behavior as before)
+    if text.lower().startswith("/theme"):
+        parts = text.split()
         if len(parts) == 1 or (len(parts) == 2 and parts[1].lower() == "status"):
             cfg = load_theme()
             choices = ui_intensity_choices()
@@ -482,17 +389,11 @@ async def ask(request: Request, req: AskRequest) -> AskResponse:
                 f"{choices['light']['label']} - {choices['light']['desc']}\n"
                 f"{choices['heavy']['label']} - {choices['heavy']['desc']}\n"
             )
-            themed = apply_theme(msg.strip(), topic="theme", cfg=cfg)
-            return AskResponse(ok=True, topic="theme", answer=themed, duration_s=time.time() - t0,
-                               theme={"theme": cfg.theme, "intensity": cfg.intensity},
-                               did_research=False, used_override=False, saved_override=False)
+            return AskResponse(ok=True, topic="theme", answer=msg.strip(), duration_s=time.time() - t0, theme={"theme": cfg.theme, "intensity": cfg.intensity})
 
         if len(parts) >= 2 and parts[1].lower() in ("off", "none", "disable", "disabled"):
             cfg = save_theme("none", "light")
-            themed = apply_theme("Theme disabled.", topic="theme", cfg=cfg)
-            return AskResponse(ok=True, topic="theme", answer=themed, duration_s=time.time() - t0,
-                               theme={"theme": cfg.theme, "intensity": cfg.intensity},
-                               did_research=False, used_override=False, saved_override=False)
+            return AskResponse(ok=True, topic="theme", answer="Theme disabled.", duration_s=time.time() - t0, theme={"theme": cfg.theme, "intensity": cfg.intensity})
 
         if len(parts) >= 3 and parts[1].lower() == "set":
             intensity = "light"
@@ -501,103 +402,51 @@ async def ask(request: Request, req: AskRequest) -> AskResponse:
                 theme_name = " ".join(parts[2:-1]).strip()
             else:
                 theme_name = " ".join(parts[2:]).strip()
+
             if not theme_name:
-                raise HTTPException(status_code=422, detail="Theme name is required (example: /theme set Warhammer 40k light)")
+                raise HTTPException(status_code=422, detail="Theme name is required")
             cfg = save_theme(theme_name, intensity)
-            themed = apply_theme(f"Theme set to: {cfg.theme} ({cfg.intensity}).", topic="theme", cfg=cfg)
-            return AskResponse(ok=True, topic="theme", answer=themed, duration_s=time.time() - t0,
-                               theme={"theme": cfg.theme, "intensity": cfg.intensity},
-                               did_research=False, used_override=False, saved_override=False)
+            return AskResponse(ok=True, topic="theme", answer=f"Theme set to: {cfg.theme} ({cfg.intensity}).", duration_s=time.time() - t0, theme={"theme": cfg.theme, "intensity": cfg.intensity})
 
         raise HTTPException(status_code=422, detail="Theme command format: /theme, /theme off, or /theme set <name> [light|heavy]")
 
-    is_def_q = _is_definition_query(original_text)
+    topic = _normalize_topic(text)
+    key = _topic_key(topic)
 
-    normalized = _normalize_topic(original_text)
-    key = _topic_key(normalized)
-    kind = _topic_kind(normalized)
+    raw1 = await _run_brain(topic + "\n", timeout_s=int(req.timeout_s or 30))
+    ans1 = _extract_last_answer(raw1.get("stdout", ""))
 
-    # Override wins immediately
-    overrides = _load_overrides()
-    if key in overrides and isinstance(overrides[key], dict) and overrides[key].get("answer"):
-        cfg = load_theme()
-        themed = apply_theme(overrides[key]["answer"], topic=normalized, cfg=cfg)
-        return AskResponse(ok=True, topic=key, answer=themed, duration_s=time.time() - t0,
-                           theme={"theme": cfg.theme, "intensity": cfg.intensity},
-                           did_research=False, used_override=True, saved_override=False)
+    final = ans1
+    used_wiki = False
 
-    did_research = False
-    saved_override = False
+    # auto-research if low quality
+    if AUTO_RESEARCH and _looks_low_quality(final) and AUTO_RESEARCH_TRIES >= 1:
+        raw2 = await _run_brain(f"/weblearn {topic}\n{topic}\n", timeout_s=int((req.timeout_s or 30) + 25))
+        ans2 = _extract_last_answer(raw2.get("stdout", ""))
+        if ans2 and not _looks_low_quality(ans2):
+            final = ans2
+        else:
+            final = ans2 or final
 
-    # **NEW RULE**: for entertainment definitional questions, prefer wikipedia immediately
-    if AUTO_WIKI_FALLBACK and is_def_q and kind == "entertainment":
-        ws = _wiki_summary(normalized)
-        if ws and ws.get("extract"):
-            cleaned = (
-                f"{ws['title']}\n\n"
-                f"Definition:\n- {ws['extract']}\n\n"
-                f"Sources:\n- Wikipedia: {ws.get('url','')}\n"
-            ).strip()
-
-            saved_override = _save_auto_override(normalized, cleaned, sources=[ws.get("url", "Wikipedia")])
-            cfg = load_theme()
-            themed = apply_theme(cleaned, topic=normalized, cfg=cfg)
-            return AskResponse(ok=True, topic=key, answer=themed, duration_s=time.time() - t0,
-                               theme={"theme": cfg.theme, "intensity": cfg.intensity},
-                               did_research=True, used_override=False, saved_override=saved_override)
-
-    # Normal brain ask
-    raw_res = await _run_brain(normalized, timeout_s=int(req.timeout_s or 25))
-    cleaned = _clean_repl_stdout(raw_res.get("stdout", ""))
-
-    # If weak, try /weblearn attempts, then wiki fallback
-    if AUTO_WEBLEARN and _looks_low_quality(cleaned, kind, is_def_q):
-        did_research = True
-
-        for _ in range(1, max(1, AUTO_WEBLEARN_MAX_ATTEMPTS) + 1):
-            raw_learn = await _run_brain(f"/weblearn {normalized}", timeout_s=AUTO_WEBLEARN_TIMEOUT_S)
-            learned = _clean_repl_stdout(raw_learn.get("stdout", ""))
-            if learned.strip():
-                cleaned = learned
-                raw_res = raw_learn
-            if not _looks_low_quality(cleaned, kind, is_def_q):
-                break
-
-        # if still weak, wiki fallback
-        if AUTO_WIKI_FALLBACK and _looks_low_quality(cleaned, kind, is_def_q):
-            ws = _wiki_summary(normalized)
-            if ws and ws.get("extract"):
-                cleaned = (
-                    f"{ws['title']}\n\n"
-                    f"Definition:\n- {ws['extract']}\n\n"
-                    f"Sources:\n- Wikipedia: {ws.get('url','')}\n"
-                ).strip()
-                saved_override = _save_auto_override(normalized, cleaned, sources=[ws.get("url", "Wikipedia")])
-
-        # save good answers (but don't save low-trust domains)
-        if not saved_override and not _looks_low_quality(cleaned, kind, is_def_q):
-            doms = _extract_domains_from_text(cleaned)
-            if not any(_domain_is_lowtrust(d) for d in doms):
-                saved_override = _save_auto_override(normalized, cleaned, sources=doms)
-
-        if _looks_low_quality(cleaned, kind, is_def_q):
-            cleaned = (
-                f"{normalized}\n\n"
-                "I tried researching that, but I kept hitting low-quality/blocked pages.\n"
-                "Try again in a minute or rephrase slightly.\n"
-            ).strip()
+    # hard fallback: wiki summary (especially for games/media)
+    if AUTO_RESEARCH and _looks_low_quality(final) and AUTO_RESEARCH_TRIES >= 2:
+        ws = _wiki_summary(topic)
+        if ws:
+            wiki_text, wiki_url = ws
+            final = wiki_text
+            used_wiki = True
+            # store as taught_by_user so it never flips back to rumor/fandom later
+            _store_override(topic, wiki_text, confidence=0.92, sources=[wiki_url])
 
     cfg = load_theme()
-    themed = apply_theme(cleaned, topic=normalized, cfg=cfg)
+    themed = apply_theme(final.strip(), topic=topic, cfg=cfg)
 
     return AskResponse(
         ok=True,
         topic=key,
         answer=themed,
-        duration_s=float(raw_res.get("duration_s", time.time() - t0)),
-        raw=(raw_res if req.raw else None),
-        theme={"theme": cfg.theme, "intensity": cfg.intensity},
-        did_research=did_research,
-        used_override=False,
-        saved_override=saved_override,
+        duration_s=float(raw1.get("duration_s", time.time() - t0)),
+        error=None,
+        raw=(raw1 if req.raw else None),
+        theme={"theme": cfg.theme, "intensity": cfg.intensity, "wiki_curated": used_wiki},
     )
