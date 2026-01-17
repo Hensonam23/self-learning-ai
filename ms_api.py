@@ -396,3 +396,79 @@ def custom_openapi():
     return app.openapi_schema
 
 app.openapi = custom_openapi
+
+# -------------------------------------------------------------------
+# Cleaner override (v2)
+# Fixes the "Shutting down." showing up as the first line in /ask answer.
+#
+# Root cause:
+#   brain REPL prints a prompt line for the topic ("> CIDR" or ">CIDR")
+#   and then later prints a shutdown prompt ("> Shutting down.")
+#   Our older cleaner sometimes latched onto the shutdown prompt.
+# -------------------------------------------------------------------
+def _clean_repl_stdout(raw: str) -> str:
+    """
+    Turn REPL-style stdout into a clean answer.
+
+    Handles prompt styles:
+      - '>CIDR'
+      - '> CIDR'
+
+    Removes shutdown noise:
+      - 'Shutting down.'
+      - '> Shutting down.'
+    """
+    if not raw:
+        return ""
+
+    import re
+
+    prompt_re = re.compile(r'^\s*>\s*(.*)$')
+
+    lines = raw.splitlines()
+    topic = ""
+    body = []
+    seen_topic_prompt = False
+
+    for line in lines:
+        s = line.strip()
+
+        # Drop banner
+        if s.startswith("Machine Spirit brain online."):
+            continue
+
+        # Detect prompt lines
+        pm = prompt_re.match(line)
+        if pm:
+            prompt_text = (pm.group(1) or "").strip()
+
+            # Never include shutdown prompt
+            if "shutting down" in prompt_text.lower():
+                break
+
+            # First prompt becomes the topic header
+            if (not seen_topic_prompt) and prompt_text:
+                topic = prompt_text
+                seen_topic_prompt = True
+                continue
+
+            # Any later prompt means we reached end of answer
+            break
+
+        # Never include stray shutdown lines
+        if "shutting down" in s.lower():
+            continue
+
+        body.append(line.rstrip())
+
+    # Trim leading blanks
+    while body and body[0].strip() == "":
+        body.pop(0)
+
+    body_text = "\n".join(body).strip()
+
+    if topic and body_text:
+        return f"{topic}\n\n{body_text}"
+    if topic:
+        return topic
+    return body_text
