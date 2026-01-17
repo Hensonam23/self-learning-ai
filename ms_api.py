@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-MachineSpirit API (v0)
+MachineSpirit API
 - Non-invasive wrapper: runs brain.py as a subprocess
-- Safe-by-default: localhost-only unless MS_API_KEY is set
-- "Confirm before action": mutating endpoints require confirm=true
-- Cross-process lock: prevents API + timers from running brain concurrently
+- Safe-by-default:
+    * If MS_API_KEY is set: require header x-api-key
+    * If not set: localhost only
+- Confirm-before-action: mutating endpoints require confirm=true
+- Cross-process lock: prevents API + timers from running brain.py at the same time
 """
 
 from __future__ import annotations
@@ -21,26 +23,28 @@ from fastapi import FastAPI, HTTPException, Request, Query
 from pydantic import BaseModel, Field
 
 APP_NAME = "MachineSpirit API"
+
 REPO_DIR = Path(__file__).resolve().parent
 BRAIN_PATH = Path(os.environ.get("MS_BRAIN_PATH", str(REPO_DIR / "brain.py"))).resolve()
 
-# IMPORTANT: default is sys.executable (venv python if uvicorn runs in venv)
-# Set MS_PYTHON=/usr/bin/python3 in ~/.config/machinespirit/api.env for consistency.
+# IMPORTANT:
+# - uvicorn runs in the venv python
+# - brain subprocess should use /usr/bin/python3 for consistency with timers
 PYTHON_BIN = os.environ.get("MS_PYTHON", sys.executable)
 
 DEFAULT_TIMEOUT_S = int(os.environ.get("MS_TIMEOUT_S", "60"))
 
-# If MS_API_KEY is set, ALL requests must provide it via header: x-api-key
+# If set, require header x-api-key == MS_API_KEY. If not set, localhost only.
 MS_API_KEY = os.environ.get("MS_API_KEY", "").strip()
 
-# Cross-process lock settings
+# Cross-process lock file (shared with systemd services)
 LOCK_PATH = Path(os.environ.get("MS_LOCK_PATH", str(REPO_DIR / ".machinespirit.lock"))).resolve()
-LOCK_WAIT_S = float(os.environ.get("MS_LOCK_WAIT_S", "0").strip() or "0")  # 0 = do not wait
+LOCK_WAIT_S = float(os.environ.get("MS_LOCK_WAIT_S", "0") or "0")  # 0 = don't wait
 
-# Serialize brain access from API requests (avoids multiple brain subprocesses from API side)
+# Serialize API requests (does not cover systemd timers, that's why we also use LOCK_PATH)
 RUN_LOCK = asyncio.Lock()
 
-app = FastAPI(title=APP_NAME, version="0.2.0")
+app = FastAPI(title=APP_NAME, version="0.3.0")
 
 
 class RunResult(BaseModel):
@@ -50,6 +54,7 @@ class RunResult(BaseModel):
     duration_s: float
     stdout: str
     stderr: str
+    answer: Optional[str] = None  # Cleaned answer for /ask
 
 
 class AskRequest(BaseModel):
@@ -69,11 +74,6 @@ def _client_ip(request: Request) -> str:
 
 
 def _require_auth(request: Request) -> None:
-    """
-    Safe-by-default:
-      - If MS_API_KEY is set: require header x-api-key == MS_API_KEY
-      - Else: allow only localhost clients
-    """
     ip = _client_ip(request)
     if MS_API_KEY:
         supplied = request.headers.get("x-api-key", "")
@@ -89,17 +89,57 @@ def _require_auth(request: Request) -> None:
 
 def _require_confirm(confirm: bool) -> None:
     if not confirm:
-        raise HTTPException(
-            status_code=400,
-            detail="This endpoint mutates state. Re-run with confirm=true",
-        )
+        raise HTTPException(status_code=400, detail="This endpoint mutates state. Re-run with confirm=true")
 
 
-async def _acquire_lock(wait_s: float) -> Optional[Any]:
+def _clean_repl_stdout(raw: str) -> str:
     """
-    Acquire an exclusive lock on LOCK_PATH.
-    Returns an open file handle if lock acquired, else None.
+    Clean REPL output so UI can display it without the banner/prompt.
+    Keeps the topic (from the "> TOPIC" line) as the first line when present.
     """
+    if not raw:
+        return ""
+
+    lines = raw.splitlines()
+    out: List[str] = []
+    prompt_topic: Optional[str] = None
+
+    for line in lines:
+        s = line.strip()
+
+        # Banner lines
+        if s.startswith("Machine Spirit brain online."):
+            continue
+        if "Type a message" in s and "Ctrl+C" in s:
+            continue
+
+        # Prompt line: "> CIDR"
+        if s.startswith(">"):
+            maybe = s.lstrip(">").strip()
+            if maybe:
+                prompt_topic = maybe
+            continue
+
+        # Shutdown noise
+        if "shutting down" in s.lower():
+            continue
+
+        out.append(line)
+
+    # Trim leading blanks
+    while out and out[0].strip() == "":
+        out.pop(0)
+
+    # Put the topic at top (nice display)
+    if prompt_topic:
+        if not out or out[0].strip() != prompt_topic:
+            out = [prompt_topic, ""] + out
+
+    cleaned = "\n".join(out).strip()
+    return cleaned + ("\n" if cleaned else "")
+
+
+async def _acquire_lock(wait_s: float):
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     fh = open(LOCK_PATH, "a+")
     deadline = time.time() + max(0.0, wait_s)
@@ -118,7 +158,7 @@ async def _acquire_lock(wait_s: float) -> Optional[Any]:
             await asyncio.sleep(0.2)
 
 
-def _release_lock(fh: Any) -> None:
+def _release_lock(fh) -> None:
     try:
         fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
     except Exception:
@@ -129,11 +169,7 @@ def _release_lock(fh: Any) -> None:
         pass
 
 
-async def _run_process(
-    args: List[str],
-    stdin_text: Optional[str] = None,
-    timeout_s: Optional[int] = None,
-) -> RunResult:
+async def _run_process(args: List[str], stdin_text: Optional[str] = None, timeout_s: Optional[int] = None) -> RunResult:
     if not BRAIN_PATH.exists():
         raise HTTPException(status_code=500, detail=f"brain.py not found at {BRAIN_PATH}")
 
@@ -146,10 +182,7 @@ async def _run_process(
     async with RUN_LOCK:
         lock_fh = await _acquire_lock(LOCK_WAIT_S)
         if lock_fh is None:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Busy: brain lock held ({LOCK_PATH}). Try again, or set MS_LOCK_WAIT_S>0 to wait.",
-            )
+            raise HTTPException(status_code=409, detail=f"Busy: brain lock held ({LOCK_PATH}). Try again.")
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -172,15 +205,7 @@ async def _run_process(
                     pass
                 await proc.wait()
                 dt = time.time() - t0
-                return RunResult(
-                    ok=False,
-                    exit_code=124,
-                    args=args,
-                    duration_s=dt,
-                    stdout="",
-                    stderr=f"Timeout after {timeout}s",
-                )
-
+                return RunResult(ok=False, exit_code=124, args=args, duration_s=dt, stdout="", stderr=f"Timeout after {timeout}s")
         finally:
             _release_lock(lock_fh)
 
@@ -188,14 +213,7 @@ async def _run_process(
     stdout = (stdout_b or b"").decode("utf-8", errors="replace")
     stderr = (stderr_b or b"").decode("utf-8", errors="replace")
     code = int(proc.returncode or 0)
-    return RunResult(
-        ok=(code == 0),
-        exit_code=code,
-        args=args,
-        duration_s=dt,
-        stdout=stdout,
-        stderr=stderr,
-    )
+    return RunResult(ok=(code == 0), exit_code=code, args=args, duration_s=dt, stdout=stdout, stderr=stderr)
 
 
 def _brain_repl_args() -> List[str]:
@@ -212,13 +230,8 @@ def _brain_headless_curiosity_args(n: int) -> List[str]:
 
 @app.get("/")
 async def root() -> Dict[str, Any]:
-    # Intentionally no auth here: this is a harmless "service is up" message for browsers.
-    return {
-        "ok": True,
-        "app": APP_NAME,
-        "docs": "/docs",
-        "hint": "Most endpoints require header x-api-key. Try /health with curl.",
-    }
+    # No auth here: harmless "service is up" message for browsers.
+    return {"ok": True, "app": APP_NAME, "docs": "/docs", "hint": "Most endpoints require x-api-key. Try /health."}
 
 
 @app.get("/health")
@@ -240,15 +253,13 @@ async def health(request: Request) -> Dict[str, Any]:
 async def ask(req: AskRequest, request: Request) -> RunResult:
     _require_auth(request)
     stdin = req.text.rstrip("\n") + "\n"
-    return await _run_process(_brain_repl_args(), stdin_text=stdin, timeout_s=req.timeout_s)
+    res = await _run_process(_brain_repl_args(), stdin_text=stdin, timeout_s=req.timeout_s)
+    res.answer = _clean_repl_stdout(res.stdout)
+    return res
 
 
 @app.post("/teach", response_model=RunResult)
-async def teach(
-    req: CommandRequest,
-    request: Request,
-    confirm: bool = Query(False),
-) -> RunResult:
+async def teach(req: CommandRequest, request: Request, confirm: bool = Query(False)) -> RunResult:
     _require_auth(request)
     _require_confirm(confirm)
     line = req.line.strip()
@@ -261,8 +272,7 @@ async def teach(
 @app.get("/queuehealth", response_model=RunResult)
 async def queuehealth(request: Request, timeout_s: Optional[int] = None) -> RunResult:
     _require_auth(request)
-    stdin = "/queuehealth\n"
-    return await _run_process(_brain_repl_args(), stdin_text=stdin, timeout_s=timeout_s)
+    return await _run_process(_brain_repl_args(), stdin_text="/queuehealth\n", timeout_s=timeout_s)
 
 
 @app.get("/needsources", response_model=RunResult)
@@ -273,8 +283,7 @@ async def needsources(
 ) -> RunResult:
     _require_auth(request)
     cmd = "/needsources" + (f" {int(limit)}" if limit else "")
-    stdin = cmd + "\n"
-    return await _run_process(_brain_repl_args(), stdin_text=stdin, timeout_s=timeout_s)
+    return await _run_process(_brain_repl_args(), stdin_text=cmd + "\n", timeout_s=timeout_s)
 
 
 @app.post("/run/webqueue", response_model=RunResult)
