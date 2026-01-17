@@ -60,3 +60,12 @@ apply_*.py
 dev_backups/
 .machinespirit.lock
 ms_api.py.bak.*
+
+# editor / manual backups
+*.bak
+*.bak.*
+*.save
+*.save.*
+
+# local locks
+.machinespirit.lock
