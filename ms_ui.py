@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 APP_NAME = "MachineSpirit UI"
-VERSION = "0.3.8"
+VERSION = "0.3.9"
 
 BASE_DIR = Path(__file__).resolve().parent
 REPO_DIR = Path(os.environ.get("MS_REPO_DIR", str(BASE_DIR))).resolve()
@@ -763,36 +763,78 @@ HTML_TEMPLATE = r"""<!doctype html>
 
   function normalizeTopic(s){
     let t = (s || "").trim();
-    t = t.replace(/^\s*(what is|what's|define|explain)\s+/i, "").trim();
+
+    // normalize “smart” quotes from phones
+    t = t.replace(/[’`]/g, "'").replace(/[“”]/g, '"');
+
+    // handle pasted JSON like {"text":"subnet mask"}
+    let m = t.match(/^\s*\{\s*\"text\"\s*:\s*\"([\s\S]+)\"\s*\}\s*$/i);
+    if(m && m[1]) t = m[1].trim();
+
+    // strip common question framing
+    t = t.replace(/^\s*(what is|what's|whats|define|explain)\s+/i, "").trim();
+
+    // strip wrapping quotes and trailing punctuation
+    t = t.replace(/^[\s"'`]+|[\s"'`]+$/g, "").trim();
+    t = t.replace(/[?!.]+$/g, "").trim();
+
+    // collapse whitespace
+    t = t.replace(/\s+/g, " ").trim();
     return t;
   }
 
   function topicFromAnswer(ans){
     const s = (ans || "");
-    let m = s.match(/VOX-CAST\s*\/\/\s*([^\n+]+?)\s*\+{3}/i);
-    if(m && m[1]) return m[1].trim();
 
+    // Prefer VOX header topic when present
+    let m = s.match(/VOX-CAST\s*\/\/\s*([^\n+]+?)\s*\+{3}/i);
+    if(m && m[1]){
+      const cand = normalizeTopic(m[1]);
+
+      // If the "topic" is actually a correction phrase, ignore it
+      if(/^(no|nah|nope|correction|actually)\b/i.test(cand)) return "";
+      if(cand.length > 140) return "";
+      return cand;
+    }
+
+    // Fallback: first reasonable short line
     const lines = s.split("\n").map(x => x.trim()).filter(Boolean);
     for(const line of lines){
       if(line.startsWith("+++")) continue;
       if(/^definition:$/i.test(line)) continue;
       if(/^key points:$/i.test(line)) continue;
       if(/^sources:$/i.test(line)) continue;
-      if(line.length <= 80) return line;
+      if(/^refusing\b/i.test(line)) continue;
+
+      const cand = normalizeTopic(line);
+      if(!cand) continue;
+      if(/^(no|nah|nope|correction|actually)\b/i.test(cand)) continue;
+      if(cand.length <= 140) return cand;
     }
     return "";
   }
 
   function extractCorrection(s){
-    const t = (s || "").trim();
+    let t = (s || "").trim();
+    if(!t) return "";
 
-    let m = t.match(/^(?:no[, ]+)?(?:nah[, ]+)?(?:not quite[, ]+)?(?:correction[:, ]+)?(?:it'?s\s+)?actually[:\s]+(.+)$/i);
+    // normalize “smart” quotes from phones
+    t = t.replace(/[’`]/g, "'").replace(/[“”]/g, '"');
+
+    // 1) no it's actually ... / no its actually ... (with or without colon)
+    let m = t.match(/^\s*(?:no|nah|nope)\s*(?:,|\s)\s*(?:it\s+is|it'?s|its)?\s*(?:actually|really)\s*(?::|-)?\s*([\s\S]+)$/i);
     if(m && m[1]) return m[1].trim();
 
-    m = t.match(/^that'?s wrong[, ]+(?:it'?s\s+)?(.+)$/i);
+    // 2) no it's: ... / no its: ... / no it is: ...  (no “actually”)
+    m = t.match(/^\s*(?:no|nah|nope)\s*(?:,|\s)\s*(?:it\s+is|it'?s|its)?\s*(?::|-)\s*([\s\S]+)$/i);
     if(m && m[1]) return m[1].trim();
 
-    m = t.match(/^correction[:\s]+(.+)$/i);
+    // 3) correction: ... / actually: ...
+    m = t.match(/^\s*(?:correction|actually)\s*(?::|-)\s*([\s\S]+)$/i);
+    if(m && m[1]) return m[1].trim();
+
+    // 4) that's wrong, it's ... / thats wrong: ...
+    m = t.match(/^\s*that'?s\s+wrong\s*(?:,|\s)\s*(?:it\s+is|it'?s|its)?\s*(?::|-)?\s*([\s\S]+)$/i);
     if(m && m[1]) return m[1].trim();
 
     return "";
@@ -869,17 +911,20 @@ HTML_TEMPLATE = r"""<!doctype html>
     msgEl.value = "";
     pushAndRender("user", "You", text);
 
+    // If user is correcting, do NOT send to /api/ask (brain/junk filters).
     const correction = extractCorrection(text);
     if(correction){
-      if(!lastTopic){
+      const topic = normalizeTopic(lastTopic || lastQuestion);
+      if(!topic){
         pushAndRender("ai", "MachineSpirit", "I don’t know what to replace yet. Ask a question first, then correct it.");
         return;
       }
-      const res = await override(lastTopic, correction);
+
+      const res = await override(topic, correction);
       if(res && res.ok){
         pushAndRender("ai", "MachineSpirit", `Got it — I replaced my saved answer for "${res.topic}".`);
       }else{
-        pushAndRender("ai", "MachineSpirit", `Override failed: ${res.detail || "unknown error"}`);
+        pushAndRender("ai", "MachineSpirit", `Override failed: ${res.detail || res.error || "unknown error"}`);
       }
       return;
     }
@@ -888,15 +933,18 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     const out = await ask(text);
     if(!out || out.ok === false){
-      pushAndRender("ai", "MachineSpirit", out.detail || "API error: failed to ask");
+      pushAndRender("ai", "MachineSpirit", out.detail || out.error || "API error: failed to ask");
       return;
     }
 
     const ans = out.answer || out.text || out.response || JSON.stringify(out);
     pushAndRender("ai", "MachineSpirit", ans);
 
-    const t = topicFromAnswer(ans) || lastQuestion;
-    lastTopic = normalizeTopic(t);
+    // Prefer real topic returned by API; fallback to VOX parse; fallback to question
+    const apiTopic = normalizeTopic(out.topic || "");
+    const parsedTopic = normalizeTopic(topicFromAnswer(ans) || "");
+    lastTopic = apiTopic || parsedTopic || lastQuestion;
+
     refreshTheme();
   }
 
