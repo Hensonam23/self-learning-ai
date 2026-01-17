@@ -5,6 +5,7 @@ import asyncio
 import os
 import re
 import time
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -15,7 +16,7 @@ from ms_theme import apply_theme, load_theme, save_theme, ui_intensity_choices
 
 
 APP_NAME = "MachineSpirit API"
-VERSION = "0.3.6"
+VERSION = "0.3.7"
 
 BASE_DIR = Path(__file__).resolve().parent
 REPO_DIR = Path(os.environ.get("MS_REPO_DIR", str(BASE_DIR))).resolve()
@@ -25,11 +26,19 @@ PYTHON_BIN = os.environ.get("MS_PYTHON", "/usr/bin/python3")
 MS_API_KEY = os.environ.get("MS_API_KEY", "")
 
 LOCK_PATH = Path(os.environ.get("MS_LOCK_PATH", str(REPO_DIR / ".machinespirit.lock")))
+KNOWLEDGE_PATH = Path(os.environ.get("MS_KNOWLEDGE_PATH", str(REPO_DIR / "data" / "local_knowledge.json")))
 
 app = FastAPI(title=APP_NAME, version=VERSION)
 
 # Prevent overlapping brain subprocess calls
 _BRAIN_LOCK = asyncio.Lock()
+# Prevent overlapping writes to knowledge json
+_KNOW_LOCK = asyncio.Lock()
+
+
+def _iso_now() -> str:
+    # good enough ISO-ish without importing datetime
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
 
 
 # ----------------------------
@@ -56,6 +65,12 @@ class ThemeRequest(BaseModel):
     intensity: str
 
 
+class OverrideRequest(BaseModel):
+    topic: str
+    answer: str
+    confidence: Optional[float] = 0.95
+
+
 # ----------------------------
 # Auth
 # ----------------------------
@@ -65,6 +80,86 @@ def _require_auth(request: Request) -> None:
     key = request.headers.get("x-api-key", "")
     if key != MS_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+# ----------------------------
+# Knowledge overwrite helpers
+# ----------------------------
+def _load_knowledge_root() -> Tuple[Dict[str, Any], Dict[str, Any], str]:
+    """
+    Returns (root_obj, mapping, mode)
+
+    mode:
+      - "map": root_obj IS the mapping (topic -> entry)
+      - "knowledge": root_obj["knowledge"] is the mapping
+      - "topics": root_obj["topics"] is the mapping
+    """
+    if not KNOWLEDGE_PATH.exists():
+        return {}, {}, "map"
+
+    try:
+        root = json.loads(KNOWLEDGE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}, {}, "map"
+
+    if isinstance(root, dict):
+        if isinstance(root.get("knowledge"), dict):
+            return root, root["knowledge"], "knowledge"
+        if isinstance(root.get("topics"), dict):
+            return root, root["topics"], "topics"
+        # assume it's already a map
+        return root, root, "map"
+
+    # unknown shape
+    return {}, {}, "map"
+
+
+def _save_knowledge_root(root: Dict[str, Any], mapping: Dict[str, Any], mode: str) -> None:
+    if mode == "knowledge":
+        root = dict(root or {})
+        root["knowledge"] = mapping
+        out_obj = root
+    elif mode == "topics":
+        root = dict(root or {})
+        root["topics"] = mapping
+        out_obj = root
+    else:
+        out_obj = mapping
+
+    KNOWLEDGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = KNOWLEDGE_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(out_obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tmp.replace(KNOWLEDGE_PATH)
+
+
+def _overwrite_topic(topic: str, answer: str, confidence: float) -> Dict[str, Any]:
+    root, mp, mode = _load_knowledge_root()
+    mp = dict(mp or {})
+
+    t = (topic or "").strip()
+    if not t:
+        raise HTTPException(status_code=422, detail="topic is required")
+    a = (answer or "").strip()
+    if not a:
+        raise HTTPException(status_code=422, detail="answer is required")
+
+    entry = mp.get(t)
+    if not isinstance(entry, dict):
+        entry = {}
+
+    # hard replace (what you asked for)
+    entry["answer"] = a
+    entry["confidence"] = float(confidence if confidence is not None else 0.95)
+    entry["taught_by_user"] = True
+    entry["updated"] = _iso_now()
+    entry["sources"] = ["user (ui correction)"]
+    entry["notes"] = "Corrected by user in UI (overrode previous answer)."
+    # wipe noisy evidence if it exists (optional, but matches "delete previous")
+    entry.pop("evidence", None)
+
+    mp[t] = entry
+    _save_knowledge_root(root, mp, mode)
+    return {"topic": t, "confidence": entry["confidence"]}
 
 
 # ----------------------------
@@ -81,15 +176,6 @@ def _normalize_topic(text: str) -> str:
 
 
 def _clean_repl_stdout(raw: str) -> str:
-    """
-    Turns brain REPL stdout into a clean answer.
-
-    Handles prompt styles:
-      - '> CIDR'
-      - '>CIDR'
-    Stops at:
-      - '> Shutting down.'
-    """
     if not raw:
         return ""
 
@@ -103,7 +189,6 @@ def _clean_repl_stdout(raw: str) -> str:
     for line in lines:
         s = line.strip()
 
-        # drop banner
         if s.startswith("Machine Spirit brain online."):
             continue
 
@@ -146,7 +231,6 @@ def _looks_low_quality(answer: str) -> bool:
         return True
     if re.search(r"(?is)sources:\s*-\s*$", answer.strip()):
         return True
-    # common junk blocks we’ve seen
     junk = [
         "agree & join linkedin",
         "cookie policy",
@@ -177,7 +261,6 @@ def _strip_known_web_junk(text: str) -> str:
             continue
         out.append(ln.rstrip())
 
-    # collapse multiple blanks
     cleaned: List[str] = []
     blank = 0
     for ln in out:
@@ -388,6 +471,17 @@ async def set_theme_endpoint(request: Request, payload: ThemeRequest) -> Dict[st
     return {"ok": True, "theme": cfg.theme, "intensity": cfg.intensity}
 
 
+@app.post("/override")
+async def override_answer(request: Request, payload: OverrideRequest) -> Dict[str, Any]:
+    """
+    Hard replace the saved answer for a topic (user correction).
+    """
+    _require_auth(request)
+    async with _KNOW_LOCK:
+        info = _overwrite_topic(payload.topic, payload.answer, payload.confidence or 0.95)
+    return {"ok": True, **info}
+
+
 @app.post("/ask", response_model=AskResponse)
 async def ask(request: Request, req: AskRequest) -> AskResponse:
     _require_auth(request)
@@ -409,7 +503,6 @@ async def ask(request: Request, req: AskRequest) -> AskResponse:
                 return "heavy"
             return "light"
 
-        # /theme or /theme status
         if len(parts) == 1 or (len(parts) == 2 and parts[1].lower() == "status"):
             cfg = load_theme()
             choices = ui_intensity_choices()
@@ -424,30 +517,17 @@ async def ask(request: Request, req: AskRequest) -> AskResponse:
                 f"{choices['light']['label']} - {choices['light']['desc']}\n"
                 f"{choices['heavy']['label']} - {choices['heavy']['desc']}\n"
             )
-            return AskResponse(
-                ok=True,
-                topic="theme",
-                answer=msg.strip(),
-                duration_s=time.time() - t0,
-                theme={"theme": cfg.theme, "intensity": cfg.intensity},
-            )
+            return AskResponse(ok=True, topic="theme", answer=msg.strip(), duration_s=time.time() - t0,
+                               theme={"theme": cfg.theme, "intensity": cfg.intensity})
 
-        # /theme off
         if len(parts) >= 2 and parts[1].lower() in ("off", "none", "disable", "disabled"):
             cfg = save_theme("none", "light")
-            return AskResponse(
-                ok=True,
-                topic="theme",
-                answer="Theme disabled.",
-                duration_s=time.time() - t0,
-                theme={"theme": cfg.theme, "intensity": cfg.intensity},
-            )
+            return AskResponse(ok=True, topic="theme", answer="Theme disabled.", duration_s=time.time() - t0,
+                               theme={"theme": cfg.theme, "intensity": cfg.intensity})
 
-        # /theme set <name...> <light|heavy|1|2?>
         if len(parts) >= 3 and parts[1].lower() == "set":
             intensity = "light"
             theme_name = " ".join(parts[2:]).strip()
-
             if parts[-1].lower() in ("light", "heavy", "1", "2"):
                 intensity = _map_intensity(parts[-1])
                 theme_name = " ".join(parts[2:-1]).strip()
@@ -456,17 +536,11 @@ async def ask(request: Request, req: AskRequest) -> AskResponse:
                 raise HTTPException(status_code=422, detail="Theme name is required (example: /theme set Warhammer 40k 1)")
 
             cfg = save_theme(theme_name, intensity)
-            return AskResponse(
-                ok=True,
-                topic="theme",
-                answer=f"Theme set to: {cfg.theme} ({cfg.intensity}).",
-                duration_s=time.time() - t0,
-                theme={"theme": cfg.theme, "intensity": cfg.intensity},
-            )
+            return AskResponse(ok=True, topic="theme", answer=f"Theme set to: {cfg.theme} ({cfg.intensity}).",
+                               duration_s=time.time() - t0, theme={"theme": cfg.theme, "intensity": cfg.intensity})
 
         raise HTTPException(status_code=422, detail="Theme command format: /theme, /theme off, or /theme set <name> [1|2|light|heavy]")
 
-    # normal ask
     normalized = _normalize_topic(text)
     raw_res = await _run_brain_repl(normalized, timeout_s=int(req.timeout_s or 25))
     cleaned = _clean_repl_stdout(raw_res.get("stdout", ""))
