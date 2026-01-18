@@ -2,20 +2,23 @@
 from __future__ import annotations
 
 import asyncio
-import os
+import datetime as _dt
+import importlib.util
 import json
+import os
 import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import requests
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 from ms_theme import apply_theme, load_theme, save_theme, ui_intensity_choices
 
 APP_NAME = "MachineSpirit API"
-VERSION = "0.3.7"
+VERSION = "0.3.10"
 
 BASE_DIR = Path(__file__).resolve().parent
 REPO_DIR = Path(os.environ.get("MS_REPO_DIR", str(BASE_DIR))).resolve()
@@ -23,19 +26,32 @@ BRAIN_PATH = Path(os.environ.get("MS_BRAIN_PATH", str(REPO_DIR / "brain.py"))).r
 PYTHON_BIN = os.environ.get("MS_PYTHON", "/usr/bin/python3")
 
 LOCK_PATH = Path(os.environ.get("MS_LOCK_PATH", str(REPO_DIR / ".machinespirit.lock")))
-KNOWLEDGE_PATH = Path(
-    os.environ.get("MS_KNOWLEDGE_PATH", str(REPO_DIR / "data" / "local_knowledge.json"))
-).resolve()
+KNOWLEDGE_PATH = Path(os.environ.get("MS_KNOWLEDGE_PATH", str(REPO_DIR / "data" / "local_knowledge.json"))).resolve()
 
 MS_API_KEY = (os.environ.get("MS_API_KEY", "") or "").strip()
 AUTO_WEBLEARN = (os.environ.get("MS_AUTO_WEBLEARN", "1").strip().lower() not in ("0", "false", "no", "off"))
 
 app = FastAPI(title=APP_NAME, version=VERSION)
 
+_LEARN_LOCK = asyncio.Lock()
+_BRAIN_MOD = None
+
+BAD_SOURCE_DOMAINS = {
+    "indy100.com",
+    "fandom.com",
+    "wikia.com",
+    "networklessons.com",
+}
+
+
+# ----------------------------
+# Models
+# ----------------------------
 class AskRequest(BaseModel):
     text: str
     timeout_s: Optional[int] = 25
     raw: Optional[bool] = False
+
 
 class AskResponse(BaseModel):
     ok: bool
@@ -44,18 +60,36 @@ class AskResponse(BaseModel):
     duration_s: float
     error: Optional[str] = None
     raw: Optional[Dict[str, Any]] = None
-    theme: Optional[Dict[str, str]] = None
+    theme: Optional[Dict[str, Any]] = None
+
 
 class ThemeRequest(BaseModel):
     theme: str
     intensity: str
 
+
+class OverrideRequest(BaseModel):
+    topic: str
+    answer: str
+
+
+# ----------------------------
+# Auth
+# ----------------------------
 def _require_auth(request: Request) -> None:
     if not MS_API_KEY:
         raise HTTPException(status_code=500, detail="MS_API_KEY is not set on server")
     key = (request.headers.get("x-api-key", "") or "").strip()
     if key != MS_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+# ----------------------------
+# Utilities
+# ----------------------------
+def _iso_now() -> str:
+    return _dt.datetime.now().isoformat(timespec="seconds")
+
 
 def _read_json(path: Path, default: Any) -> Any:
     try:
@@ -65,188 +99,329 @@ def _read_json(path: Path, default: Any) -> Any:
     except Exception:
         return default
 
-def _load_entry(topic_key: str) -> Dict[str, Any]:
-    db = _read_json(KNOWLEDGE_PATH, {})
-    if not isinstance(db, dict):
-        return {}
-    ent = db.get((topic_key or "").strip().lower())
-    return ent if isinstance(ent, dict) else {}
 
-def _has_wikipedia_source(ent: Dict[str, Any]) -> bool:
+def _write_json_atomic(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _domain_from_url(u: str) -> str:
     try:
-        srcs = ent.get("sources") or []
-        if not isinstance(srcs, list):
-            return False
-        for s in srcs:
-            s = (s or "")
-            if "wikipedia.org/wiki/" in s:
-                return True
+        from urllib.parse import urlparse
+        d = urlparse(u).netloc.lower()
+        if d.startswith("www."):
+            d = d[4:]
+        return d
     except Exception:
-        return False
-    return False
+        return ""
+
+
+def _normalize_topic(text: str) -> str:
+    s = (text or "").strip()
+
+    m = re.match(r'^\s*\{\s*"text"\s*:\s*"(.*?)"\s*\}\s*$', s)
+    if m:
+        s = (m.group(1) or "").strip()
+
+    s = re.sub(r"^\s*(what is|what's|what are|define|explain)\s+", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"\s+about\s*$", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"^\s*the\s+", "", s, flags=re.IGNORECASE).strip()
+
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"[?!.]+$", "", s).strip()
+    return s
+
+
+def _topic_key(topic: str) -> str:
+    return _normalize_topic(topic).lower()
+
+
+def _already_wrapped(answer: str) -> bool:
+    a = answer or ""
+    return ("+++ VOX-CAST" in a) and ("+++ END VOX +++" in a)
+
 
 def _looks_low_quality(answer: str) -> bool:
     a = (answer or "").strip().lower()
     if not a:
         return True
 
-    bad_snips = [
+    bad_phrases = [
         "all rights reserved",
-        "close global navigation",
-        "log in / sign up",
-        "redeem code",
-        "account management",
+        "close global navigation menu",
+        "sign in / sign up",
         "captcha",
         "we apologize for the inconvenience",
         "your activity and behavior on this site made us think that you are a bot",
         "i do not have a taught answer for that yet",
         "i have also marked this topic for deeper research",
-        "ask using a normal topic name instead",
-        "refusing (junk topic)",
-        "i tried researching that, but the sources i found were too low-quality to save as an answer",
-        "try asking again with a little more detail",
         "web search returned no results or could not be fetched",
+        "i couldn't save a clean answer yet",
+        "try asking with a little more detail",
+        "refusing (junk topic)",
+        "emotes icons photomode seasons skins styles utility updates",
     ]
-    for b in bad_snips:
-        if b in a:
+    for p in bad_phrases:
+        if p in a:
             return True
 
-    if "may refer to" in a:
-        return True
-    if a.endswith("sources:\n-") or a.endswith("sources:\n- "):
+    # length gate (we will bypass this for taught_by_user entries)
+    if len(a) < 80:
         return True
 
     return False
 
-def _is_protected_entry(ent: Dict[str, Any]) -> bool:
-    """
-    Prevents flip-flopping back to random web/news pages once we have a decent saved answer.
-    """
+
+def _entry_has_bad_sources(entry: Dict[str, Any]) -> bool:
+    if bool(entry.get("taught_by_user")):
+        return False
+    srcs = entry.get("sources") or []
+    if not isinstance(srcs, list):
+        return False
+    for s in srcs:
+        if not isinstance(s, str):
+            continue
+        d = _domain_from_url(s)
+        if not d:
+            continue
+        if d in BAD_SOURCE_DOMAINS or d.endswith(".fandom.com"):
+            return True
+    return False
+
+
+def _get_saved_entry(topic_k: str) -> Optional[Dict[str, Any]]:
+    db = _read_json(KNOWLEDGE_PATH, {})
+    if not isinstance(db, dict):
+        return None
+    entry = db.get(topic_k)
+    if not isinstance(entry, dict):
+        return None
+
+    ans = (entry.get("answer") or "").strip()
+    if not ans:
+        return None
+
+    # IMPORTANT FIX:
+    # If the user taught/overrode it, trust it even if it's short (like "Aaron").
+    if bool(entry.get("taught_by_user")):
+        return entry
+
+    # Otherwise apply quality filters for auto-learned stuff
+    if _looks_low_quality(ans):
+        return None
+    if _entry_has_bad_sources(entry):
+        return None
+
+    return entry
+
+
+def _store_entry(topic_k: str, answer: str, sources: Optional[List[str]], notes: str, confidence: float, taught_by_user: bool = False) -> None:
+    db = _read_json(KNOWLEDGE_PATH, {})
+    if not isinstance(db, dict):
+        db = {}
+
+    existing = db.get(topic_k)
+    if not isinstance(existing, dict):
+        existing = {}
+
+    # Protect user overrides
+    if bool(existing.get("taught_by_user")) and not taught_by_user:
+        try:
+            ex_conf = float(existing.get("confidence", 0.0) or 0.0)
+        except Exception:
+            ex_conf = 0.0
+        if ex_conf >= 0.85 and (existing.get("answer") or "").strip():
+            db[topic_k] = existing
+            _write_json_atomic(KNOWLEDGE_PATH, db)
+            return
+
+    existing_sources = existing.get("sources")
+    if not isinstance(existing_sources, list):
+        existing_sources = []
+    merged_sources: List[str] = []
+    for s in (existing_sources + (sources or [])):
+        s2 = (s or "").strip()
+        if s2 and s2 not in merged_sources:
+            merged_sources.append(s2)
+
     try:
-        if not isinstance(ent, dict):
-            return False
-
-        if ent.get("taught_by_user") is True:
-            return True
-
-        c = float(ent.get("confidence", 0.0) or 0.0)
-        if c >= 0.80:
-            return True
-
-        # Treat Wikipedia definitions as "curated enough" once present + not junk
-        if _has_wikipedia_source(ent):
-            ans = (ent.get("answer") or "").strip()
-            if ans and not _looks_low_quality(ans):
-                return True
+        old_c = float(existing.get("confidence", 0.0) or 0.0)
     except Exception:
+        old_c = 0.0
+
+    entry = dict(existing)
+    entry["answer"] = (answer or "").strip()
+    entry["taught_by_user"] = bool(taught_by_user)
+    entry["notes"] = notes
+    entry["updated"] = _iso_now()
+    entry["sources"] = merged_sources
+    entry["confidence"] = max(old_c, float(confidence))
+
+    db[topic_k] = entry
+    _write_json_atomic(KNOWLEDGE_PATH, db)
+
+
+def _wiki_search_title(q: str) -> Optional[str]:
+    try:
+        r = requests.get(
+            "https://en.wikipedia.org/w/api.php",
+            params={"action": "opensearch", "search": q, "limit": 1, "namespace": 0, "format": "json"},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if not isinstance(data, list) or len(data) < 2:
+            return None
+        titles = data[1]
+        if isinstance(titles, list) and titles:
+            t = (titles[0] or "").strip()
+            return t or None
+        return None
+    except Exception:
+        return None
+
+
+def _wiki_summary(title: str) -> Optional[Tuple[str, str]]:
+    try:
+        safe = requests.utils.quote(title.replace(" ", "_"))
+        r = requests.get(f"https://en.wikipedia.org/api/rest_v1/page/summary/{safe}", timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        extract = (data.get("extract") or "").strip()
+        page_url = ""
+        cu = data.get("content_urls") or {}
+        desk = cu.get("desktop") or {}
+        page_url = (desk.get("page") or "").strip()
+        if extract:
+            return extract, page_url
+        return None
+    except Exception:
+        return None
+
+
+def _format_simple(topic: str, definition: str, url: str) -> str:
+    t = (topic or "").strip()
+    out: List[str] = []
+    out.append(t.upper() if t else "ANSWER")
+    out.append("")
+    out.append("Definition:")
+    out.append(f"- {definition.strip()}")
+    out.append("")
+    out.append("Sources:")
+    out.append(f"- Wikipedia: {url}" if url else "- Wikipedia")
+    return "\n".join(out).strip()
+
+
+def _load_brain_module():
+    global _BRAIN_MOD
+    if _BRAIN_MOD is not None:
+        return _BRAIN_MOD
+    if not BRAIN_PATH.exists():
+        raise RuntimeError(f"brain.py not found at {BRAIN_PATH}")
+
+    spec = importlib.util.spec_from_file_location("machinespirit_brain", str(BRAIN_PATH))
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Failed to load brain.py module spec")
+
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+    _BRAIN_MOD = mod
+    return mod
+
+
+def _brain_weblearn(topic: str, avoid_domains: List[str]) -> Optional[Tuple[str, List[str]]]:
+    b = _load_brain_module()
+    if not hasattr(b, "web_learn_topic"):
+        return None
+
+    ok, ans, sources, chosen_url = b.web_learn_topic(topic, forced_url="", avoid_domains=avoid_domains)  # type: ignore[misc]
+    if not ok:
+        return None
+
+    ans_s = (ans or "").strip()
+    if _looks_low_quality(ans_s):
+        if chosen_url:
+            d = _domain_from_url(chosen_url)
+            if d and d not in avoid_domains:
+                avoid_domains.append(d)
+        return None
+
+    srcs = [s for s in (sources or []) if isinstance(s, str)]
+    return ans_s, srcs
+
+
+def _is_probably_technical(topic: str) -> bool:
+    t = (topic or "").lower()
+    tech_words = [
+        "rfc", "subnet", "cidr", "bgp", "dns", "dhcp", "tcp", "udp", "ip", "ipv4", "ipv6",
+        "nat", "snat", "dnat", "arp", "icmp", "routing", "prefix", "asn", "autonomous system",
+        "linux", "systemd", "docker", "nginx", "http", "https",
+    ]
+    return any(w in t for w in tech_words)
+
+
+def _learn_and_store(topic_raw: str) -> bool:
+    topic = _normalize_topic(topic_raw)
+    k = _topic_key(topic)
+    if not k:
         return False
 
+    if _get_saved_entry(k) is not None:
+        return True
+
+    # Special: do NOT auto-web learn "my name"
+    if k in ("my name", "what is my name", "name"):
+        return False
+
+    # Wikipedia-first for general topics
+    if not _is_probably_technical(topic):
+        title = _wiki_search_title(topic)
+        if title:
+            ws = _wiki_summary(title)
+            if ws:
+                extract, page_url = ws
+                ans = _format_simple(title, extract, page_url)
+                if not _looks_low_quality(ans):
+                    _store_entry(
+                        k,
+                        ans,
+                        sources=[page_url] if page_url else [],
+                        notes="auto-learn (wikipedia-first)",
+                        confidence=0.70,
+                        taught_by_user=False,
+                    )
+                    return True
+
+    # brain web learn fallback
+    avoid = ["networklessons.com", "indy100.com", "fandom.com", "wikia.com", "fallout.fandom.com"]
+    for _ in range(3):
+        got = _brain_weblearn(topic, avoid)
+        if got:
+            ans2, srcs2 = got
+            _store_entry(
+                k,
+                ans2,
+                sources=srcs2,
+                notes="auto-learn (brain web learn)",
+                confidence=0.72,
+                taught_by_user=False,
+            )
+            return True
+
     return False
 
-def _brain_args() -> List[str]:
-    return [PYTHON_BIN, str(BRAIN_PATH)]
 
-def _normalize_topic(text: str) -> str:
-    s = (text or "").strip()
-    s = re.sub(r"^\s*(what is|what's|define|explain)\s+", "", s, flags=re.IGNORECASE).strip()
-    s = re.sub(r"[?!.]+$", "", s).strip()
-    return s
-
-def _clean_repl_stdout(raw: str) -> str:
-    if not raw:
-        return ""
-
-    prompt_re = re.compile(r"^\s*>\s*(.*)$")
-    lines = raw.splitlines()
-
-    topic = ""
-    body: List[str] = []
-    saw_topic = False
-
-    for line in lines:
-        s = line.strip()
-
-        if s.startswith("Machine Spirit brain online."):
-            continue
-
-        pm = prompt_re.match(line)
-        if pm:
-            prompt_text = (pm.group(1) or "").strip()
-
-            if "shutting down" in prompt_text.lower():
-                break
-
-            # ignore command prompt as "topic"
-            if (not saw_topic) and prompt_text.startswith("/"):
-                continue
-
-            if (not saw_topic) and prompt_text:
-                topic = prompt_text
-                saw_topic = True
-                continue
-
-            break
-
-        if "shutting down" in s.lower():
-            continue
-
-        body.append(line.rstrip())
-
-    while body and body[0].strip() == "":
-        body.pop(0)
-
-    body_text = "\n".join(body).strip()
-    if topic and body_text:
-        return f"{topic}\n\n{body_text}".strip()
-    if topic:
-        return topic.strip()
-    return body_text.strip()
-
-async def _run_brain_once(line: str, timeout_s: int) -> Dict[str, Any]:
-    LOCK_PATH.touch(exist_ok=True)
-
-    t0 = time.time()
-    proc = await asyncio.create_subprocess_exec(
-        *_brain_args(),
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=str(REPO_DIR),
-    )
-
-    try:
-        out_b, err_b = await asyncio.wait_for(
-            proc.communicate(input=(line + "\n").encode("utf-8")),
-            timeout=max(5, int(timeout_s)),
-        )
-    except asyncio.TimeoutError:
-        proc.kill()
-        raise HTTPException(status_code=504, detail="brain.py timed out")
-
-    dt = time.time() - t0
-    stdout = (out_b or b"").decode("utf-8", errors="replace")
-    stderr = (err_b or b"").decode("utf-8", errors="replace")
-
-    return {
-        "duration_s": dt,
-        "stdout": stdout,
-        "stderr": stderr,
-        "args": _brain_args(),
-        "exit_code": int(proc.returncode or 0),
-    }
-
-async def _brain_answer(topic: str, timeout_s: int) -> Tuple[str, Dict[str, Any]]:
-    raw_res = await _run_brain_once(topic, timeout_s=timeout_s)
-    cleaned = _clean_repl_stdout(raw_res.get("stdout", ""))
-    return cleaned, raw_res
-
-async def _auto_weblearn(topic: str, timeout_s: int) -> None:
-    t = max(10, min(60, int(timeout_s) * 2))
-    await _run_brain_once(f"/weblearn {topic}", timeout_s=t)
-
+# ----------------------------
+# Routes
+# ----------------------------
 @app.get("/")
 async def root() -> Dict[str, Any]:
     return {"ok": True, "app": APP_NAME, "version": VERSION}
+
 
 @app.get("/health")
 async def health(request: Request) -> Dict[str, Any]:
@@ -258,21 +433,19 @@ async def health(request: Request) -> Dict[str, Any]:
         "version": VERSION,
         "repo_dir": str(REPO_DIR),
         "brain_path": str(BRAIN_PATH),
-        "python": PYTHON_BIN,
+        "knowledge_path": str(KNOWLEDGE_PATH),
         "auto_weblearn": AUTO_WEBLEARN,
         "theme": {"theme": cfg.theme, "intensity": cfg.intensity},
     }
+
 
 @app.get("/theme")
 async def get_theme(request: Request) -> Dict[str, Any]:
     _require_auth(request)
     cfg = load_theme()
-    return {
-        "ok": True,
-        "theme": cfg.theme,
-        "intensity": cfg.intensity,
-        "choices": ui_intensity_choices(),
-    }
+    choices = ui_intensity_choices()
+    return {"ok": True, "theme": cfg.theme, "intensity": cfg.intensity, "choices": choices}
+
 
 @app.post("/theme")
 async def set_theme(request: Request, payload: ThemeRequest) -> Dict[str, Any]:
@@ -280,98 +453,115 @@ async def set_theme(request: Request, payload: ThemeRequest) -> Dict[str, Any]:
     cfg = save_theme(payload.theme, payload.intensity)
     return {"ok": True, "theme": cfg.theme, "intensity": cfg.intensity}
 
+
+@app.post("/override")
+async def override_answer(request: Request, payload: OverrideRequest) -> Dict[str, Any]:
+    _require_auth(request)
+
+    topic = _normalize_topic(payload.topic)
+    k = _topic_key(topic)
+    ans = (payload.answer or "").strip()
+
+    if not k:
+        raise HTTPException(status_code=422, detail="No topic to override")
+    if not ans:
+        raise HTTPException(status_code=422, detail="Missing answer")
+
+    _store_entry(
+        k,
+        ans,
+        sources=[],
+        notes="override via UI/API conversation",
+        confidence=0.90,
+        taught_by_user=True,
+    )
+    return {"ok": True, "topic": k}
+
+
 @app.post("/ask", response_model=AskResponse)
 async def ask(request: Request, req: AskRequest) -> AskResponse:
     _require_auth(request)
-
     t0 = time.time()
-    text = (req.text or "").strip()
-    if not text:
+
+    raw_text = (req.text or "").strip()
+    if not raw_text:
         raise HTTPException(status_code=422, detail="text is required")
 
-    # /theme commands in chat
-    if text.lower().startswith("/theme"):
-        parts = text.split()
-        if len(parts) == 1 or (len(parts) == 2 and parts[1].lower() == "status"):
-            cfg = load_theme()
-            choices = ui_intensity_choices()
-            msg = (
-                f"Theme is currently: {cfg.theme} ({cfg.intensity})\n\n"
-                "Set it like:\n"
-                "- /theme off\n"
-                "- /theme set Warhammer 40k light\n"
-                "- /theme set Warhammer 40k heavy\n\n"
-                f"{choices['light']['label']} - {choices['light']['desc']}\n"
-                f"{choices['heavy']['label']} - {choices['heavy']['desc']}\n"
+    topic = _normalize_topic(raw_text)
+    k = _topic_key(topic)
+    if not k:
+        raise HTTPException(status_code=422, detail="Could not normalize topic")
+
+    # 1) Saved answer first
+    entry = _get_saved_entry(k)
+    if entry:
+        ans = (entry.get("answer") or "").strip()
+
+        # Make identity answers nicer if they are short like "Aaron"
+        if k == "my name" and len(ans) <= 40 and "\n" not in ans:
+            ans = f"Your name is {ans}."
+
+        cfg = load_theme()
+        themed = ans if _already_wrapped(ans) else apply_theme(ans, topic=topic, cfg=cfg)
+        return AskResponse(
+            ok=True,
+            topic=k,
+            answer=themed,
+            duration_s=time.time() - t0,
+            error=None,
+            raw=None,
+            theme={"theme": cfg.theme, "intensity": cfg.intensity, "saved": True},
+        )
+
+    # Special: name questions (only if not taught yet)
+    if k in ("my name", "what is my name", "name"):
+        cfgm = load_theme()
+        msg = "I don’t know your name yet. Tell me: “my name is Aaron” (or whatever you want), and I’ll remember it."
+        themedm = apply_theme(msg, topic=topic, cfg=cfgm)
+        return AskResponse(
+            ok=True,
+            topic="my name",
+            answer=themedm,
+            duration_s=time.time() - t0,
+            error=None,
+            raw=None,
+            theme={"theme": cfgm.theme, "intensity": cfgm.intensity},
+        )
+
+    # 2) Auto-learn if enabled
+    if AUTO_WEBLEARN:
+        async with _LEARN_LOCK:
+            await asyncio.to_thread(_learn_and_store, topic)
+
+        entry2 = _get_saved_entry(k)
+        if entry2:
+            ans2 = (entry2.get("answer") or "").strip()
+            cfg2 = load_theme()
+            themed2 = ans2 if _already_wrapped(ans2) else apply_theme(ans2, topic=topic, cfg=cfg2)
+            return AskResponse(
+                ok=True,
+                topic=k,
+                answer=themed2,
+                duration_s=time.time() - t0,
+                error=None,
+                raw=None,
+                theme={"theme": cfg2.theme, "intensity": cfg2.intensity, "learned": True},
             )
-            return AskResponse(ok=True, topic="theme", answer=msg.strip(), duration_s=time.time() - t0,
-                               theme={"theme": cfg.theme, "intensity": cfg.intensity})
 
-        if len(parts) >= 2 and parts[1].lower() in ("off", "none", "disable", "disabled"):
-            cfg = save_theme("none", "light")
-            return AskResponse(ok=True, topic="theme", answer="Theme disabled.", duration_s=time.time() - t0,
-                               theme={"theme": cfg.theme, "intensity": cfg.intensity})
-
-        if len(parts) >= 3 and parts[1].lower() == "set":
-            intensity = "light"
-            if parts[-1].lower() in ("light", "heavy"):
-                intensity = parts[-1].lower()
-                theme_name = " ".join(parts[2:-1]).strip()
-            else:
-                theme_name = " ".join(parts[2:]).strip()
-
-            if not theme_name:
-                raise HTTPException(status_code=422, detail="Theme name is required (example: /theme set Warhammer 40k light)")
-
-            cfg = save_theme(theme_name, intensity)
-            return AskResponse(ok=True, topic="theme", answer=f"Theme set to: {cfg.theme} ({cfg.intensity}).",
-                               duration_s=time.time() - t0, theme={"theme": cfg.theme, "intensity": cfg.intensity})
-
-        raise HTTPException(status_code=422, detail="Theme command format: /theme, /theme off, or /theme set <name> [light|heavy]")
-
-    normalized = _normalize_topic(text)
-    topic_key = normalized.strip().lower()
-
-    # If we already have a protected saved answer, return it (prevents flip-flop to random news pages)
-    existing = _load_entry(topic_key)
-    if _is_protected_entry(existing):
-        saved = (existing.get("answer") or "").strip()
-        if saved:
-            cfg = load_theme()
-            themed = apply_theme(saved, topic=normalized, cfg=cfg)
-            return AskResponse(ok=True, topic=topic_key, answer=themed, duration_s=time.time() - t0,
-                               theme={"theme": cfg.theme, "intensity": cfg.intensity})
-
-    # Ask brain normally
-    cleaned, raw_res = await _brain_answer(normalized, timeout_s=int(req.timeout_s or 25))
-
-    # If junk and auto-weblearn on: learn then ask again
-    if _looks_low_quality(cleaned) and AUTO_WEBLEARN:
-        try:
-            await _auto_weblearn(normalized, timeout_s=int(req.timeout_s or 25))
-            cleaned2, raw_res2 = await _brain_answer(normalized, timeout_s=int(req.timeout_s or 25))
-            if cleaned2 and not _looks_low_quality(cleaned2):
-                cleaned = cleaned2
-                raw_res = raw_res2
-        except Exception:
-            pass
-
-    if _looks_low_quality(cleaned):
-        cleaned = (
-            f"{normalized}\n\n"
-            "I don’t have a clean answer stored yet.\n\n"
-            "Fix it by replying in the UI with:\n"
-            "  no its: <your corrected answer>\n"
-        ).strip()
-
-    cfg = load_theme()
-    themed = apply_theme(cleaned, topic=normalized, cfg=cfg)
-
+    # 3) Fallback
+    cfg3 = load_theme()
+    fallback = (
+        f"{topic}\n\n"
+        "I couldn't save a clean answer yet.\n\n"
+        "Try asking with a little more detail (example: add 'video game' or 'computer hardware')."
+    )
+    themed3 = apply_theme(fallback, topic=topic, cfg=cfg3)
     return AskResponse(
         ok=True,
-        topic=topic_key,
-        answer=themed,
-        duration_s=float(raw_res.get("duration_s", time.time() - t0)),
-        raw=(raw_res if req.raw else None),
-        theme={"theme": cfg.theme, "intensity": cfg.intensity},
+        topic=k,
+        answer=themed3,
+        duration_s=time.time() - t0,
+        error=None,
+        raw=None,
+        theme={"theme": cfg3.theme, "intensity": cfg3.intensity},
     )
