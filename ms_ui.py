@@ -66,10 +66,12 @@ def _api_headers() -> Dict[str, str]:
 def _normalize_topic(s: str) -> str:
     t = (s or "").strip()
     t = re.sub(r"^\s*(what is|what's|define|explain)\s+", "", t, flags=re.IGNORECASE).strip()
+    t = re.sub(r"[?!.]+$", "", t).strip()
     m = re.match(r'^\s*\{\s*"text"\s*:\s*"(.+)"\s*\}\s*$', t)
     if m:
         t = m.group(1).strip()
         t = re.sub(r"^\s*(what is|what's|define|explain)\s+", "", t, flags=re.IGNORECASE).strip()
+    t = re.sub(r"[?!.]+$", "", t).strip()
     return t
 
 
@@ -763,23 +765,8 @@ HTML_TEMPLATE = r"""<!doctype html>
 
   function normalizeTopic(s){
     let t = (s || "").trim();
-
-    // normalize “smart” quotes from phones
-    t = t.replace(/[’`]/g, "'").replace(/[“”]/g, '"');
-
-    // handle pasted JSON like {"text":"subnet mask"}
-    let m = t.match(/^\s*\{\s*\"text\"\s*:\s*\"([\s\S]+)\"\s*\}\s*$/i);
-    if(m && m[1]) t = m[1].trim();
-
-    // strip common question framing
-    t = t.replace(/^\s*(what is|what's|whats|define|explain)\s+/i, "").trim();
-
-    // strip wrapping quotes and trailing punctuation
-    t = t.replace(/^[\s"'`]+|[\s"'`]+$/g, "").trim();
+    t = t.replace(/^\s*(what is|what's|define|explain)\s+/i, "").trim();
     t = t.replace(/[?!.]+$/g, "").trim();
-
-    // collapse whitespace
-    t = t.replace(/\s+/g, " ").trim();
     return t;
   }
 
@@ -815,26 +802,27 @@ HTML_TEMPLATE = r"""<!doctype html>
   }
 
   function extractCorrection(s){
-    let t = (s || "").trim();
-    if(!t) return "";
+    // normalize smart quotes/dashes so “it’s” works like "it's"
+    const t = (s || "")
+      .replace(/[“”]/g, '"')
+      .replace(/[’]/g, "'")
+      .replace(/[–—]/g, "-")
+      .trim();
 
-    // normalize “smart” quotes from phones
-    t = t.replace(/[’`]/g, "'").replace(/[“”]/g, '"');
-
-    // 1) no it's actually ... / no its actually ... (with or without colon)
-    let m = t.match(/^\s*(?:no|nah|nope)\s*(?:,|\s)\s*(?:it\s+is|it'?s|its)?\s*(?:actually|really)\s*(?::|-)?\s*([\s\S]+)$/i);
+    // no its: ... / no it's: ... / no it is: ...
+    let m = t.match(/^(?:no|nah|nope)\s*(?:,|\s)*\s*(?:(?:it\s*is)|(?:it'?s)|(?:its))?\s*(?:actually)?\s*[:\-]\s*([\s\S]+)$/i);
     if(m && m[1]) return m[1].trim();
 
-    // 2) no it's: ... / no its: ... / no it is: ...  (no “actually”)
-    m = t.match(/^\s*(?:no|nah|nope)\s*(?:,|\s)\s*(?:it\s+is|it'?s|its)?\s*(?::|-)\s*([\s\S]+)$/i);
+    // no it's actually <answer> (no colon)
+    m = t.match(/^(?:no|nah|nope)\s*(?:,|\s)*\s*(?:(?:it\s*is)|(?:it'?s)|(?:its))?\s*actually\s+([\s\S]+)$/i);
     if(m && m[1]) return m[1].trim();
 
-    // 3) correction: ... / actually: ...
-    m = t.match(/^\s*(?:correction|actually)\s*(?::|-)\s*([\s\S]+)$/i);
+    // that's wrong, it's <answer>
+    m = t.match(/^that'?s\s+wrong\s*(?:,|\s)*(?:(?:it\s*is)|(?:it'?s)|(?:its))?\s*[:\-]?\s*([\s\S]+)$/i);
     if(m && m[1]) return m[1].trim();
 
-    // 4) that's wrong, it's ... / thats wrong: ...
-    m = t.match(/^\s*that'?s\s+wrong\s*(?:,|\s)\s*(?:it\s+is|it'?s|its)?\s*(?::|-)?\s*([\s\S]+)$/i);
+    // correction: <answer>
+    m = t.match(/^correction\s*[:\-]\s*([\s\S]+)$/i);
     if(m && m[1]) return m[1].trim();
 
     return "";
