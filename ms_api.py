@@ -99,6 +99,13 @@ def _looks_low_quality(answer: str) -> bool:
         "captcha",
         "we apologize for the inconvenience",
         "your activity and behavior on this site made us think that you are a bot",
+        "i do not have a taught answer for that yet",
+        "i have also marked this topic for deeper research",
+        "ask using a normal topic name instead",
+        "refusing (junk topic)",
+        "i tried researching that, but the sources i found were too low-quality to save as an answer",
+        "try asking again with a little more detail",
+        "web search returned no results or could not be fetched",
     ]
     for b in bad_snips:
         if b in a:
