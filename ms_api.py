@@ -6,30 +6,36 @@ import json
 import os
 import re
 import time
-import urllib.parse
+import datetime as _dt
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 from ms_theme import apply_theme, load_theme, save_theme, ui_intensity_choices
 
 APP_NAME = "MachineSpirit API"
-VERSION = "0.3.12"
+VERSION = "0.3.9"
 
 BASE_DIR = Path(__file__).resolve().parent
 REPO_DIR = Path(os.environ.get("MS_REPO_DIR", str(BASE_DIR))).resolve()
 BRAIN_PATH = Path(os.environ.get("MS_BRAIN_PATH", str(REPO_DIR / "brain.py"))).resolve()
+
 PYTHON_BIN = os.environ.get("MS_PYTHON", "/usr/bin/python3")
-
-KNOWLEDGE_PATH = Path(os.environ.get("MS_KNOWLEDGE_PATH", str(REPO_DIR / "data" / "local_knowledge.json"))).resolve()
-
 MS_API_KEY = (os.environ.get("MS_API_KEY", "") or "").strip()
+
+LOCK_PATH = Path(os.environ.get("MS_LOCK_PATH", str(REPO_DIR / ".machinespirit.lock")))
+KNOWLEDGE_PATH = Path(
+    os.environ.get("MS_KNOWLEDGE_PATH", str(REPO_DIR / "data" / "local_knowledge.json"))
+).resolve()
+
 AUTO_WEBLEARN = (os.environ.get("MS_AUTO_WEBLEARN", "1").strip().lower() not in ("0", "false", "no", "off"))
 
 app = FastAPI(title=APP_NAME, version=VERSION)
+
+# single-process concurrency guard (uvicorn can run multiple workers, but your systemd unit uses 1)
+_BRAIN_LOCK = asyncio.Lock()
 
 
 # ----------------------------
@@ -56,11 +62,6 @@ class ThemeRequest(BaseModel):
     intensity: str
 
 
-class OverrideRequest(BaseModel):
-    topic: str
-    answer: str
-
-
 # ----------------------------
 # Auth
 # ----------------------------
@@ -73,13 +74,8 @@ def _require_auth(request: Request) -> None:
 
 
 # ----------------------------
-# Small utils
+# JSON helpers
 # ----------------------------
-def _iso_now() -> str:
-    import datetime as dt
-    return dt.datetime.now().isoformat(timespec="seconds")
-
-
 def _read_json(path: Path, default: Any) -> Any:
     try:
         if not path.exists():
@@ -96,115 +92,55 @@ def _write_json_atomic(path: Path, data: Any) -> None:
     os.replace(tmp, path)
 
 
+def _iso_now() -> str:
+    return _dt.datetime.now().isoformat(timespec="seconds")
+
+
+# ----------------------------
+# Normalization + quality checks
+# ----------------------------
 def _normalize_topic(text: str) -> str:
     s = (text or "").strip()
 
-    # If someone accidentally sends JSON string like {"text":"subnet mask"}
+    # handle accidental JSON-ish inputs like {"text":"subnet mask"}
     m = re.match(r'^\s*\{\s*"text"\s*:\s*"(.+?)"\s*\}\s*$', s)
     if m:
-        s = m.group(1)
+        s = m.group(1).strip()
 
-    s = re.sub(r"^\s*(what is|what's|what are|define|explain)\s+", "", s, flags=re.IGNORECASE).strip()
-    s = re.sub(r"[?!.]+$", "", s).strip()
+    s = re.sub(r"^\s*(what is|what's|define|explain|tell me|give me)\s+", "", s, flags=re.IGNORECASE).strip()
     s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"[?!.]+$", "", s).strip()
     return s
 
 
-def _topic_key(topic: str) -> str:
-    return _normalize_topic(topic).lower()
-
-
-def _looks_low_quality(ans: str) -> bool:
-    a = (ans or "").strip().lower()
+def _looks_low_quality(answer: str) -> bool:
+    a = (answer or "").strip().lower()
     if not a:
         return True
 
-    bad_snips = [
-        "all rights reserved",
-        "close global navigation menu",
-        "captcha",
-        "we apologize for the inconvenience",
-        "refusing (junk topic)",
-        "i couldn't save a clean answer yet",
-        "i tried researching that, but the sources i found were too low-quality",
-        "machine spirit: i do not have a taught answer for that yet",
-    ]
-    for b in bad_snips:
-        if b in a:
-            return True
+    # “I couldn't save a clean answer yet”
+    if "couldn't save a clean answer" in a:
+        return True
+    if "i tried researching that" in a:
+        return True
+    if "try asking with a little more detail" in a:
+        return True
+    if "i do not have a taught answer for that yet" in a:
+        return True
 
-    # huge “nav dump” smell
-    if a.count("menu") >= 3 and len(a) > 500:
+    # obvious scrape junk
+    if "captcha" in a:
+        return True
+    if "all rights reserved" in a:
+        return True
+    if "close global navigation menu" in a:
         return True
 
     return False
 
 
 # ----------------------------
-# Brain subprocess helpers
-# ----------------------------
-def _brain_args() -> List[str]:
-    return [PYTHON_BIN, str(BRAIN_PATH)]
-
-
-async def _run_brain_one_line(line: str, timeout_s: int) -> Dict[str, Any]:
-    t0 = time.time()
-    proc = await asyncio.create_subprocess_exec(
-        *_brain_args(),
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=str(REPO_DIR),
-    )
-    try:
-        out_b, err_b = await asyncio.wait_for(
-            proc.communicate(input=(line + "\n").encode("utf-8")),
-            timeout=timeout_s,
-        )
-    except asyncio.TimeoutError:
-        proc.kill()
-        raise HTTPException(status_code=504, detail="brain.py timed out")
-
-    dt = time.time() - t0
-    stdout = (out_b or b"").decode("utf-8", errors="replace")
-    stderr = (err_b or b"").decode("utf-8", errors="replace")
-    rc = int(proc.returncode or 0)
-    return {"exit_code": rc, "duration_s": dt, "stdout": stdout, "stderr": stderr}
-
-
-def _clean_repl_stdout(raw: str) -> str:
-    """
-    Clean brain REPL stdout into a usable answer.
-    Keeps the printed content after the first prompt line.
-    """
-    if not raw:
-        return ""
-    lines = raw.splitlines()
-
-    # drop banner lines
-    out: List[str] = []
-    for ln in lines:
-        s = ln.strip()
-        if s.startswith("Machine Spirit brain online."):
-            continue
-        out.append(ln.rstrip())
-
-    # Try to remove the first prompt line if present
-    # Example:
-    # > topic
-    # ANSWER...
-    if out and re.match(r"^\s*>\s*", out[0]):
-        out = out[1:]
-
-    # remove trailing prompt echoes (rare)
-    while out and re.match(r"^\s*>\s*", out[-1]):
-        out.pop()
-
-    return "\n".join(out).strip()
-
-
-# ----------------------------
-# Knowledge helpers
+# Stable knowledge (local_knowledge.json)
 # ----------------------------
 def _get_entry(topic_key: str) -> Optional[Dict[str, Any]]:
     db = _read_json(KNOWLEDGE_PATH, {})
@@ -214,89 +150,203 @@ def _get_entry(topic_key: str) -> Optional[Dict[str, Any]]:
     return e if isinstance(e, dict) else None
 
 
-def _save_entry(topic_key: str, entry: Dict[str, Any]) -> None:
+def _find_stable_answer(topic_key: str) -> Optional[str]:
+    # try a few keys (helps when punctuation or wording differs)
+    keys = []
+    t = (topic_key or "").strip().lower()
+    if t:
+        keys.append(t)
+        keys.append(t.replace("  ", " "))
+        keys.append(re.sub(r"\s+", " ", t).strip())
+        keys.append(t.rstrip("?").strip())
+
+    seen = set()
+    for k in keys:
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        e = _get_entry(k)
+        if not e:
+            continue
+        ans = e.get("answer")
+        if isinstance(ans, str) and ans.strip():
+            return ans.strip()
+    return None
+
+
+def _override_knowledge(topic: str, new_answer: str, note: str = "") -> Tuple[bool, str]:
+    topic_k = _normalize_topic(topic).lower().strip()
+    ans = (new_answer or "").strip()
+    if not topic_k:
+        return False, "missing topic"
+    if not ans:
+        return False, "missing answer"
+
     db = _read_json(KNOWLEDGE_PATH, {})
     if not isinstance(db, dict):
         db = {}
-    db[topic_key] = entry
+
+    entry = db.get(topic_k)
+    if not isinstance(entry, dict):
+        entry = {}
+
+    entry["answer"] = ans
+    entry["taught_by_user"] = True
+    entry["notes"] = note or "override via API"
+    entry["updated"] = _iso_now()
+
+    try:
+        old_c = float(entry.get("confidence", 0.0) or 0.0)
+    except Exception:
+        old_c = 0.0
+    entry["confidence"] = max(old_c, 0.90)
+
+    if not isinstance(entry.get("sources"), list):
+        entry["sources"] = []
+
+    db[topic_k] = entry
     _write_json_atomic(KNOWLEDGE_PATH, db)
-
-
-def _entry_is_good(e: Dict[str, Any]) -> bool:
-    ans = (e.get("answer") or "").strip()
-    if not ans:
-        return False
-    if _looks_low_quality(ans):
-        return False
-    try:
-        conf = float(e.get("confidence", 0.0) or 0.0)
-    except Exception:
-        conf = 0.0
-    taught = bool(e.get("taught_by_user", False))
-    # user-taught always wins; otherwise require decent confidence
-    return taught or conf >= 0.70
+    return True, topic_k
 
 
 # ----------------------------
-# Wikipedia fallback (for general “anything” mode)
+# Local facts router (NO WEB)
 # ----------------------------
-def _wiki_opensearch(q: str) -> Optional[str]:
-    try:
-        url = "https://en.wikipedia.org/w/api.php"
-        params = {"action": "opensearch", "search": q, "limit": 1, "namespace": 0, "format": "json"}
-        r = requests.get(url, params=params, timeout=8)
-        data = r.json()
-        titles = data[1] if isinstance(data, list) and len(data) >= 2 else []
-        if titles:
-            return str(titles[0])
-    except Exception:
-        return None
+def _local_facts_answer(text: str) -> Optional[Tuple[str, str]]:
+    s = (text or "").strip()
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"[?!.]+$", "", s).strip()
+    s2 = _normalize_topic(s).lower()
+
+    now = _dt.datetime.now()
+
+    def dnum() -> str:
+        return now.strftime("%d").lstrip("0") or "0"
+
+    def hour12() -> str:
+        h = now.strftime("%I").lstrip("0")
+        return h if h else "12"
+
+    # date
+    if s2 in ("date", "today date", "todays date", "today's date", "current date", "what date is it"):
+        ans = (
+            "DATE\n\n"
+            "Definition:\n"
+            f"- Today’s date is {now.strftime('%B')} {dnum()}, {now.strftime('%Y')}.\n\n"
+            "Sources:\n"
+            "- local system clock\n"
+        )
+        return ("date", ans)
+
+    # day
+    if s2 in ("day", "day of week", "day of the week", "what day is it", "what day is it today"):
+        ans = (
+            "DAY OF WEEK\n\n"
+            "Definition:\n"
+            f"- Today is {now.strftime('%A')}, {now.strftime('%B')} {dnum()}, {now.strftime('%Y')}.\n\n"
+            "Sources:\n"
+            "- local system clock\n"
+        )
+        return ("day", ans)
+
+    # time
+    if s2 in ("time", "current time", "what time is it", "what is the time"):
+        tz = (now.strftime("%Z") or "").strip()
+        suffix = f" {tz}" if tz else ""
+        ans = (
+            "TIME\n\n"
+            "Definition:\n"
+            f"- It’s {hour12()}:{now.strftime('%M')} {now.strftime('%p')}{suffix} right now.\n\n"
+            "Sources:\n"
+            "- local system clock\n"
+        )
+        return ("time", ans)
+
     return None
 
 
-def _wiki_summary(title: str) -> Optional[Tuple[str, str]]:
-    try:
-        safe = urllib.parse.quote(title.replace(" ", "_"))
-        url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{safe}"
-        r = requests.get(url, timeout=8, headers={"User-Agent": "MachineSpirit/1.0"})
-        if r.status_code != 200:
-            return None
-        j = r.json()
-        extract = (j.get("extract") or "").strip()
-        page = ""
+# ----------------------------
+# Brain subprocess helpers
+# ----------------------------
+def _brain_args() -> List[str]:
+    return [PYTHON_BIN, str(BRAIN_PATH)]
+
+
+def _clean_repl_stdout(raw: str) -> str:
+    if not raw:
+        return ""
+
+    prompt_re = re.compile(r"^\s*>\s*(.*)$")
+    lines = raw.splitlines()
+
+    topic = ""
+    body: List[str] = []
+    saw_topic = False
+
+    for line in lines:
+        s = line.strip()
+
+        if s.startswith("Machine Spirit brain online."):
+            continue
+
+        pm = prompt_re.match(line)
+        if pm:
+            prompt_text = (pm.group(1) or "").strip()
+
+            if "shutting down" in prompt_text.lower():
+                break
+
+            if (not saw_topic) and prompt_text:
+                topic = prompt_text
+                saw_topic = True
+                continue
+
+            break
+
+        if "shutting down" in s.lower():
+            continue
+
+        body.append(line.rstrip())
+
+    while body and body[0].strip() == "":
+        body.pop(0)
+
+    body_text = "\n".join(body).strip()
+    if topic and body_text:
+        return f"{topic}\n\n{body_text}".strip()
+    if body_text:
+        return body_text.strip()
+    return topic.strip()
+
+
+async def _run_brain(line: str, timeout_s: int) -> Dict[str, Any]:
+    LOCK_PATH.touch(exist_ok=True)
+
+    async with _BRAIN_LOCK:
+        t0 = time.time()
+        proc = await asyncio.create_subprocess_exec(
+            *_brain_args(),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(REPO_DIR),
+        )
+
         try:
-            page = j.get("content_urls", {}).get("desktop", {}).get("page", "") or ""
-        except Exception:
-            page = ""
-        if extract:
-            return extract, page
-    except Exception:
-        return None
-    return None
+            out_b, err_b = await asyncio.wait_for(
+                proc.communicate(input=(line + "\n").encode("utf-8")),
+                timeout=max(5, int(timeout_s)),
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            raise HTTPException(status_code=504, detail="brain.py timed out")
 
+        dt = time.time() - t0
+        stdout = (out_b or b"").decode("utf-8", errors="replace")
+        stderr = (err_b or b"").decode("utf-8", errors="replace")
+        rc = int(proc.returncode or 0)
 
-def _make_simple_answer(title: str, extract: str, page_url: str) -> str:
-    lines: List[str] = []
-    lines.append(title.upper())
-    lines.append("")
-    lines.append("Definition:")
-    lines.append(f"- {extract}")
-    lines.append("")
-    lines.append("Sources:")
-    if page_url:
-        lines.append(f"- Wikipedia: {page_url}")
-    else:
-        lines.append(f"- Wikipedia: {title}")
-    return "\n".join(lines).strip()
-
-
-def _wiki_fallback_learn(topic: str) -> Optional[str]:
-    title = _wiki_opensearch(topic) or topic
-    summ = _wiki_summary(title)
-    if not summ:
-        return None
-    extract, page_url = summ
-    return _make_simple_answer(title, extract, page_url)
+        return {"exit_code": rc, "duration_s": dt, "stdout": stdout, "stderr": stderr, "args": _brain_args()}
 
 
 # ----------------------------
@@ -315,8 +365,8 @@ async def health(request: Request) -> Dict[str, Any]:
         "ok": True,
         "app": APP_NAME,
         "version": VERSION,
-        "brain_path": str(BRAIN_PATH),
         "repo_dir": str(REPO_DIR),
+        "brain_path": str(BRAIN_PATH),
         "python": PYTHON_BIN,
         "knowledge_path": str(KNOWLEDGE_PATH),
         "auto_weblearn": AUTO_WEBLEARN,
@@ -332,53 +382,22 @@ async def get_theme(request: Request) -> Dict[str, Any]:
 
 
 @app.post("/theme")
-async def set_theme_endpoint(request: Request, payload: ThemeRequest) -> Dict[str, Any]:
+async def set_theme(request: Request, payload: ThemeRequest) -> Dict[str, Any]:
     _require_auth(request)
     cfg = save_theme(payload.theme, payload.intensity)
     return {"ok": True, "theme": cfg.theme, "intensity": cfg.intensity}
 
 
-@app.post("/override")
-async def override_endpoint(request: Request, payload: OverrideRequest) -> Dict[str, Any]:
-    _require_auth(request)
-
-    topic = _normalize_topic(payload.topic)
-    ans = (payload.answer or "").strip()
-    if not topic:
-        raise HTTPException(status_code=422, detail="topic is required")
-    if not ans:
-        raise HTTPException(status_code=422, detail="answer is required")
-    if len(ans) > 6000:
-        raise HTTPException(status_code=422, detail="answer too long (limit 6000 chars)")
-
-    k = _topic_key(topic)
-    e = _get_entry(k) or {}
-    e["answer"] = ans
-    e["taught_by_user"] = True
-    e["notes"] = "override via UI conversation"
-    e["updated"] = _iso_now()
-    try:
-        old_c = float(e.get("confidence", 0.0) or 0.0)
-    except Exception:
-        old_c = 0.0
-    e["confidence"] = max(old_c, 0.90)
-    if not isinstance(e.get("sources"), list):
-        e["sources"] = []
-
-    _save_entry(k, e)
-    return {"ok": True, "topic": k}
-
-
 @app.post("/ask", response_model=AskResponse)
 async def ask(request: Request, req: AskRequest) -> AskResponse:
     _require_auth(request)
-
     t0 = time.time()
+
     text = (req.text or "").strip()
     if not text:
         raise HTTPException(status_code=422, detail="text is required")
 
-    # theme commands are handled here too (same as before)
+    # 1) Theme chat commands (optional)
     if text.lower().startswith("/theme"):
         parts = text.split()
         if len(parts) == 1 or (len(parts) == 2 and parts[1].lower() == "status"):
@@ -413,73 +432,68 @@ async def ask(request: Request, req: AskRequest) -> AskResponse:
 
         raise HTTPException(status_code=422, detail="Theme command format: /theme, /theme off, or /theme set <name> [light|heavy]")
 
+    # 2) Local facts (date/time/day) — never web
+    lf = _local_facts_answer(text)
+    if lf:
+        topic_k, ans = lf
+        cfg = load_theme()
+        themed = apply_theme(ans.strip(), topic=topic_k, cfg=cfg)
+        return AskResponse(ok=True, topic=topic_k, answer=themed, duration_s=time.time() - t0, theme={"theme": cfg.theme, "intensity": cfg.intensity})
+
+    # 3) Conversational "my name is X" save (works in any client, not just UI)
+    m = re.match(r"^\s*my\s+name\s+is\s+(.+?)\s*$", text, flags=re.IGNORECASE)
+    if m:
+        name = m.group(1).strip().strip('"').strip("'")
+        ok, key_or_err = _override_knowledge("my name", name, note="set via conversation (API)")
+        cfg = load_theme()
+        msg = f'Got it — your name is saved as "{name}".' if ok else f"Could not save name: {key_or_err}"
+        themed = apply_theme(msg, topic="my name", cfg=cfg)
+        return AskResponse(ok=True, topic="my name", answer=themed, duration_s=time.time() - t0, theme={"theme": cfg.theme, "intensity": cfg.intensity})
+
+    m2 = re.match(r"^\s*your\s+name\s+is\s+(.+?)\s*$", text, flags=re.IGNORECASE)
+    if m2:
+        nm = m2.group(1).strip().strip('"').strip("'")
+        ok, key_or_err = _override_knowledge("your name", nm, note="set via conversation (API)")
+        cfg = load_theme()
+        msg = f'Got it — my name is saved as "{nm}".' if ok else f"Could not save my name: {key_or_err}"
+        themed = apply_theme(msg, topic="your name", cfg=cfg)
+        return AskResponse(ok=True, topic="your name", answer=themed, duration_s=time.time() - t0, theme={"theme": cfg.theme, "intensity": cfg.intensity})
+
     normalized = _normalize_topic(text)
-    key = _topic_key(normalized)
+    topic_key = normalized.lower().strip()
 
-    # Special-case: name
-    if key in ("my name", "what is my name"):
-        e = _get_entry("my name")
-        if e and (e.get("answer") or "").strip():
-            ans = f"Your name is {e['answer'].strip()}."
-            cfg = load_theme()
-            return AskResponse(ok=True, topic="my name", answer=apply_theme(ans, topic="my name", cfg=cfg), duration_s=time.time() - t0, theme={"theme": cfg.theme, "intensity": cfg.intensity})
-        else:
-            cfg = load_theme()
-            msg = 'I don’t know your name yet. Tell me: “my name is Aaron” (or whatever you want), and I’ll remember it.'
-            return AskResponse(ok=True, topic="my name", answer=apply_theme(msg, topic="my name", cfg=cfg), duration_s=time.time() - t0, theme={"theme": cfg.theme, "intensity": cfg.intensity})
-
-    # 1) If we already have a good saved answer, reuse it (prevents bouncing to random sources)
-    existing = _get_entry(key)
-    if existing and _entry_is_good(existing):
+    # 4) Stable answer wins (prevents “it went back to the other crap answer”)
+    stable = _find_stable_answer(topic_key)
+    if stable:
         cfg = load_theme()
-        out = existing.get("answer", "").strip()
-        return AskResponse(ok=True, topic=key, answer=apply_theme(out, topic=normalized, cfg=cfg), duration_s=time.time() - t0, theme={"theme": cfg.theme, "intensity": cfg.intensity})
+        # avoid double-wrapping if already themed
+        themed = stable if "+++ VOX-CAST" in stable else apply_theme(stable, topic=topic_key, cfg=cfg)
+        return AskResponse(ok=True, topic=topic_key, answer=themed, duration_s=time.time() - t0, theme={"theme": cfg.theme, "intensity": cfg.intensity})
 
-    # 2) Ask brain normally
-    raw1 = await _run_brain_one_line(normalized, timeout_s=int(req.timeout_s or 25))
-    cleaned1 = _clean_repl_stdout(raw1.get("stdout", ""))
+    # 5) Ask brain (may suggest alias / may refuse / may answer)
+    raw_res = await _run_brain(normalized, timeout_s=int(req.timeout_s or 25))
+    cleaned = _clean_repl_stdout(raw_res.get("stdout", ""))
 
-    # If brain gave a decent answer, return it (and if it saved it, next time we’ll reuse it)
-    if cleaned1 and (not _looks_low_quality(cleaned1)):
-        cfg = load_theme()
-        return AskResponse(ok=True, topic=key, answer=apply_theme(cleaned1, topic=normalized, cfg=cfg), duration_s=float(raw1.get("duration_s", time.time() - t0)), raw=(raw1 if req.raw else None), theme={"theme": cfg.theme, "intensity": cfg.intensity})
-
-    # 3) Auto research (unrestricted mode)
-    if AUTO_WEBLEARN:
-        raw2 = await _run_brain_one_line(f"/weblearn {normalized}", timeout_s=int(req.timeout_s or 25))
-        cleaned2 = _clean_repl_stdout(raw2.get("stdout", ""))
-
-        # check saved knowledge again (preferred)
-        saved = _get_entry(key)
-        if saved and (saved.get("answer") or "").strip() and (not _looks_low_quality(saved.get("answer", ""))):
+    # 6) If weak, auto-weblearn once, then re-check stable store
+    if AUTO_WEBLEARN and _looks_low_quality(cleaned):
+        # try learning
+        await _run_brain(f"/weblearn {normalized}", timeout_s=max(25, int(req.timeout_s or 25)))
+        stable2 = _find_stable_answer(topic_key)
+        if stable2 and not _looks_low_quality(stable2):
             cfg = load_theme()
-            return AskResponse(ok=True, topic=key, answer=apply_theme(saved["answer"].strip(), topic=normalized, cfg=cfg), duration_s=float(raw2.get("duration_s", time.time() - t0)), raw=(raw2 if req.raw else None), theme={"theme": cfg.theme, "intensity": cfg.intensity})
+            themed2 = stable2 if "+++ VOX-CAST" in stable2 else apply_theme(stable2, topic=topic_key, cfg=cfg)
+            return AskResponse(ok=True, topic=topic_key, answer=themed2, duration_s=float(raw_res.get("duration_s", time.time() - t0)), raw=(raw_res if req.raw else None), theme={"theme": cfg.theme, "intensity": cfg.intensity})
 
-        # if brain output is good enough, use it even if it didn't store cleanly
-        if cleaned2 and (not _looks_low_quality(cleaned2)):
-            cfg = load_theme()
-            return AskResponse(ok=True, topic=key, answer=apply_theme(cleaned2, topic=normalized, cfg=cfg), duration_s=float(raw2.get("duration_s", time.time() - t0)), raw=(raw2 if req.raw else None), theme={"theme": cfg.theme, "intensity": cfg.intensity})
-
-        # 4) Wikipedia fallback if web results are garbage
-        wf = _wiki_fallback_learn(normalized)
-        if wf:
-            entry = saved if isinstance(saved, dict) else {}
-            entry["answer"] = wf
-            entry["taught_by_user"] = False
-            entry["updated"] = _iso_now()
-            entry["confidence"] = max(float(entry.get("confidence", 0.0) or 0.0), 0.70)
-            if not isinstance(entry.get("sources"), list):
-                entry["sources"] = []
-            _save_entry(key, entry)
-
-            cfg = load_theme()
-            return AskResponse(ok=True, topic=key, answer=apply_theme(wf, topic=normalized, cfg=cfg), duration_s=time.time() - t0, raw=(raw2 if req.raw else None), theme={"theme": cfg.theme, "intensity": cfg.intensity})
-
-    # final fallback
+    # 7) Final return (whatever we got)
     cfg = load_theme()
-    msg = (
-        f"{normalized}\n\n"
-        "I couldn’t save a clean answer yet.\n\n"
-        "Try asking with a little more detail (example: add 'video game' or 'computer hardware')."
+    themed = cleaned if "+++ VOX-CAST" in cleaned else apply_theme(cleaned or normalized, topic=topic_key, cfg=cfg)
+
+    return AskResponse(
+        ok=True,
+        topic=topic_key,
+        answer=themed,
+        duration_s=float(raw_res.get("duration_s", time.time() - t0)),
+        error=None,
+        raw=(raw_res if req.raw else None),
+        theme={"theme": cfg.theme, "intensity": cfg.intensity},
     )
-    return AskResponse(ok=True, topic=key, answer=apply_theme(msg, topic=normalized, cfg=cfg), duration_s=time.time() - t0, raw=(raw1 if req.raw else None), theme={"theme": cfg.theme, "intensity": cfg.intensity})
