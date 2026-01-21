@@ -388,6 +388,109 @@ async def set_theme(request: Request, payload: ThemeRequest) -> Dict[str, Any]:
     return {"ok": True, "theme": cfg.theme, "intensity": cfg.intensity}
 
 
+
+
+# ============================================================
+# MS_UPGRADE_LOCAL_FACTS_V3_AND_PINNED_V1
+# - Local facts (time/date/day + name questions) never use web
+# - Pinned answers (taught_by_user or confidence>=0.90) always win
+# ============================================================
+
+def _ms_norm_topic_v1(s: str) -> str:
+    import re as _re
+    t = (s or "").strip().lower()
+    # remove json wrapper if someone pastes {"text":"..."}
+    m = _re.match(r'^\s*\{\s*"text"\s*:\s*"(.+)"\s*\}\s*$', t)
+    if m:
+        t = m.group(1).strip().lower()
+
+    t = _re.sub(r"^\s*(what is|what's|define|explain)\s+", "", t, flags=_re.IGNORECASE).strip()
+    t = _re.sub(r"[?!.]+$", "", t).strip()
+    return t
+
+def _ms_read_knowledge_db_v1():
+    try:
+        if not KNOWLEDGE_PATH.exists():
+            return {}
+        raw = json.loads(KNOWLEDGE_PATH.read_text(encoding="utf-8", errors="replace") or "{}")
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+def _ms_get_entry_v1(topic_n: str):
+    if not topic_n:
+        return None
+    db = _ms_read_knowledge_db_v1()
+    ent = db.get(topic_n)
+    return ent if isinstance(ent, dict) else None
+
+def _ms_is_pinned_v1(ent: dict) -> bool:
+    try:
+        if ent.get("taught_by_user") is True:
+            return True
+        c = float(ent.get("confidence", 0.0) or 0.0)
+        return c >= 0.90
+    except Exception:
+        return False
+
+def _local_facts_answer_v3(text: str):
+    """
+    Returns (topic, answer) or None.
+    Covers:
+      - time/date/day (local)
+      - what is my name / what's my name
+      - what is your name / what's your name
+    """
+    import datetime as _dt
+    import re as _re
+    import time as _time
+
+    raw = (text or "").strip()
+    if not raw:
+        return None
+
+    s0 = raw.lower().strip()
+    s0 = _re.sub(r"[?!.]+$", "", s0).strip()
+    s1 = _re.sub(r"^\s*(what is|what's|define|explain)\s+", "", s0, flags=_re.IGNORECASE).strip()
+    cand = {s0, s1}
+
+    # local time with tz label if possible
+    try:
+        now = _dt.datetime.now().astimezone()
+        tzname = now.tzname() or "local"
+    except Exception:
+        now = _dt.datetime.now()
+        tzname = (_time.tzname[0] if getattr(_time, "tzname", None) else "local") or "local"
+
+    # --- NAME: user ---
+    if any(x in cand for x in ("my name", "what is my name", "what's my name", "who am i")):
+        ent = _ms_get_entry_v1("my name")
+        ans = (ent.get("answer") or "").strip() if isinstance(ent, dict) else ""
+        if ans:
+            return ("my name", ans)
+        return ("my name", 'I don’t know your name yet. Tell me: "my name is Aaron" and I’ll remember it.')
+
+    # --- NAME: bot ---
+    if any(x in cand for x in ("your name", "what is your name", "what's your name")):
+        ent = _ms_get_entry_v1("your name")
+        ans = (ent.get("answer") or "").strip() if isinstance(ent, dict) else ""
+        return ("your name", ans or "Machine Spirit")
+
+    # --- TIME ---
+    if any(x in cand for x in ("time", "the time", "what time is it", "what is the time", "current time", "time now")):
+        hhmm = now.strftime("%I:%M %p").lstrip("0")
+        return ("time", f"{hhmm} ({tzname})")
+
+    # --- DATE ---
+    if any(x in cand for x in ("date", "the date", "what is the date", "what's the date", "todays date", "today's date", "current date", "date today")):
+        out = now.strftime("%A, %B %d, %Y").replace(" 0", " ")
+        return ("date", out)
+
+    # --- DAY ---
+    if any(x in cand for x in ("day", "what day is it", "what day is it today", "day of week")):
+        return ("day", now.strftime("%A"))
+
+    return None
 @app.post("/ask", response_model=AskResponse)
 async def ask(request: Request, req: AskRequest) -> AskResponse:
     _require_auth(request)
@@ -433,7 +536,7 @@ async def ask(request: Request, req: AskRequest) -> AskResponse:
         raise HTTPException(status_code=422, detail="Theme command format: /theme, /theme off, or /theme set <name> [light|heavy]")
 
     # 2) Local facts (date/time/day) — never web
-    lf = _local_facts_answer(text)
+    lf = _local_facts_answer_v3(text)
     if lf:
         topic_k, ans = lf
         cfg = load_theme()
@@ -458,6 +561,16 @@ async def ask(request: Request, req: AskRequest) -> AskResponse:
         msg = f'Got it — my name is saved as "{nm}".' if ok else f"Could not save my name: {key_or_err}"
         themed = apply_theme(msg, topic="your name", cfg=cfg)
         return AskResponse(ok=True, topic="your name", answer=themed, duration_s=time.time() - t0, theme={"theme": cfg.theme, "intensity": cfg.intensity})
+
+    # --- PINNED_ANSWERS_ALWAYS_WIN_V1 ---
+    # If the normalized topic already has a user-taught / high-confidence answer, return it.
+    topic_n = _ms_norm_topic_v1(text)
+    ent = _ms_get_entry_v1(topic_n)
+    if isinstance(ent, dict) and _ms_is_pinned_v1(ent) and (ent.get("answer") or "").strip():
+        cfg = load_theme()
+        themed = apply_theme((ent.get("answer") or "").strip(), topic=topic_n, cfg=cfg)
+        return AskResponse(ok=True, topic=topic_n, answer=themed, duration_s=time.time() - t0, theme={"theme": cfg.theme, "intensity": cfg.intensity})
+
 
     normalized = _normalize_topic(text)
     topic_key = normalized.lower().strip()
