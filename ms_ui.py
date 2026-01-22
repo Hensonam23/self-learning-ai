@@ -122,30 +122,84 @@ def api_ask(payload: AskIn) -> JSONResponse:
 
 
 @app.post("/api/override")
-def api_override(payload: OverrideIn) -> JSONResponse:
-    # IMPORTANT: send override to the API (single source of truth)
-    topic = _normalize_topic(payload.topic)
+def api_override(payload: OverrideIn):
+    """
+    Save a corrected answer into local_knowledge.json (atomic write).
+    Never crashes; always returns JSON.
+    """
+    import datetime as _dt
+    import json as _json
+    import os as _os
+    import re as _re
+    from pathlib import Path as _Path
+
+    topic = (payload.topic or "").strip()
     answer = (payload.answer or "").strip()
 
     if not topic:
-        return JSONResponse(status_code=422, content={"ok": False, "detail": "Missing topic"})
+        return JSONResponse({"ok": False, "detail": "topic is required"}, status_code=422)
     if not answer:
-        return JSONResponse(status_code=422, content={"ok": False, "detail": "Missing answer"})
+        return JSONResponse({"ok": False, "detail": "answer is required"}, status_code=422)
 
-    # basic safety: don't allow insanely long accidental pastes
-    if len(answer) > 6000:
-        return JSONResponse(status_code=422, content={"ok": False, "detail": "Answer too long (limit 6000 chars)"})
+    def norm(s: str) -> str:
+        t = (s or "").strip()
+        t = _re.sub(r"^\s*(what is|what's|define|explain)\s+", "", t, flags=_re.IGNORECASE).strip()
+        t = _re.sub(r"[?!.]+$", "", t).strip()
+        return t.lower()
+
+    topic_n = norm(topic)
+    if not topic_n:
+        return JSONResponse({"ok": False, "detail": "topic normalized to empty"}, status_code=400)
+
+    knowledge_path = _Path(_os.environ.get(
+        "MS_KNOWLEDGE_PATH",
+        str(REPO_DIR / "data" / "local_knowledge.json")
+    )).resolve()
+
+    # read db
+    try:
+        if knowledge_path.exists():
+            raw = _json.loads(knowledge_path.read_text(encoding="utf-8", errors="replace") or "{}")
+            db = raw if isinstance(raw, dict) else {}
+        else:
+            db = {}
+    except Exception as e:
+        db = {}
+
+    ent = db.get(topic_n)
+    if not isinstance(ent, dict):
+        ent = {}
+
+    ent["answer"] = answer
+    ent["taught_by_user"] = True
+    ent["notes"] = "override via UI (/api/override)"
+    ent["updated"] = _dt.datetime.now().isoformat(timespec="seconds")
 
     try:
-        r = requests.post(
-            f"{API_BASE}/override",
-            headers=_api_headers(),
-            json={"topic": topic, "answer": answer},
-            timeout=15,
-        )
-        return JSONResponse(status_code=r.status_code, content=r.json() if r.content else {"ok": False})
+        old_c = float(ent.get("confidence", 0.0) or 0.0)
+    except Exception:
+        old_c = 0.0
+    ent["confidence"] = max(old_c, 0.95)
+
+    if not isinstance(ent.get("sources"), list):
+        ent["sources"] = []
+
+    db[topic_n] = ent
+
+    # atomic write
+    try:
+        knowledge_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = knowledge_path.with_suffix(knowledge_path.suffix + ".tmp")
+        tmp.write_text(_json.dumps(db, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        _os.replace(tmp, knowledge_path)
     except Exception as e:
-        return JSONResponse(status_code=502, content={"ok": False, "detail": f"override proxy error: {type(e).__name__}: {e}"})
+        import traceback
+        tb = traceback.format_exc()
+        if len(tb) > 4000:
+            tb = tb[-4000:]
+        return JSONResponse({"ok": False, "detail": f"write failed: {type(e).__name__}: {e}", "trace": tb}, status_code=500)
+
+    return {"ok": True, "topic": topic_n}
 
 
 HTML_TEMPLATE = r"""<!doctype html>
