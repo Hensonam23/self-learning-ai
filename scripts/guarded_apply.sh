@@ -3,6 +3,26 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+usage () {
+  echo "Usage:"
+  echo "  ./scripts/guarded_apply.sh -- <command> [args...]"
+  echo "  ./scripts/guarded_apply.sh --shell '<shell command string>'"
+  exit 2
+}
+
+if [ "${1:-}" = "--shell" ]; then
+  shift
+  [ $# -ge 1 ] || usage
+  MODE="shell"
+  SHELL_CMD="$*"
+elif [ "${1:-}" = "--" ]; then
+  shift
+  [ $# -ge 1 ] || usage
+  MODE="argv"
+else
+  usage
+fi
+
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BKDIR="data/backups/guarded_apply/$STAMP"
 mkdir -p "$BKDIR"
@@ -17,8 +37,13 @@ cp -a brain.py  "$BKDIR/brain.py" || true
 
 echo "== guarded_apply: running upgrade command =="
 set +e
-bash -lc "$*"
-RC=$?
+if [ "$MODE" = "shell" ]; then
+  bash -lc "$SHELL_CMD"
+  RC=$?
+else
+  "$@"
+  RC=$?
+fi
 set -e
 
 if [ $RC -ne 0 ]; then
@@ -46,7 +71,7 @@ if [ $TEST_RC -ne 0 ]; then
   [ -f "$BKDIR/brain.py" ] && cp -a "$BKDIR/brain.py" brain.py || true
   systemctl --user restart machinespirit-api.service machinespirit-ui.service
   sleep 1
-  echo "RESTORED. Check: $BKDIR"
+  echo "RESTORED. Check backups at: $BKDIR"
   exit 1
 fi
 
