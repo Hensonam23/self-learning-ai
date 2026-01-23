@@ -1,86 +1,96 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+usage() {
+  echo "Usage:"
+  echo '  ./scripts/new_proposal.sh "Title" --shell "<shell command string>"'
+  echo "  ./scripts/new_proposal.sh \"Title\" -- <command> [args...]"
+}
+
+slugify() {
+  echo "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g; s/-+/-/g'
+}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_DIR"
 
 if [ $# -lt 2 ]; then
-  echo "Usage:"
-  echo "  ./scripts/new_proposal.sh \"Title\" --shell '<command string>'"
-  echo "Example:"
-  echo "  ./scripts/new_proposal.sh \"UI: add override endpoint\" --shell 'python3 scripts/patch_ui_override.py'"
+  usage
   exit 2
 fi
 
 TITLE="$1"
-MODE="$2"
-shift 2
+shift
 
-if [ "$MODE" != "--shell" ]; then
-  echo "ERROR: only --shell is supported right now"
-  exit 2
-fi
+MODE="$1"
+shift || true
 
-CMD="${1:-}"
-if [ -z "$CMD" ]; then
-  echo "ERROR: missing shell command string"
-  exit 2
-fi
-
-# slugify title (simple + safe)
-SLUG="$(echo "$TITLE" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-DIR="proposals/${STAMP}_${SLUG}"
+SLUG="$(slugify "$TITLE")"
+[ -n "$SLUG" ] || SLUG="proposal"
+P="proposals/${STAMP}_${SLUG}"
 
-mkdir -p "$DIR"
+mkdir -p "$P"
+echo "pending" > "$P/status.txt"
+printf '%s\n' "$TITLE" > "$P/title.txt"
+date -Is > "$P/created.txt"
 
-cat > "$DIR/status.json" <<JSON
+PAYLOAD="$P/payload.sh"
+APPLY="$P/apply.sh"
+
+# Build payload.sh (the actual upgrade code)
 {
-  "status": "pending",
-  "created_at": "$(date -Iseconds)",
-  "title": $(python3 - <<PY
-import json
-print(json.dumps("$TITLE"))
-PY
-),
-  "slug": "$SLUG"
-}
-JSON
+  echo '#!/usr/bin/env bash'
+  echo 'set -euo pipefail'
+  echo
+  if [ "$MODE" = "--shell" ]; then
+    if [ $# -lt 1 ]; then
+      echo 'echo "ERROR: --shell requires a command string" >&2'
+      echo 'exit 2'
+    else
+      # Write the exact shell snippet into the payload
+      echo "$1"
+    fi
+  elif [ "$MODE" = "--" ]; then
+    if [ $# -lt 1 ]; then
+      echo 'echo "ERROR: -- requires a command" >&2'
+      echo 'exit 2'
+    else
+      printf 'exec %q' "$1"
+      shift
+      for a in "$@"; do
+        printf ' %q' "$a"
+      done
+      echo
+    fi
+  else
+    echo 'echo "ERROR: expected --shell or --" >&2'
+    echo 'exit 2'
+  fi
+} > "$PAYLOAD"
+chmod +x "$PAYLOAD"
 
-cat > "$DIR/README.md" <<EOF2
-# Proposal: $TITLE
-
-Created: $(date -Iseconds)  
-Status: **pending**
-
-## Goal
-(Write what this change is supposed to improve.)
-
-## Why
-(What problem did we see? logs? bad behavior? etc.)
-
-## Risk / Safety
-- This proposal must pass: guarded_apply + selftest
-- If selftest fails, it auto-restores
-
-## Apply
-Run:
-\`\`\`bash
-./scripts/apply_proposal.sh "$DIR"
-\`\`\`
-
-## Notes
-(Add anything helpful.)
-EOF2
-
-cat > "$DIR/apply.sh" <<EOF3
+# Build apply.sh (always runs from repo root, never proposal cwd)
+cat > "$APPLY" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-cd "\$(dirname "\$0")/.."
 
-# Proposal apply command:
-$CMD
-EOF3
-chmod +x "$DIR/apply.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$REPO_DIR"
+
+PAYLOAD="$SCRIPT_DIR/payload.sh"
+if [ ! -f "$PAYLOAD" ]; then
+  echo "ERROR: missing payload: $PAYLOAD" >&2
+  exit 2
+fi
+
+# run upgrade guarded, without fragile quoting
+exec ./scripts/guarded_apply.sh -- bash "$PAYLOAD"
+SH
+
+chmod +x "$APPLY"
 
 echo "OK: created proposal folder:"
-echo "  $DIR"
+echo "  $P"

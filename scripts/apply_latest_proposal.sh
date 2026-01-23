@@ -1,33 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")/.."
 
-pick_latest_pending() {
-  ls -1 proposals 2>/dev/null | sort -r | while read -r d; do
-    [ -d "proposals/$d" ] || continue
-    p="proposals/$d/status.json"
-    [ -f "$p" ] || continue
-    st="$(python3 - <<PY
-import json
-try:
-  j=json.load(open("$p","r",encoding="utf-8"))
-  print(j.get("status",""))
-except Exception:
-  print("")
-PY
-)"
-    if [ "$st" = "pending" ]; then
-      echo "proposals/$d"
-      return 0
-    fi
-  done
-  return 1
-}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_DIR"
 
-DIR="$(pick_latest_pending || true)"
-if [ -z "${DIR:-}" ]; then
+if [ ! -d proposals ]; then
+  echo "No proposals/ directory."
+  exit 0
+fi
+
+pick=""
+while IFS= read -r d; do
+  [ -d "$d" ] || continue
+  st="pending"
+  if [ -f "$d/status.txt" ]; then
+    st="$(tr -d '\r\n' < "$d/status.txt" | tr '[:upper:]' '[:lower:]')"
+    [ -n "$st" ] || st="pending"
+  fi
+  if [ "$st" = "pending" ]; then
+    pick="$d"
+    break
+  fi
+done < <(ls -1dt proposals/* 2>/dev/null)
+
+if [ -z "$pick" ]; then
   echo "No pending proposals."
   exit 0
 fi
 
-./scripts/apply_proposal.sh "$DIR"
+./scripts/apply_proposal.sh "$pick"
