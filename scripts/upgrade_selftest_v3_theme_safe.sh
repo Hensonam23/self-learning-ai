@@ -5,6 +5,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_DIR"
 
+python3 - <<'PY'
+from pathlib import Path
+
+content = r'''#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_DIR"
+
 echo "== selftest: python compile =="
 python3 -m py_compile ms_api.py ms_ui.py brain.py scripts/auto_propose.py
 
@@ -147,3 +157,12 @@ curl_body "http://127.0.0.1:8020/api/override" \
 echo "OK: cleaned up $topic"
 
 echo "PASS: selftest complete"
+'''
+
+Path("scripts/selftest.sh").write_text(content, encoding="utf-8")
+print("OK: wrote scripts/selftest.sh")
+PY
+
+chmod +x scripts/selftest.sh
+bash -n scripts/selftest.sh
+echo "OK: selftest.sh parses clean"
