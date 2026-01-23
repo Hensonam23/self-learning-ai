@@ -11,8 +11,8 @@ ExecStart=%h/self-learning-ai/.venv/bin/python %h/self-learning-ai/brain.py --he
 Restart=always
 RestartSec=2
 SyslogIdentifier=machinespirit-brain
-
-# safety: avoid runaway
+StandardOutput=journal
+StandardError=journal
 Nice=5
 
 [Install]

@@ -3639,5 +3639,44 @@ def main() -> None:
 
     print("Shutting down.")
 
+
+# ============================================================
+# MS_HEADLESS_V3
+# - Honor --help and --headless BEFORE interactive loop starts
+# - Safe for systemd (no stdin required)
+# ============================================================
+def _ms_print_help_v3():
+    print('''MachineSpirit brain.py\n\nUsage:\n  python3 brain.py\n      Interactive mode\n\n  python3 brain.py --headless\n      Headless mode (systemd): stays running + prints heartbeat\n\n  python3 brain.py --help\n      Show this help\n''')
+
+def _ms_headless_loop_v3():
+    import time, signal, datetime
+    stop = {'flag': False}
+    def _h(sig, frame):
+        stop['flag'] = True
+    for s in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(s, _h)
+        except Exception:
+            pass
+    print('Machine Spirit headless loop online.')
+    last = 0.0
+    while not stop['flag']:
+        now = time.time()
+        if now - last >= 60.0:
+            ts = datetime.datetime.now().isoformat(timespec='seconds')
+            print(f'[headless] heartbeat {ts}')
+            last = now
+        time.sleep(1.0)
+    print('Machine Spirit headless loop shutting down.')
+    return 0
+
+if __name__ == '__main__':
+    import sys
+    if '--help' in sys.argv or '-h' in sys.argv:
+        _ms_print_help_v3()
+        raise SystemExit(0)
+    if '--headless' in sys.argv:
+        raise SystemExit(_ms_headless_loop_v3())
+    # MS_HEADLESS_V3
 if __name__ == "__main__":
     main()
