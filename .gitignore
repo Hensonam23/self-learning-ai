@@ -71,3 +71,6 @@ ms_api.py.bak.*
 .machinespirit.lock
 data/api_key.txt
 data/api_key_header.txt
+
+# runtime proposals (do not commit)
+proposals/
