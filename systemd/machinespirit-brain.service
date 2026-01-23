@@ -1,0 +1,19 @@
+[Unit]
+Description=MachineSpirit Brain (headless loop)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/self-learning-ai
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/self-learning-ai/.venv/bin/python %h/self-learning-ai/brain.py --headless
+Restart=always
+RestartSec=2
+SyslogIdentifier=machinespirit-brain
+
+# safety: avoid runaway
+Nice=5
+
+[Install]
+WantedBy=default.target
