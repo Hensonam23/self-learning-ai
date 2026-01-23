@@ -1,0 +1,9 @@
+[Unit]
+Description=Run MachineSpirit auto-propose daily (after reflection)
+
+[Timer]
+OnCalendar=*-*-* 03:10:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

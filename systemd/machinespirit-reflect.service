@@ -1,0 +1,7 @@
+[Unit]
+Description=MachineSpirit daily reflection journal
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/self-learning-ai
+ExecStart=/usr/bin/python3 %h/self-learning-ai/scripts/reflect.py

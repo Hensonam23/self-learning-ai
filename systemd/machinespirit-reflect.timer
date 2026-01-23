@@ -1,0 +1,9 @@
+[Unit]
+Description=Run MachineSpirit reflection daily
+
+[Timer]
+OnCalendar=*-*-* 03:05:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
