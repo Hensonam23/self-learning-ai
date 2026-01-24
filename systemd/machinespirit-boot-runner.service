@@ -1,0 +1,20 @@
+[Unit]
+Description=MachineSpirit Boot Runner (selftest + reflect + propose + apply)
+After=network-online.target machinespirit-api.service machinespirit-ui.service machinespirit-brain.service
+Wants=network-online.target machinespirit-api.service machinespirit-ui.service machinespirit-brain.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/self-learning-ai
+Environment=PYTHONUNBUFFERED=1
+SyslogIdentifier=machinespirit-boot
+StandardOutput=journal
+StandardError=journal
+
+# Give it time to run selftest + proposal apply safely
+TimeoutStartSec=600
+
+ExecStart=/bin/bash -lc 'cd %h/self-learning-ai && ./scripts/boot_runner.sh'
+
+[Install]
+WantedBy=default.target
