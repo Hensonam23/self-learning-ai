@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+cd "$(dirname "$0")/.."
+
+echo "== upgrade_maintenance_lock_v2 =="
+
+# ----------------------------
+# 1) Rewrite scripts/guarded_apply.sh (known-good + lock)
+# ----------------------------
+cat > scripts/guarded_apply.sh <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
 usage() {
   echo "Usage:"
   echo "  ./scripts/guarded_apply.sh -- <command> [args...]"
@@ -117,3 +128,50 @@ if [ $TEST_RC -ne 0 ]; then
 fi
 
 echo "PASS: guarded apply + selftest succeeded"
+SH
+
+chmod +x scripts/guarded_apply.sh
+
+# ----------------------------
+# 2) Add maintenance-lock respect to watchdog_check.sh (only if missing)
+# ----------------------------
+python3 - <<'PY'
+from pathlib import Path
+
+p = Path("scripts/watchdog_check.sh")
+txt = p.read_text(encoding="utf-8", errors="replace")
+if "MS_MAINT_LOCK_V2" in txt:
+    print("OK: watchdog_check.sh already has lock logic")
+    raise SystemExit(0)
+
+lines = txt.splitlines(True)
+if not lines or not lines[0].startswith("#!"):
+    raise SystemExit("ERROR: watchdog_check.sh missing shebang")
+
+block = r'''# --- MS_MAINT_LOCK_V2 ---
+LOCK_FILE="data/runtime/maintenance.lock"
+if [ -f "$LOCK_FILE" ]; then
+  now=$(date +%s)
+  ts=$(stat -c %Y "$LOCK_FILE" 2>/dev/null || echo 0)
+  age=$(( now - ts ))
+  if [ "$age" -lt 3600 ]; then
+    echo "WATCHDOG: maintenance lock present (age=${age}s) -> skipping"
+    exit 0
+  else
+    echo "WATCHDOG: stale maintenance lock (age=${age}s) -> removing"
+    rm -f "$LOCK_FILE" || true
+  fi
+fi
+
+'''
+lines.insert(1, block)
+p.write_text("".join(lines), encoding="utf-8")
+print("OK: patched watchdog_check.sh with lock logic")
+PY
+
+chmod +x scripts/watchdog_check.sh
+
+echo "== sanity checks =="
+bash -n scripts/guarded_apply.sh
+python3 -m py_compile ms_api.py ms_ui.py brain.py
+echo "OK: upgrade_maintenance_lock_v2 complete"

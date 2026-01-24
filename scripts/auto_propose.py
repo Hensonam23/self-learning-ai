@@ -1,169 +1,113 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import datetime as dt
 import json
 import os
 import re
-import subprocess
+import time
 from pathlib import Path
-from typing import Any, Dict, Optional
 
-REPO_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = REPO_DIR / "data"
-REFL_DIR = DATA_DIR / "reflections"
-LOGS_DIR = DATA_DIR / "logs"
-PROPOSALS_DIR = REPO_DIR / "proposals"
+def repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
 
-POLICY_PATH = Path.home() / ".config" / "machinespirit" / "policy.json"
+def norm_status(s: str) -> str:
+    s = (s or "").strip().lower()
+    return s if s else "pending"
 
-def read_json(path: Path, default: Any) -> Any:
-    try:
-        if not path.exists():
-            return default
-        return json.loads(path.read_text(encoding="utf-8", errors="replace") or "")
-    except Exception:
-        return default
+def pending_proposals_exist(pdir: Path) -> bool:
+    if not pdir.exists():
+        return False
+    for d in sorted(pdir.glob("*"), reverse=True):
+        if not d.is_dir():
+            continue
+        st = "pending"
+        st_path = d / "status.txt"
+        if st_path.exists():
+            st = norm_status(st_path.read_text(encoding="utf-8", errors="replace"))
+        if st == "pending":
+            return True
+    return False
 
 def slugify(s: str) -> str:
     s = (s or "").strip().lower()
     s = re.sub(r"[^a-z0-9]+", "-", s)
-    s = re.sub(r"(^-+|-+$)", "", s)
+    s = re.sub(r"-{2,}", "-", s).strip("-")
     return s or "proposal"
 
-def now_stamp() -> str:
-    return dt.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+def count_pending_research(repo: Path) -> int:
+    q = repo / "data" / "research_queue.json"
+    if not q.exists():
+        return 0
+    try:
+        arr = json.loads(q.read_text(encoding="utf-8", errors="replace") or "[]")
+        if not isinstance(arr, list):
+            return 0
+        return sum(1 for x in arr if isinstance(x, dict) and x.get("status") == "pending")
+    except Exception:
+        return 0
 
-def load_policy() -> Dict[str, Any]:
-    p = read_json(POLICY_PATH, {})
-    if not isinstance(p, dict):
-        p = {}
-    # defaults
-    p.setdefault("allow_auto_propose", True)
-    p.setdefault("allow_auto_apply", False)  # must remain false for now
-    p.setdefault("max_daily_proposals", 1)
-    p.setdefault("default_research_n", 10)
+def write_proposal(repo: Path, title: str, cmd_lines: list[str]) -> Path:
+    pdir = repo / "proposals"
+    pdir.mkdir(parents=True, exist_ok=True)
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    folder = f"{stamp}_{slugify(title)}"
+    p = pdir / folder
+    p.mkdir(parents=True, exist_ok=False)
+
+    (p / "status.txt").write_text("pending\n", encoding="utf-8")
+
+    # command script
+    cmd = "\n".join([
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        f'cd "{repo}"',
+        "",
+        *cmd_lines,
+        "",
+    ])
+    (p / "cmd.sh").write_text(cmd, encoding="utf-8")
+    os.chmod(p / "cmd.sh", 0o755)
+
+    # apply wrapper (runs guarded_apply using the cmd file)
+    apply = "\n".join([
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        f'cd "{repo}"',
+        "",
+        'echo "== proposal: running guarded_apply =="',
+        f'./scripts/guarded_apply.sh -- bash "{p / "cmd.sh"}"',
+        "",
+    ])
+    (p / "apply.sh").write_text(apply, encoding="utf-8")
+    os.chmod(p / "apply.sh", 0o755)
+
     return p
 
-def latest_reflection_path() -> Optional[Path]:
-    if not REFL_DIR.exists():
-        return None
-    items = sorted(REFL_DIR.glob("*.json"))
-    if not items:
-        return None
-    return items[-1]
-
-def count_today_autopropose() -> int:
-    today = dt.datetime.now().astimezone().strftime("%Y-%m-%d")
-    n = 0
-    if not PROPOSALS_DIR.exists():
-        return 0
-    for d in PROPOSALS_DIR.iterdir():
-        if not d.is_dir():
-            continue
-        st = d / "status.json"
-        if not st.exists():
-            continue
-        j = read_json(st, {})
-        if not isinstance(j, dict):
-            continue
-        if j.get("generated_by") != "auto_propose":
-            continue
-        if str(j.get("created_at", "")).startswith(today):
-            n += 1
-    return n
-
-def write_log(line: str) -> None:
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    p = LOGS_DIR / "autopropose.log"
-    ts = dt.datetime.now().astimezone().isoformat(timespec="seconds")
-    with p.open("a", encoding="utf-8") as f:
-        f.write(f"[{ts}] {line}\n")
-
-def create_proposal(title: str, shell_cmd: str) -> Path:
-    PROPOSALS_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = now_stamp()
-    slug = slugify(title)
-    d = PROPOSALS_DIR / f"{stamp}_{slug}"
-    d.mkdir(parents=True, exist_ok=True)
-
-    status = {
-        "status": "pending",
-        "created_at": dt.datetime.now().astimezone().date().isoformat(),
-        "title": title,
-        "slug": slug,
-        "generated_by": "auto_propose",
-        "kind": "research",
-    }
-    (d / "status.json").write_text(json.dumps(status, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-
-    (d / "README.md").write_text(
-        f"# Proposal: {title}\n\n"
-        f"Generated by: auto_propose\n"
-        f"Status: **pending**\n\n"
-        f"## Apply\n"
-        f"Run:\n\n"
-        f"```bash\n"
-        f"./scripts/apply_proposal.sh \"{d.as_posix()}\"\n"
-        f"```\n\n"
-        f"## Command\n"
-        f"```bash\n{shell_cmd}\n```\n",
-        encoding="utf-8",
-    )
-
-    (d / "apply.sh").write_text(
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        "cd \"$(dirname \"$0\")/..\"\n\n"
-        f"{shell_cmd}\n",
-        encoding="utf-8",
-    )
-    os.chmod(d / "apply.sh", 0o755)
-
-    return d
-
 def main() -> int:
-    pol = load_policy()
-    if not pol.get("allow_auto_propose", True):
-        write_log("auto_propose disabled by policy")
+    repo = repo_root()
+    proposals_dir = repo / "proposals"
+
+    # Only skip if a REAL pending proposal exists
+    if pending_proposals_exist(proposals_dir):
+        print("INFO: pending proposal already exists; skipping auto-propose.")
         return 0
 
-    max_daily = int(pol.get("max_daily_proposals", 1) or 1)
-    already = count_today_autopropose()
-    if already >= max_daily:
-        write_log(f"daily proposal limit reached ({already}/{max_daily})")
-        return 0
+    pending = count_pending_research(repo)
 
-    refl_path = latest_reflection_path()
-    if not refl_path:
-        write_log("no reflection found; skipping proposal generation")
-        return 0
+    # default maintenance action: run curiosity a small amount
+    n = 5
+    title = f"Maintenance: curiosity n={n} (pending research: {pending})"
 
-    refl = read_json(refl_path, {})
-    if not isinstance(refl, dict):
-        write_log("reflection json is broken; skipping")
-        return 0
-
-    recs = refl.get("recommendations") or []
-    pending = int(((refl.get("research_queue") or {}).get("counts") or {}).get("pending", 0) or 0)
-
-    # Choose a simple, safe research proposal
-    n = int(pol.get("default_research_n", 10) or 10)
-    py = os.environ.get("MS_PYTHON", "/usr/bin/python3")
-
-    # Prefer curiosity if there is pending queue or low confidence
-    title = "Research run: curiosity n=%d" % n
-    cmd = f"{py} brain.py --curiosity --n {n}"
-
-    if pending <= 0 and isinstance(recs, list) and recs:
-        # if stable, do smaller run
-        title = "Maintenance research: curiosity n=5"
-        cmd = f"{py} brain.py --curiosity --n 5"
-
-    d = create_proposal(title, cmd)
-    write_log(f"created proposal {d.name}: {title}")
-
-    print(f"OK: created proposal: {d}")
+    print(f"INFO: creating proposal: {title}")
+    p = write_proposal(
+        repo,
+        title,
+        cmd_lines=[
+            f'/usr/bin/python3 "{repo / "brain.py"}" --curiosity --n {n}',
+        ],
+    )
+    print(f"OK: created proposal: {p}")
     return 0
 
 if __name__ == "__main__":

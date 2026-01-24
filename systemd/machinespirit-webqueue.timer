@@ -2,6 +2,7 @@
 Description=Run MachineSpirit webqueue every 30 minutes
 
 [Timer]
+Persistent=true
 OnBootSec=3min
 OnUnitActiveSec=30min
 Unit=machinespirit-webqueue.service

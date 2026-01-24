@@ -11,18 +11,26 @@ if [ ! -d proposals ]; then
 fi
 
 pick=""
-while IFS= read -r d; do
-  [ -d "$d" ] || continue
-  st="pending"
-  if [ -f "$d/status.txt" ]; then
-    st="$(tr -d '\r\n' < "$d/status.txt" | tr '[:upper:]' '[:lower:]')"
-    [ -n "$st" ] || st="pending"
+
+# sort by name desc (timestamp folders sort correctly)
+while IFS= read -r name; do
+  [[ "$name" == _* ]] && continue
+  P="proposals/$name"
+  [ -d "$P" ] || continue
+
+  # MUST have a status file to be considered pending
+  if [ ! -f "$P/status.txt" ]; then
+    continue
   fi
+
+  st="$(tr -d '\r\n' < "$P/status.txt" | tr '[:upper:]' '[:lower:]')"
+  [ -n "$st" ] || st="unknown"
+
   if [ "$st" = "pending" ]; then
-    pick="$d"
+    pick="$P"
     break
   fi
-done < <(ls -1dt proposals/* 2>/dev/null)
+done < <(find proposals -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -r)
 
 if [ -z "$pick" ]; then
   echo "No pending proposals."

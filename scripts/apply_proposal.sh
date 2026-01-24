@@ -20,6 +20,10 @@ if [ ! -f "$P/apply.sh" ]; then
   exit 2
 fi
 
+# Compatibility shim for old proposals:
+# if the proposal cd's into itself and tries ./scripts/guarded_apply.sh, make it exist
+ln -sfn "$(cd scripts && pwd)" "$P/scripts" 2>/dev/null || true
+
 LOG="$P/apply_$(date +%Y%m%d-%H%M%S).log"
 
 echo "== apply_proposal =="

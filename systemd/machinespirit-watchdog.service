@@ -1,0 +1,7 @@
+[Unit]
+Description=MachineSpirit watchdog (health check + self-heal)
+After=machinespirit-api.service machinespirit-ui.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -lc 'cd %h/self-learning-ai && ./scripts/watchdog_check.sh'
