@@ -83,7 +83,12 @@ git commit -m "$msg" || true
 # Optional push (OFF by default)
 if [ "${MS_AUTOPUSH:-0}" = "1" ]; then
   echo "AUTOAPPLY: autopush enabled -> pushing main"
-  git push || true
+  echo "AUTOAPPLY: using scripts/git_push_main.sh"
+  if ./scripts/git_push_main.sh; then
+    echo "AUTOAPPLY: push OK"
+  else
+    echo "AUTOAPPLY: push FAILED"
+  fi
 else
   echo "AUTOAPPLY: autopush disabled (MS_AUTOPUSH=0)"
 fi
