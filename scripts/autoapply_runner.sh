@@ -6,6 +6,16 @@ echo "== autoapply_runner =="
 echo "when: $(date -Is)"
 echo "repo: $(pwd)"
 
+# --- MS_AUTOAPPLY_FLOCK_V1 ---
+mkdir -p data/runtime
+RUNLOCK="data/runtime/autoapply.flock"
+exec 9>"$RUNLOCK"
+if ! flock -n 9; then
+  echo "AUTOAPPLY: another run is already active -> exiting"
+  exit 0
+fi
+
+
 # Maintenance lock so watchdog (and other stuff) can skip while we apply
 mkdir -p data/runtime
 LOCK_FILE="data/runtime/maintenance.lock"

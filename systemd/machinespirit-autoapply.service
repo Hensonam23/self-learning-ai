@@ -11,5 +11,8 @@ Environment=MS_AUTOPUSH=0
 SyslogIdentifier=machinespirit-autoapply
 StandardOutput=journal
 StandardError=journal
-TimeoutStartSec=900
+
+# upgrades can take time; avoid premature timeouts
+TimeoutStartSec=3600
+
 ExecStart=/bin/bash -lc 'cd %h/self-learning-ai && ./scripts/autoapply_runner.sh'

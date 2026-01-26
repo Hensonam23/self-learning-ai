@@ -4,6 +4,8 @@ Description=Run MachineSpirit auto-apply periodically
 [Timer]
 OnUnitActiveSec=20min
 Persistent=true
+RandomizedDelaySec=90
+AccuracySec=1min
 
 [Install]
 WantedBy=timers.target
