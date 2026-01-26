@@ -74,3 +74,6 @@ data/api_key_header.txt
 
 # runtime proposals (do not commit)
 proposals/
+
+# local certs (never commit)
+certs/
