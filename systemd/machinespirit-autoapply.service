@@ -7,7 +7,7 @@ Wants=network-online.target machinespirit-api.service machinespirit-ui.service
 Type=oneshot
 WorkingDirectory=%h/self-learning-ai
 Environment=PYTHONUNBUFFERED=1
-Environment=MS_AUTOPUSH=0
+Environment=MS_AUTOPUSH=1
 SyslogIdentifier=machinespirit-autoapply
 StandardOutput=journal
 StandardError=journal
