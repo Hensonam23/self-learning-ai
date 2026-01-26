@@ -1,0 +1,9 @@
+[Unit]
+Description=Run MachineSpirit auto-apply periodically
+
+[Timer]
+OnUnitActiveSec=20min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

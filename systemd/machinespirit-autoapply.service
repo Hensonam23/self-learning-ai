@@ -1,0 +1,15 @@
+[Unit]
+Description=MachineSpirit Auto-Apply (apply latest proposal + selftest + auto-commit)
+After=network-online.target machinespirit-api.service machinespirit-ui.service
+Wants=network-online.target machinespirit-api.service machinespirit-ui.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/self-learning-ai
+Environment=PYTHONUNBUFFERED=1
+Environment=MS_AUTOPUSH=0
+SyslogIdentifier=machinespirit-autoapply
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=900
+ExecStart=/bin/bash -lc 'cd %h/self-learning-ai && ./scripts/autoapply_runner.sh'
