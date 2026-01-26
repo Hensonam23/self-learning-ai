@@ -212,7 +212,37 @@ HTML_TEMPLATE = r"""<!doctype html>
   <meta http-equiv="Expires" content="0"/>
   <title>MachineSpirit UI</title>
   <style>
-    :root{
+    
+/* --- MachineSpirit Admin UI (floating) --- */
+#msAdminBox{
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 9999;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(18, 20, 30, 0.70);
+  backdrop-filter: blur(6px);
+  border-radius: 12px;
+  color: rgba(255,255,255,0.85);
+  font: 14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial;
+}
+#msAdminBox button{
+  cursor: pointer;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.92);
+  padding: 6px 10px;
+  border-radius: 10px;
+}
+#msAdminState{
+  opacity: 0.85;
+}
+/* --- end MachineSpirit Admin UI --- */
+:root{
       --panel: rgba(18, 20, 30, 0.68);
       --border: rgba(255,255,255,0.08);
       --text: rgba(255,255,255,0.92);
@@ -432,6 +462,15 @@ HTML_TEMPLATE = r"""<!doctype html>
   </style>
 </head>
 <body>
+
+<!-- MachineSpirit Admin UI (floating) -->
+<div id="msAdminBox">
+  <button id="msAdminBtn" type="button">Admin Login</button>
+  <button id="msAdminOutBtn" type="button" style="display:none;">Logout</button>
+  <span id="msAdminState">User</span>
+</div>
+<!-- end MachineSpirit Admin UI -->
+
   <div class="app">
     <div class="topbar">
       <div class="brand">
@@ -489,6 +528,104 @@ HTML_TEMPLATE = r"""<!doctype html>
   </div>
 
 <script>
+
+// --- MachineSpirit Admin Auth (UI-only, sessionStorage) ---
+(function(){
+  let msAdminAuth = sessionStorage.getItem("ms_admin_auth") || "";
+
+  function setAdminUI(on){
+    const btn = document.getElementById("msAdminBtn");
+    const out = document.getElementById("msAdminOutBtn");
+    const st  = document.getElementById("msAdminState");
+    if(!btn || !out || !st) return;
+    if(on){
+      btn.style.display = "none";
+      out.style.display = "inline-block";
+      st.textContent = "Admin";
+    } else {
+      btn.style.display = "inline-block";
+      out.style.display = "none";
+      st.textContent = "User";
+    }
+  }
+
+  async function testAdminAuth(authHeader){
+    // Safe test: send invalid override payload.
+    // - Without auth: Caddy returns 401
+    // - With auth: request reaches UI and returns 422 (topic/answer required)
+    try{
+      const r = await fetch("/api/override", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": authHeader
+        },
+        body: JSON.stringify({topic:"", answer:""})
+      });
+      return (r.status !== 401);
+    }catch(e){
+      return false;
+    }
+  }
+
+  async function doLogin(){
+    const user = prompt("Admin username:", "admin");
+    if(user === null) return;
+    const pw = prompt("Admin password:");
+    if(pw === null) return;
+
+    const auth = "Basic " + btoa(user + ":" + pw);
+
+    const ok = await testAdminAuth(auth);
+    if(!ok){
+      alert("Admin login failed (wrong creds or Caddy auth not matching).");
+      return;
+    }
+
+    msAdminAuth = auth;
+    sessionStorage.setItem("ms_admin_auth", msAdminAuth);
+    setAdminUI(true);
+    alert("Admin unlocked for this tab.");
+  }
+
+  function doLogout(){
+    msAdminAuth = "";
+    sessionStorage.removeItem("ms_admin_auth");
+    setAdminUI(false);
+  }
+
+  // Wrap fetch to attach Authorization only for admin routes
+  const _fetch = window.fetch.bind(window);
+  window.fetch = function(input, init){
+    init = init || {};
+    const url = (typeof input === "string") ? input : (input && input.url) ? input.url : "";
+    const method = (init.method || "GET").toUpperCase();
+
+    const needsAdmin =
+      url.startsWith("/api/override") ||
+      (url.startsWith("/api/theme") && method === "POST");
+
+    if(needsAdmin && msAdminAuth){
+      const h = new Headers(init.headers || {});
+      h.set("Authorization", msAdminAuth);
+      init.headers = h;
+    }
+
+    return _fetch(input, init);
+  };
+
+  window.addEventListener("DOMContentLoaded", function(){
+    setAdminUI(!!msAdminAuth);
+
+    const btn = document.getElementById("msAdminBtn");
+    const out = document.getElementById("msAdminOutBtn");
+    if(btn) btn.addEventListener("click", doLogin);
+    if(out) out.addEventListener("click", doLogout);
+  });
+})();
+// --- end MachineSpirit Admin Auth ---
+
+
   const chatEl = document.getElementById("chat");
   const msgEl = document.getElementById("msg");
   const sendBtn = document.getElementById("sendBtn");
