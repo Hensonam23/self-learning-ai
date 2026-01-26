@@ -6,6 +6,14 @@ echo "== autoapply_runner =="
 echo "when: $(date -Is)"
 echo "repo: $(pwd)"
 
+# --- MS_HUMAN_GUARD_V1 ---
+mkdir -p data/runtime
+if [ -f "data/runtime/human_busy.flag" ]; then
+  echo "AUTOAPPLY: human_busy.flag present -> exiting"
+  exit 0
+fi
+
+
 # --- MS_AUTOAPPLY_FLOCK_V1 ---
 mkdir -p data/runtime
 RUNLOCK="data/runtime/autoapply.flock"
