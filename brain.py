@@ -170,66 +170,61 @@ def forced_url_for_topic(topic: str) -> str:
         return ""
 
 
-# MS_RFC_SUMMARIZER_HELPERS_V1
+
+# MS_RFC_SUMMARIZER_HELPERS_V2
 # RFC plain-text summarizer helpers (keeps answers clean)
+
+RFC_SKIP_SENT = re.compile(r'(\bISSN\b|RFC Series|Status of This Memo|Network Working Group|Internet Society|Copyright|STD\s*1)', re.I)
+
 def _is_rfc_txt_url(url: str) -> bool:
     u = (url or '').strip().lower()
-    if not u:
-        return False
-    if 'rfc-editor.org' in u and '/rfc/' in u and u.endswith('.txt'):
-        return True
-    return False
+    return bool(u and 'rfc-editor.org' in u and '/rfc/' in u and u.endswith('.txt'))
 
-def _rfc_clean_lines(raw: str):
+def _rfc_norm_lines(raw: str):
     raw = (raw or '').replace('\x0c', '\n')
     ls = [x.rstrip() for x in raw.splitlines()]
+    bad = re.compile(r'(ISSN:|Status of This Memo|Copyright|Table of Contents|Author\'?s Address|Authors\'? Addresses|Obsoletes:|Updates:|Network Working Group|Request for Comments:)', re.I)
     out = []
-    bad = re.compile(r'(ISSN:|Internet Engineering Task Force|IETF|Status of This Memo|Copyright|Table of Contents|Author\'?s Address|Authors\'? Addresses|Obsoletes:|Updates:)', re.I)
-    for line in ls:
-        t = line.strip()
+    for L in ls:
+        t = L.strip()
         if not t:
             out.append('')
             continue
         if bad.search(t):
             continue
-        if re.match(r'^RFC\s+\d+\b', t):
-            continue
-        out.append(line)
+        out.append(L)
+    # collapse multiple blanks
     cleaned = []
     last_blank = False
-    for line in out:
-        if line.strip() == '':
+    for L in out:
+        if L.strip() == '':
             if last_blank:
                 continue
             last_blank = True
             cleaned.append('')
         else:
             last_blank = False
-            cleaned.append(line)
+            cleaned.append(L)
     return cleaned
 
-def _rfc_extract_section(lines, heading: str):
-    h = heading.strip().lower()
-    start = None
+def _rfc_find_line(lines, pat: str):
+    rx = re.compile(pat, re.I)
     for i, L in enumerate(lines):
-        if L.strip().lower() == h:
-            start = i + 1
-            break
-    if start is None:
-        return ''
+        if rx.match(L.strip()):
+            return i
+    return None
+
+def _rfc_take_until_next_section(lines, start_i: int, max_lines: int = 220):
     buf = []
-    for j in range(start, min(start + 800, len(lines))):
+    for j in range(start_i, min(start_i + max_lines, len(lines))):
         t = lines[j].strip()
         if not t:
             if buf:
                 buf.append('')
             continue
-        if t.lower() in ('status of this memo', 'copyright notice'):
+        if re.match(r'^\d+\.\s+', t) and not t.lower().startswith('1. introduction'):
             break
-        if re.match(r'^\d+\.\s', t):
-            if heading.lower() != 'introduction':
-                break
-        if len(buf) > 120:
+        if t.lower() in ('status of this memo', 'copyright notice'):
             break
         buf.append(t)
     txt = ' '.join(x for x in buf if x != '').strip()
@@ -246,194 +241,44 @@ def _sentences(text: str):
         s = s.strip()
         if len(s) < 12:
             continue
+        if RFC_SKIP_SENT.search(s):
+            continue
         out.append(s)
         if len(out) >= 10:
             break
     return out
 
 def _rfc_make_answer(topic: str, raw: str, url: str) -> str:
-    ls = _rfc_clean_lines(raw)
-    abstract = _rfc_extract_section(ls, 'Abstract')
+    ls = _rfc_norm_lines(raw)
+    a_i = _rfc_find_line(ls, r'^abstract$')
+    abstract = ''
+    if a_i is not None:
+        abstract = _rfc_take_until_next_section(ls, a_i + 1, max_lines=80)
+
+    i_i = _rfc_find_line(ls, r'^1\.\s*introduction$')
     intro = ''
-    joined = '\n'.join(ls)
-    m = re.search(r'(?im)^\s*1\.\s*introduction\s*$', joined)
-    if m:
-        idx = joined[:m.start()].count('\n')
-        intro = _rfc_extract_section(ls[idx:], '1. Introduction')
-    if not intro:
-        intro = _rfc_extract_section(ls, 'Introduction')
+    if i_i is not None:
+        intro = _rfc_take_until_next_section(ls, i_i + 1, max_lines=180)
 
     blob = (abstract + ' ' + intro).strip()
     ss = _sentences(blob)
+
     title = (topic or '').strip().upper() or 'RFC'
     definition = ss[0] if ss else (abstract[:240] if abstract else 'This RFC describes a networking protocol/standard.')
+
     kps = []
     for x in ss[1:]:
+        if RFC_SKIP_SENT.search(x):
+            continue
         kps.append(x)
         if len(kps) >= 4:
             break
-    if not kps and intro:
-        kps = _sentences(intro)[0:3]
 
     out = [f"{title}", "", "Definition:", f"- {definition}", "", "Key points:"]
     for kp in kps:
         out.append(f"- {kp}")
     out += ["", "Sources:", f"- Direct URL: {url}"]
     return '\n'.join(out).strip() + "\n"
-def process_forcerfc_command(line: str) -> str:
-    try:
-        import shlex
-        parts = shlex.split((line or '').strip())
-    except Exception:
-        parts = (line or '').strip().split()
-
-    if not parts:
-        return ''
-    if (parts[0] or '').strip().lower() != '/forcerfc':
-        return ''
-
-    sub = (parts[1] if len(parts) > 1 else 'list').strip().lower()
-
-    if sub in ('reload',):
-        refresh_forced_rfc_keywords()
-        return 'OK: reloaded forced RFC maps (defaults + config + overrides).'
-
-    if sub in ('list', 'ls'):
-        refresh_forced_rfc_keywords()
-        out = []
-        out.append(f"Defaults: {len(DEFAULT_FORCED_RFC_KEYWORDS)}")
-        out.append(f"Config:   {len(_FORCED_RFC_CONFIG)}  ({FORCED_RFC_CONFIG_PATH})")
-        out.append(f"Override:{len(_FORCED_RFC_OVERRIDE)} ({FORCED_RFC_OVERRIDE_PATH})")
-        out.append(f"Merged:   {len(FORCED_RFC_KEYWORDS)}")
-        out.append('')
-        for k in sorted(FORCED_RFC_KEYWORDS.keys()):
-            out.append(f"- {k} -> {FORCED_RFC_KEYWORDS[k]}")
-        return '\n'.join(out)
-
-    if sub == 'add':
-        if len(parts) < 4:
-            return 'ERROR: /forcerfc add "keyword" "url"'
-        key = (parts[2] or '').strip().lower()
-        url = (parts[3] or '').strip()
-        if not key or not url:
-            return 'ERROR: keyword/url cannot be empty'
-        ov = dict(_ms_read_json_dict(FORCED_RFC_OVERRIDE_PATH))
-        ov[key] = url
-        _ms_atomic_write_json(FORCED_RFC_OVERRIDE_PATH, ov)
-        refresh_forced_rfc_keywords()
-        return f"OK: override set '{key}' -> '{url}'"
-
-    if sub in ('del', 'rm', 'remove'):
-        if len(parts) < 3:
-            return 'ERROR: /forcerfc del "keyword"'
-        key = (parts[2] or '').strip().lower()
-        ov = dict(_ms_read_json_dict(FORCED_RFC_OVERRIDE_PATH))
-        if key in ov:
-            ov.pop(key, None)
-            _ms_atomic_write_json(FORCED_RFC_OVERRIDE_PATH, ov)
-            refresh_forced_rfc_keywords()
-            return f"OK: override removed '{key}'"
-        return f"NOTE: override '{key}' not present"
-
-    if sub == 'clear':
-        _ms_atomic_write_json(FORCED_RFC_OVERRIDE_PATH, {})
-        refresh_forced_rfc_keywords()
-        return 'OK: cleared override file'
-
-    return 'ERROR: unknown /forcerfc subcommand (use: list/add/del/clear/reload)'
-# Allow forced RFC mapping to be extended without editing code.
-# Merge order:
-#   1) DEFAULT_FORCED_RFC_KEYWORDS (code)
-#   2) config/forced_rfc_map.json (repo)
-#   3) data/forced_rfc_map.json (local override)
-FORCED_RFC_CONFIG_PATH = os.path.join(BASE_DIR, 'config', 'forced_rfc_map.json')
-FORCED_RFC_OVERRIDE_PATH = os.path.join(DATA_DIR, 'forced_rfc_map.json')
-
-DEFAULT_FORCED_RFC_KEYWORDS = dict(FORCED_RFC_KEYWORDS)
-_FORCED_RFC_CONFIG = {}
-_FORCED_RFC_OVERRIDE = {}
-_FORCED_RFC_MTIME = {'config': 0.0, 'override': 0.0}
-
-def _ms_read_json_dict(path: str) -> dict:
-    try:
-        if not path or not os.path.exists(path):
-            return {}
-        txt = open(path, 'r', encoding='utf-8', errors='replace').read().strip()
-        if not txt:
-            return {}
-        obj = json.loads(txt)
-        if not isinstance(obj, dict):
-            return {}
-        out = {}
-        for k, v in obj.items():
-            ks = (str(k) if k is not None else '').strip().lower()
-            vs = (str(v) if v is not None else '').strip()
-            if ks and vs:
-                out[ks] = vs
-        return out
-    except Exception:
-        return {}
-
-def _ms_atomic_write_json(path: str, obj: dict) -> None:
-    try:
-        fn = globals().get('atomic_write_json')
-        if callable(fn):
-            fn(path, obj)
-            return
-    except Exception:
-        pass
-    tmp = path + '.tmp'
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(json.dumps(obj, indent=2, ensure_ascii=False) + '\n')
-    os.replace(tmp, path)
-
-def refresh_forced_rfc_keywords() -> None:
-    global FORCED_RFC_KEYWORDS, _FORCED_RFC_CONFIG, _FORCED_RFC_OVERRIDE
-    _FORCED_RFC_CONFIG = _ms_read_json_dict(FORCED_RFC_CONFIG_PATH)
-    _FORCED_RFC_OVERRIDE = _ms_read_json_dict(FORCED_RFC_OVERRIDE_PATH)
-    merged = dict(DEFAULT_FORCED_RFC_KEYWORDS)
-    merged.update(_FORCED_RFC_CONFIG)
-    merged.update(_FORCED_RFC_OVERRIDE)
-    FORCED_RFC_KEYWORDS = merged
-
-def refresh_forced_rfc_keywords_if_changed() -> None:
-    global _FORCED_RFC_MTIME
-    try:
-        mtc = os.path.getmtime(FORCED_RFC_CONFIG_PATH) if os.path.exists(FORCED_RFC_CONFIG_PATH) else 0.0
-    except Exception:
-        mtc = 0.0
-    try:
-        mto = os.path.getmtime(FORCED_RFC_OVERRIDE_PATH) if os.path.exists(FORCED_RFC_OVERRIDE_PATH) else 0.0
-    except Exception:
-        mto = 0.0
-    if mtc != _FORCED_RFC_MTIME.get('config') or mto != _FORCED_RFC_MTIME.get('override'):
-        _FORCED_RFC_MTIME['config'] = mtc
-        _FORCED_RFC_MTIME['override'] = mto
-        refresh_forced_rfc_keywords()
-
-refresh_forced_rfc_keywords()
-def _ms_apply_rfc_conf_floor(obj):
-    try:
-        if not isinstance(obj, dict):
-            return
-        for _k, _v in obj.items():
-            if not isinstance(_v, dict):
-                continue
-            eb = _v.get('evidence_buckets')
-            ed = _v.get('evidence_domains')
-            src = _v.get('sources')
-            is_rfc = False
-            if isinstance(eb, dict) and int(eb.get('rfc', 0) or 0) > 0:
-                is_rfc = True
-            if (not is_rfc) and isinstance(ed, list) and any('rfc-editor.org' in str(x) for x in ed):
-                is_rfc = True
-            if (not is_rfc) and isinstance(src, list) and any('rfc-editor.org/rfc/' in str(x) for x in src):
-                is_rfc = True
-            if is_rfc:
-                _v['confidence'] = max(float(_v.get('confidence') or 0.0), 0.80)
-    except Exception:
-        pass
 
 # Phase 2: Topic expansion (guardrailed)
 # -----------------------------
