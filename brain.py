@@ -1649,6 +1649,22 @@ def ddg_lite_search(query: str, max_results: int = 10) -> List[Dict[str, str]]:
     return results
 
 def web_learn_topic(topic: str, forced_url: str = "", avoid_domains: Optional[List[str]] = None) -> Tuple[bool, str, List[str], str]:
+    # MS_RFC_PREFETCH_VXLAN_TOP_V1
+    # Prefer RFC 7348 for VXLAN before DDG/Wiki.
+    try:
+        _t = (topic or '').strip().lower()
+        _forced = locals().get('forced_url')
+        if (not _forced) and ('vxlan' in _t or 'virtual extensible lan' in _t):
+            _rfc = 'https://www.rfc-editor.org/rfc/rfc7348'
+            ok, txt = fetch_page_text(_rfc)
+            if ok and txt:
+                answer = structured_synthesis(topic, txt, _rfc, 'rfc-editor.org')
+                sources = [_rfc]
+                chosen_url = _rfc
+                return True, answer, sources, chosen_url
+    except Exception:
+        pass
+
     # MS_RFC_PREFETCH_V1
     # Known-good first sources for certain topics (prevents bad PDF/blog picks)
     try:
