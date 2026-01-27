@@ -27,7 +27,7 @@ def norm(s: str) -> str:
 
 def main():
     if len(sys.argv) < 2:
-        die("Usage: scripts/force_relearn_topic.py \"topic\" [--wipe] [--reason \"text\"]")
+        die('Usage: scripts/force_relearn_topic.py "topic" [--wipe] [--reason "text"]')
 
     topic = sys.argv[1]
     wipe = "--wipe" in sys.argv
@@ -35,10 +35,9 @@ def main():
     reason = "FORCE relearn"
     if "--reason" in sys.argv:
         i = sys.argv.index("--reason")
-        if i + 1 < len(sys.argv):
-            reason = "FORCE " + sys.argv[i + 1].strip()
-        else:
+        if i + 1 >= len(sys.argv):
             die("ERROR: --reason needs a value")
+        reason = "FORCE " + sys.argv[i + 1].strip()
 
     now = datetime.datetime.now().isoformat(timespec="seconds")
 
@@ -52,6 +51,7 @@ def main():
     if not isinstance(q, list):
         die("ERROR: research_queue.json is not a list")
 
+    # Find or create queue item
     found = False
     for item in q:
         if norm(item.get("topic")) == norm(topic):
@@ -61,41 +61,60 @@ def main():
             item["requested_on"] = now
             item["current_confidence"] = 0.0
 
-            # remove anything cooldown/attempt related
-            for k in list(item.keys()):
-                lk2 = k.lower()
-                if "cooldown" in lk2 or "attempt" in lk2 or lk2 in {"completed_on", "worker_note", "chosen_url", "sources"}:
-                    item.pop(k, None)
+            # Always clear these (they cause cooldown/skip behavior)
+            for k in [
+                "completed_on",
+                "last_attempt_on",
+                "last_attempt",
+                "cooldown_until",
+                "cooldown",
+            ]:
+                item.pop(k, None)
+
+            # If wipe, also clear anything url-ish or attempt-ish so we truly relearn fresh
+            if wipe:
+                for k in list(item.keys()):
+                    kl = k.lower()
+                    if "url" in kl or "source" in kl or "chosen_url" in kl:
+                        item.pop(k, None)
+                    if "attempt" in kl or "cooldown" in kl:
+                        item.pop(k, None)
+                # reset attempts explicitly if your code uses it
+                item["attempts"] = 0
+
             break
 
     if not found:
-        q.append({
+        item = {
             "topic": topic,
             "reason": reason,
             "requested_on": now,
             "status": "pending",
-            "current_confidence": 0.0
-        })
+            "current_confidence": 0.0,
+        }
+        if wipe:
+            item["attempts"] = 0
+        q.append(item)
 
     rq.write_text(json.dumps(q, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
-    wiped = False
-    if wipe and lk.exists():
+    # Wipe local knowledge if requested
+    if wipe:
         k = load_json(lk, {})
         if isinstance(k, dict):
-            # remove exact + case-insensitive key
+            # delete exact or case-insensitive match
             if topic in k:
-                k.pop(topic, None); wiped = True
+                k.pop(topic, None)
             for kk in list(k.keys()):
                 if isinstance(kk, str) and norm(kk) == norm(topic):
-                    k.pop(kk, None); wiped = True
+                    k.pop(kk, None)
             lk.write_text(json.dumps(k, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     print("OK: queued pending with FORCE")
     print("topic:", topic)
-    print("wipe_local_knowledge:", wiped)
-    if brq: print("backup_queue:", brq)
-    if blk: print("backup_knowledge:", blk)
+    print("wipe_local_knowledge:", wipe)
+    print("backup_queue:", brq)
+    print("backup_knowledge:", blk)
 
 if __name__ == "__main__":
     main()
