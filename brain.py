@@ -132,6 +132,31 @@ def forced_url_for_topic(topic: str) -> str:
     return ''
 
 # -----------------------------
+
+# MS_RFC_CONF_FLOOR_SAVE_V1
+# If a topic was learned from an RFC/standards doc, don't let the stored confidence stay at 0.50.
+def _ms_apply_rfc_conf_floor(obj):
+    try:
+        if not isinstance(obj, dict):
+            return
+        for _k, _v in obj.items():
+            if not isinstance(_v, dict):
+                continue
+            eb = _v.get('evidence_buckets')
+            ed = _v.get('evidence_domains')
+            src = _v.get('sources')
+            is_rfc = False
+            if isinstance(eb, dict) and int(eb.get('rfc', 0) or 0) > 0:
+                is_rfc = True
+            if (not is_rfc) and isinstance(ed, list) and any('rfc-editor.org' in str(x) for x in ed):
+                is_rfc = True
+            if (not is_rfc) and isinstance(src, list) and any('rfc-editor.org/rfc/' in str(x) for x in src):
+                is_rfc = True
+            if is_rfc:
+                _v['confidence'] = max(float(_v.get('confidence') or 0.0), 0.80)
+    except Exception:
+        pass
+
 # Phase 2: Topic expansion (guardrailed)
 # -----------------------------
 
@@ -242,6 +267,16 @@ def ensure_dirs() -> None:
     os.makedirs(BACKUPS_DIR, exist_ok=True)
 
 def atomic_write_json(path: str, obj: Any) -> None:
+    # MS_RFC_CONF_FLOOR_SAVE_V1
+    # Apply RFC confidence floor when writing local_knowledge.json
+    try:
+        _path = locals().get('path') or locals().get('p') or locals().get('filepath') or locals().get('file_path')
+        _obj  = locals().get('obj') or locals().get('data') or locals().get('payload') or locals().get('content')
+        if isinstance(_path, str) and _path.endswith('local_knowledge.json'):
+            _ms_apply_rfc_conf_floor(_obj)
+    except Exception:
+        pass
+
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, ensure_ascii=False)
