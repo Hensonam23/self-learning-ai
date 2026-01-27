@@ -89,17 +89,47 @@ DEFAULT_COOLDOWN_SECONDS = 6 * 60 * 60  # 6 hours
 # Topics that should prefer an RFC/standards doc over random blogs/Wikipedia.
 # Key match is substring match against normalized topic.
 FORCED_RFC_KEYWORDS = {
-    'geneve': 'https://www.rfc-editor.org/rfc/rfc8926',
+    # Overlays / tunnels
+    'geneve': 'https://www.rfc-editor.org/rfc/rfc8926.txt',
     'vxlan':  'https://www.rfc-editor.org/rfc/rfc7348.txt',
+    'gre':    'https://www.rfc-editor.org/rfc/rfc2784.txt',
+    'generic routing encapsulation': 'https://www.rfc-editor.org/rfc/rfc2784.txt',
+    'ip-in-ip': 'https://www.rfc-editor.org/rfc/rfc2003.txt',
+    'ip in ip': 'https://www.rfc-editor.org/rfc/rfc2003.txt',
+    'ipip':     'https://www.rfc-editor.org/rfc/rfc2003.txt',
+    'ipsec':    'https://www.rfc-editor.org/rfc/rfc4301.txt',
+
+    # Routing / control
+    'bgp':   'https://www.rfc-editor.org/rfc/rfc4271.txt',
+    'ospf':  'https://www.rfc-editor.org/rfc/rfc2328.txt',
+    'vrrp':  'https://www.rfc-editor.org/rfc/rfc5798.txt',
+
+    # Addressing basics
+    'rfc 1918': 'https://www.rfc-editor.org/rfc/rfc1918.txt',
+    'rfc1918':  'https://www.rfc-editor.org/rfc/rfc1918.txt',
+    'cidr':     'https://www.rfc-editor.org/rfc/rfc4632.txt',
+    'nat':      'https://www.rfc-editor.org/rfc/rfc3022.txt',
+    'network address translation': 'https://www.rfc-editor.org/rfc/rfc3022.txt',
 }
 
+
 def forced_url_for_topic(topic: str) -> str:
-    t = (topic or '').strip().lower()
+    # Word-ish matching so short keys like 'gre' don't match inside unrelated words.
+    # Also normalizes punctuation so 'ip-in-ip' and 'ip in ip' both match.
+    def _norm_words(x: str) -> str:
+        x = (x or '').strip().lower()
+        x = re.sub(r'[^a-z0-9]+', ' ', x).strip()
+        return x
+
+    t = _norm_words(topic)
+    t2 = f" {t} "
     for k, u in FORCED_RFC_KEYWORDS.items():
-        if k in t:
+        kk = _norm_words(k)
+        if not kk:
+            continue
+        if f" {kk} " in t2:
             return u
     return ''
-
 
 # -----------------------------
 # Phase 2: Topic expansion (guardrailed)
@@ -1671,7 +1701,7 @@ def web_learn_topic(topic: str, forced_url: str = "", avoid_domains: Optional[Li
             _fu = forced_url_for_topic(topic)
             if _fu:
                 forced_url = _fu
-                safe_log(WEBQUEUE_LOG, f"weblearn: forced_url by topic='{{topic}}' url='{{forced_url}}'")
+                safe_log(WEBQUEUE_LOG, "weblearn: forced_url by topic='%s' url='%s'" % (topic, forced_url))
     except Exception:
         pass
 
