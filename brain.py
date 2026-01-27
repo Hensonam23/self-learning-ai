@@ -1648,6 +1648,31 @@ def ddg_lite_search(query: str, max_results: int = 10) -> List[Dict[str, str]]:
     return results
 
 def web_learn_topic(topic: str, forced_url: str = "", avoid_domains: Optional[List[str]] = None) -> Tuple[bool, str, List[str], str]:
+    # MS_RFC_PREFETCH_V1
+    # Known-good first sources for certain topics (prevents bad PDF/blog picks)
+    try:
+        _tn = (topic or '').strip().lower()
+    except Exception:
+        _tn = ''
+
+    _rfc_prefetch = {
+        'geneve tunneling': 'https://www.rfc-editor.org/rfc/rfc8926',
+        'geneve': 'https://www.rfc-editor.org/rfc/rfc8926',
+        'vxlan': 'https://www.rfc-editor.org/rfc/rfc7348',
+    }
+
+    _pref_url = _rfc_prefetch.get(_tn)
+    if _pref_url and (not forced_url):
+        try:
+            ok, txt = fetch_page_text(_pref_url)
+        except Exception:
+            ok, txt = False, ''
+        if ok and (txt or '').strip():
+            label = get_domain(_pref_url) or 'Web'
+            answer = structured_synthesis(topic, txt, _pref_url, label)
+            sources = [_pref_url]
+            return True, answer, sources, _pref_url
+
     avoid_domains = avoid_domains or []
 
     sources: List[str] = []
