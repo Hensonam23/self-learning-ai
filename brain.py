@@ -114,6 +114,10 @@ FORCED_RFC_KEYWORDS = {
 
 
 def forced_url_for_topic(topic: str) -> str:
+    try:
+        refresh_forced_rfc_keywords_if_changed()
+    except Exception:
+        pass
     # Word-ish matching so short keys like 'gre' don't match inside unrelated words.
     # Also normalizes punctuation so 'ip-in-ip' and 'ip in ip' both match.
     def _norm_words(x: str) -> str:
@@ -135,6 +139,143 @@ def forced_url_for_topic(topic: str) -> str:
 
 # MS_RFC_CONF_FLOOR_SAVE_V1
 # If a topic was learned from an RFC/standards doc, don't let the stored confidence stay at 0.50.
+
+# MS_FORCED_RFC_FILE_SUPPORT_V1
+
+# MS_FORCE_RFC_BY_TOPIC_CLI_V1
+def process_forcerfc_command(line: str) -> str:
+    try:
+        import shlex
+        parts = shlex.split((line or '').strip())
+    except Exception:
+        parts = (line or '').strip().split()
+
+    if not parts:
+        return ''
+    if (parts[0] or '').strip().lower() != '/forcerfc':
+        return ''
+
+    sub = (parts[1] if len(parts) > 1 else 'list').strip().lower()
+
+    if sub in ('reload',):
+        refresh_forced_rfc_keywords()
+        return 'OK: reloaded forced RFC maps (defaults + config + overrides).'
+
+    if sub in ('list', 'ls'):
+        refresh_forced_rfc_keywords()
+        out = []
+        out.append(f"Defaults: {len(DEFAULT_FORCED_RFC_KEYWORDS)}")
+        out.append(f"Config:   {len(_FORCED_RFC_CONFIG)}  ({FORCED_RFC_CONFIG_PATH})")
+        out.append(f"Override:{len(_FORCED_RFC_OVERRIDE)} ({FORCED_RFC_OVERRIDE_PATH})")
+        out.append(f"Merged:   {len(FORCED_RFC_KEYWORDS)}")
+        out.append('')
+        for k in sorted(FORCED_RFC_KEYWORDS.keys()):
+            out.append(f"- {k} -> {FORCED_RFC_KEYWORDS[k]}")
+        return '\n'.join(out)
+
+    if sub == 'add':
+        if len(parts) < 4:
+            return 'ERROR: /forcerfc add "keyword" "url"'
+        key = (parts[2] or '').strip().lower()
+        url = (parts[3] or '').strip()
+        if not key or not url:
+            return 'ERROR: keyword/url cannot be empty'
+        ov = dict(_ms_read_json_dict(FORCED_RFC_OVERRIDE_PATH))
+        ov[key] = url
+        _ms_atomic_write_json(FORCED_RFC_OVERRIDE_PATH, ov)
+        refresh_forced_rfc_keywords()
+        return f"OK: override set '{key}' -> '{url}'"
+
+    if sub in ('del', 'rm', 'remove'):
+        if len(parts) < 3:
+            return 'ERROR: /forcerfc del "keyword"'
+        key = (parts[2] or '').strip().lower()
+        ov = dict(_ms_read_json_dict(FORCED_RFC_OVERRIDE_PATH))
+        if key in ov:
+            ov.pop(key, None)
+            _ms_atomic_write_json(FORCED_RFC_OVERRIDE_PATH, ov)
+            refresh_forced_rfc_keywords()
+            return f"OK: override removed '{key}'"
+        return f"NOTE: override '{key}' not present"
+
+    if sub == 'clear':
+        _ms_atomic_write_json(FORCED_RFC_OVERRIDE_PATH, {})
+        refresh_forced_rfc_keywords()
+        return 'OK: cleared override file'
+
+    return 'ERROR: unknown /forcerfc subcommand (use: list/add/del/clear/reload)'
+# Allow forced RFC mapping to be extended without editing code.
+# Merge order:
+#   1) DEFAULT_FORCED_RFC_KEYWORDS (code)
+#   2) config/forced_rfc_map.json (repo)
+#   3) data/forced_rfc_map.json (local override)
+FORCED_RFC_CONFIG_PATH = os.path.join(BASE_DIR, 'config', 'forced_rfc_map.json')
+FORCED_RFC_OVERRIDE_PATH = os.path.join(DATA_DIR, 'forced_rfc_map.json')
+
+DEFAULT_FORCED_RFC_KEYWORDS = dict(FORCED_RFC_KEYWORDS)
+_FORCED_RFC_CONFIG = {}
+_FORCED_RFC_OVERRIDE = {}
+_FORCED_RFC_MTIME = {'config': 0.0, 'override': 0.0}
+
+def _ms_read_json_dict(path: str) -> dict:
+    try:
+        if not path or not os.path.exists(path):
+            return {}
+        txt = open(path, 'r', encoding='utf-8', errors='replace').read().strip()
+        if not txt:
+            return {}
+        obj = json.loads(txt)
+        if not isinstance(obj, dict):
+            return {}
+        out = {}
+        for k, v in obj.items():
+            ks = (str(k) if k is not None else '').strip().lower()
+            vs = (str(v) if v is not None else '').strip()
+            if ks and vs:
+                out[ks] = vs
+        return out
+    except Exception:
+        return {}
+
+def _ms_atomic_write_json(path: str, obj: dict) -> None:
+    try:
+        fn = globals().get('atomic_write_json')
+        if callable(fn):
+            fn(path, obj)
+            return
+    except Exception:
+        pass
+    tmp = path + '.tmp'
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(json.dumps(obj, indent=2, ensure_ascii=False) + '\n')
+    os.replace(tmp, path)
+
+def refresh_forced_rfc_keywords() -> None:
+    global FORCED_RFC_KEYWORDS, _FORCED_RFC_CONFIG, _FORCED_RFC_OVERRIDE
+    _FORCED_RFC_CONFIG = _ms_read_json_dict(FORCED_RFC_CONFIG_PATH)
+    _FORCED_RFC_OVERRIDE = _ms_read_json_dict(FORCED_RFC_OVERRIDE_PATH)
+    merged = dict(DEFAULT_FORCED_RFC_KEYWORDS)
+    merged.update(_FORCED_RFC_CONFIG)
+    merged.update(_FORCED_RFC_OVERRIDE)
+    FORCED_RFC_KEYWORDS = merged
+
+def refresh_forced_rfc_keywords_if_changed() -> None:
+    global _FORCED_RFC_MTIME
+    try:
+        mtc = os.path.getmtime(FORCED_RFC_CONFIG_PATH) if os.path.exists(FORCED_RFC_CONFIG_PATH) else 0.0
+    except Exception:
+        mtc = 0.0
+    try:
+        mto = os.path.getmtime(FORCED_RFC_OVERRIDE_PATH) if os.path.exists(FORCED_RFC_OVERRIDE_PATH) else 0.0
+    except Exception:
+        mto = 0.0
+    if mtc != _FORCED_RFC_MTIME.get('config') or mto != _FORCED_RFC_MTIME.get('override'):
+        _FORCED_RFC_MTIME['config'] = mtc
+        _FORCED_RFC_MTIME['override'] = mto
+        refresh_forced_rfc_keywords()
+
+refresh_forced_rfc_keywords()
 def _ms_apply_rfc_conf_floor(obj):
     try:
         if not isinstance(obj, dict):
@@ -3776,6 +3917,16 @@ def main() -> None:
         if user.startswith("/"):
             if user in ("/help", "/h", "/?"):
                 print_help()
+                continue
+
+            # MS_FORCERFC_INTERACTIVE_HOOK_V1
+            if user.startswith('/forcerfc'):
+                try:
+                    out = process_forcerfc_command(user)
+                    if out:
+                        print(out)
+                except Exception as _e:
+                    print(f"/forcerfc error: {_e}")
                 continue
 
             if user.startswith("/teach "):
