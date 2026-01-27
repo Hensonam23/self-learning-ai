@@ -1651,6 +1651,43 @@ def web_learn_topic(topic: str, forced_url: str = "", avoid_domains: Optional[Li
     avoid_domains = avoid_domains or []
 
     sources: List[str] = []
+    # SOURCE_QUALITY_V1
+    try:
+        _ms_good = (
+            'rfc-editor.org',
+            'ietf.org',
+            'datatracker.ietf.org',
+            'tools.ietf.org',
+        )
+        _ms_bad = (
+            'ipwithease.com',
+            'events.static.linuxfound.org',
+            'medium.com',
+            'blogspot.',
+        )
+        def _ms_url_rank(u: str) -> int:
+            u2 = (u or '').lower()
+            score = 0
+            if '.pdf' in u2:
+                score -= 10000
+            for g in _ms_good:
+                if g in u2:
+                    score += 200
+            for b in _ms_bad:
+                if b in u2:
+                    score -= 200
+            # Wikipedia is ok but not first choice
+            if 'wikipedia.org' in u2:
+                score -= 50
+            return -score  # smaller is better
+    
+        if 'urls' in locals() and isinstance(locals().get('urls'), list):
+            urls = [u for u in urls if u and ('.pdf' not in u.lower())]
+            urls = sorted(urls, key=_ms_url_rank)
+    except Exception:
+        pass
+    # /SOURCE_QUALITY_V1
+
     chosen_url = ""
 
     if forced_url:
