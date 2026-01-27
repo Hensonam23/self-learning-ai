@@ -90,3 +90,6 @@ data/**/*.bak.*
 # patch-script backups
 brain.py.bak.*
 data/*.bak.*
+
+# local overrides (do not commit)
+data/forced_rfc_map.json
