@@ -2062,6 +2062,21 @@ def run_webqueue(limit: int = 3, autoupgrade: bool = True) -> Dict[str, Any]:
                 if d and d not in avoid:
                     avoid.append(d)
 
+        # MS_FORCE_VXLAN_RFC7348_RUN_WEBQUEUE_V2
+        try:
+            _t = (topic or '').strip().lower()
+            _reason = (item.get('reason','') or '')
+            if ('vxlan' in _t) or ('virtual extensible lan' in _t):
+                # Always force RFC7348 on VXLAN, especially when we're doing a FORCE relearn.
+                forced = 'https://www.rfc-editor.org/rfc/rfc7348.txt'
+                safe_log(WEBQUEUE_LOG, f"webqueue: vxlan forced_url='{forced}' reason='{_reason}'")
+        except Exception as _e:
+            try:
+                safe_log(WEBQUEUE_LOG, f"webqueue: vxlan force hook failed ex='{_e}'")
+            except Exception:
+                pass
+
+
         ok2, answer, sources, chosen_url = web_learn_topic(topic, forced_url=forced, avoid_domains=avoid)
 
         if not ok2:
