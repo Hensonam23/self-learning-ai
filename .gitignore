@@ -86,3 +86,7 @@ ms_api.py.bak.*
 brain.py.bak.*
 data/*.bak.*
 data/**/*.bak.*
+
+# patch-script backups
+brain.py.bak.*
+data/*.bak.*
