@@ -1972,6 +1972,10 @@ def can_attempt(item: Dict[str, Any]) -> Tuple[bool, str]:
     if last > 0:
         elapsed = now_ts() - last
         if elapsed < cd:
+            # MS_FORCE_BYPASS_COOLDOWN_V7_RETURN
+            if str(item.get('reason','')).strip().upper().startswith('FORCE'):
+                return True, 'force'
+
             return False, f"cooldown:{human_age(cd - elapsed)}"
 
     return True, "ok"
