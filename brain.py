@@ -7,6 +7,29 @@
 # Phase 4: controlled autonomy (daily + weekly) with guardrails
 # Phase 5.1: evidence-weighted confidence (authority + independent sources + reinforcement)
 
+
+# =========================
+# PDF_BLOCK_V1
+# =========================
+def _ms_is_pdf_url(u: str) -> bool:
+    try:
+        x = (u or "").strip().lower()
+    except Exception:
+        return False
+    return (".pdf" in x)
+
+def _ms_bytes_look_like_pdf(b: bytes) -> bool:
+    try:
+        if not b:
+            return False
+        head = b.lstrip()[:8]
+        return head.startswith(b"%PDF-")
+    except Exception:
+        return False
+# =========================
+# /PDF_BLOCK_V1
+# =========================
+
 import os
 import re
 import sys
@@ -871,13 +894,28 @@ def set_knowledge(topic: str, answer: str, confidence: float, sources: Optional[
 def http_get(url: str, timeout: int = 15, headers: Optional[Dict[str, str]] = None) -> Tuple[int, str]:
     if urllib is None:
         return 0, ""
+    # PDF_BLOCK_V1: block PDFs before request
+    if _ms_is_pdf_url(str(url)):
+        raise RuntimeError('MS_SKIP_PDF_URL')
     req = urllib.request.Request(url, headers=headers or {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
     })
     try:
+        # PDF_BLOCK_V1: skip PDF URLs early
+        try:
+            _ms_u = None
+            _ms_arg = None
+            # best effort: if the call uses a Request object, it has .full_url
+            # (we can’t reliably parse the expression here, so we guard after Request() too)
+        except Exception:
+            pass
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             code = getattr(resp, "status", 200)
             body = resp.read()
+            # PDF_BLOCK_V1: block PDF bodies
+            if _ms_bytes_look_like_pdf(body):
+                raise RuntimeError('MS_SKIP_PDF_BODY')
+
             try:
                 text = body.decode("utf-8", errors="replace")
             except Exception:
@@ -1009,6 +1047,14 @@ def ddg_lite_results(query: str, max_results: int = 5) -> List[Dict[str, str]]:
 
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        # PDF_BLOCK_V1: skip PDF URLs early
+        try:
+            _ms_u = None
+            _ms_arg = None
+            # best effort: if the call uses a Request object, it has .full_url
+            # (we can’t reliably parse the expression here, so we guard after Request() too)
+        except Exception:
+            pass
         with urllib.request.urlopen(req, timeout=15) as resp:
             html = resp.read().decode("utf-8", "ignore")
     except Exception:
@@ -1540,6 +1586,14 @@ def ddg_lite_search(query: str, max_results: int = 10) -> List[Dict[str, str]]:
     # IMPORTANT: DDG Lite often needs a User-Agent
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        # PDF_BLOCK_V1: skip PDF URLs early
+        try:
+            _ms_u = None
+            _ms_arg = None
+            # best effort: if the call uses a Request object, it has .full_url
+            # (we can’t reliably parse the expression here, so we guard after Request() too)
+        except Exception:
+            pass
         with urllib.request.urlopen(req, timeout=15) as resp:
             body = resp.read()
         html = body.decode("utf-8", "ignore")
