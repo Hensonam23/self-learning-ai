@@ -172,6 +172,38 @@ def forced_url_for_topic(topic: str) -> str:
 
 
 # MS_RFC_SUMMARIZER_HELPERS_V2
+
+# MS_RFC_CLEAN_ANSWER_FN_V1
+# Final pass cleaner for RFC-derived answers (removes header-ish junk that leaks into bullets)
+RFC_CLEAN_LINE = re.compile(r'(\bISSN\b|RFC Series|Status of This Memo|Network Working Group|Internet Society|Copyright|STD\s*1)', re.I)
+
+def _rfc_clean_answer(answer: str) -> str:
+    a = (answer or '').replace('\r\n', '\n').replace('\r', '\n')
+    out = []
+    blank = 0
+    for line in a.split('\n'):
+        raw = (line or '').rstrip()
+        # drop obvious RFC header noise
+        if RFC_CLEAN_LINE.search(raw):
+            continue
+        # drop bullet lines that still contain those tokens (extra safety)
+        if raw.lstrip().startswith('-') and RFC_CLEAN_LINE.search(raw):
+            continue
+        if raw.strip() == '':
+            blank += 1
+            if blank > 1:
+                continue
+            out.append('')
+            continue
+        blank = 0
+        out.append(raw)
+    # trim leading/trailing blanks
+    while out and out[0].strip() == '':
+        out.pop(0)
+    while out and out[-1].strip() == '':
+        out.pop()
+    return '\n'.join(out)
+
 # RFC plain-text summarizer helpers (keeps answers clean)
 
 RFC_SKIP_SENT = re.compile(r'(\bISSN\b|RFC Series|Status of This Memo|Network Working Group|Internet Society|Copyright|STD\s*1)', re.I)
@@ -1886,6 +1918,18 @@ def web_learn_topic(topic: str, forced_url: str = "", avoid_domains: Optional[Li
             label = get_domain(_pref_url) or 'Web'
             answer = structured_synthesis(topic, txt, _pref_url, label)
             sources = [_pref_url]
+            # MS_RFC_CLEAN_ANSWER_HOOK_V3
+            try:
+                _u = (locals().get('chosen_url') or locals().get('forced_url') or '').strip().lower()
+                if _u and ('rfc-editor.org' in _u) and ('/rfc/' in _u) and _u.endswith('.txt'):
+                    answer = _rfc_clean_answer(answer)
+                    try:
+                        safe_log(WEBQUEUE_LOG, "rfc final cleaner applied url='%s'" % (locals().get('chosen_url') or locals().get('forced_url') or ''))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
             return True, answer, sources, _pref_url
 
     avoid_domains = avoid_domains or []
@@ -1936,6 +1980,18 @@ def web_learn_topic(topic: str, forced_url: str = "", avoid_domains: Optional[Li
             return False, "Web fetch failed for provided URL.", sources, ""
         answer = structured_synthesis(topic, txt, forced_url, "Direct URL")
         sources.append(forced_url)
+        # MS_RFC_CLEAN_ANSWER_HOOK_V3
+        try:
+            _u = (locals().get('chosen_url') or locals().get('forced_url') or '').strip().lower()
+            if _u and ('rfc-editor.org' in _u) and ('/rfc/' in _u) and _u.endswith('.txt'):
+                answer = _rfc_clean_answer(answer)
+                try:
+                    safe_log(WEBQUEUE_LOG, "rfc final cleaner applied url='%s'" % (locals().get('chosen_url') or locals().get('forced_url') or ''))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         return True, answer, sources, forced_url
 
     cands = ddg_html_results(topic, max_results=6)
@@ -1986,6 +2042,18 @@ def web_learn_topic(topic: str, forced_url: str = "", avoid_domains: Optional[Li
                     except Exception:
                         pass
                 
+                # MS_RFC_CLEAN_ANSWER_HOOK_V3
+                try:
+                    _u = (locals().get('chosen_url') or locals().get('forced_url') or '').strip().lower()
+                    if _u and ('rfc-editor.org' in _u) and ('/rfc/' in _u) and _u.endswith('.txt'):
+                        answer = _rfc_clean_answer(answer)
+                        try:
+                            safe_log(WEBQUEUE_LOG, "rfc final cleaner applied url='%s'" % (locals().get('chosen_url') or locals().get('forced_url') or ''))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
                 return True, answer, sources, chosen_url
             sources.append(chosen_url)
             safe_log(WEBQUEUE_LOG, f"weblearn: fetch failed best_url='{chosen_url}' trying ddg_lite + wiki fallback")
@@ -2000,6 +2068,18 @@ def web_learn_topic(topic: str, forced_url: str = "", avoid_domains: Optional[Li
                 label = get_domain(chosen_url) or "Web"
                 answer = structured_synthesis(topic, txt, chosen_url, label)
                 sources.append(chosen_url)
+                # MS_RFC_CLEAN_ANSWER_HOOK_V3
+                try:
+                    _u = (locals().get('chosen_url') or locals().get('forced_url') or '').strip().lower()
+                    if _u and ('rfc-editor.org' in _u) and ('/rfc/' in _u) and _u.endswith('.txt'):
+                        answer = _rfc_clean_answer(answer)
+                        try:
+                            safe_log(WEBQUEUE_LOG, "rfc final cleaner applied url='%s'" % (locals().get('chosen_url') or locals().get('forced_url') or ''))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
                 return True, answer, sources, chosen_url
             sources.append(chosen_url)
             safe_log(WEBQUEUE_LOG, f"weblearn: fetch failed best_url='{chosen_url}' falling back to wikipedia")
@@ -2012,6 +2092,18 @@ def web_learn_topic(topic: str, forced_url: str = "", avoid_domains: Optional[Li
             chosen_url = page_url or ""
             answer = structured_synthesis(topic, extract, chosen_url, "Wikipedia")
             sources.append(f"Wikipedia: {page_url}" if page_url else f"Wikipedia: {wtitle}")
+            # MS_RFC_CLEAN_ANSWER_HOOK_V3
+            try:
+                _u = (locals().get('chosen_url') or locals().get('forced_url') or '').strip().lower()
+                if _u and ('rfc-editor.org' in _u) and ('/rfc/' in _u) and _u.endswith('.txt'):
+                    answer = _rfc_clean_answer(answer)
+                    try:
+                        safe_log(WEBQUEUE_LOG, "rfc final cleaner applied url='%s'" % (locals().get('chosen_url') or locals().get('forced_url') or ''))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
             return True, answer, sources, chosen_url
 
     return False, "Web search returned no results or could not be fetched.", sources, ""
