@@ -114,35 +114,61 @@ FORCED_RFC_KEYWORDS = {
 
 
 def forced_url_for_topic(topic: str) -> str:
+    # MS_FORCED_RFC_WORD_MATCH_V1
+    # Safer matching for short keywords (nat/tcp/udp):
+    # - normalize to lowercase alnum tokens
+    # - match whole tokens (space-padded)
+    # - prefer longest matching key
     try:
-        refresh_forced_rfc_keywords_if_changed()
+        d = None
+        # If file-support helper exists, prefer its merged map.
+        for fn_name in ("forced_rfc_maps", "load_forced_rfc_maps", "get_forced_rfc_maps", "forced_rfc_map"):
+            fn = globals().get(fn_name)
+            if callable(fn):
+                try:
+                    r = fn()
+                    if isinstance(r, tuple) and len(r) >= 4 and isinstance(r[3], dict):
+                        d = r[3]
+                        break
+                    if isinstance(r, dict):
+                        d = r
+                        break
+                except Exception:
+                    pass
+
+        if d is None:
+            d = globals().get("FORCED_RFC_KEYWORDS")
+
+        if not isinstance(d, dict) or not d:
+            return ""
+
+        def _norm(x: str) -> str:
+            x = (x or "").lower().strip()
+            x = re.sub(r"[^a-z0-9]+", " ", x)
+            x = re.sub(r"\s+", " ", x).strip()
+            return x
+
+        t = _norm(topic)
+        if not t:
+            return ""
+        padded = f" {t} "
+
+        best_u = ""
+        best_len = -1
+        for k, u in d.items():
+            kn = _norm(str(k))
+            if not kn:
+                continue
+            if f" {kn} " in padded:
+                L = len(kn)
+                if L > best_len:
+                    best_len = L
+                    best_u = str(u)
+
+        return best_u or ""
     except Exception:
-        pass
-    # Word-ish matching so short keys like 'gre' don't match inside unrelated words.
-    # Also normalizes punctuation so 'ip-in-ip' and 'ip in ip' both match.
-    def _norm_words(x: str) -> str:
-        x = (x or '').strip().lower()
-        x = re.sub(r'[^a-z0-9]+', ' ', x).strip()
-        return x
+        return ""
 
-    t = _norm_words(topic)
-    t2 = f" {t} "
-    for k, u in FORCED_RFC_KEYWORDS.items():
-        kk = _norm_words(k)
-        if not kk:
-            continue
-        if f" {kk} " in t2:
-            return u
-    return ''
-
-# -----------------------------
-
-# MS_RFC_CONF_FLOOR_SAVE_V1
-# If a topic was learned from an RFC/standards doc, don't let the stored confidence stay at 0.50.
-
-# MS_FORCED_RFC_FILE_SUPPORT_V1
-
-# MS_FORCE_RFC_BY_TOPIC_CLI_V1
 def process_forcerfc_command(line: str) -> str:
     try:
         import shlex
