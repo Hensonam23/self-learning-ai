@@ -1544,7 +1544,17 @@ def fetch_page_text_debug(url: str, max_chars: int = 12000) -> Tuple[bool, str, 
     return True, text, "ok"
 
 def fetch_page_text(url: str, max_chars: int = 12000) -> Tuple[bool, str]:
-    code, body = http_get(url)
+    # MS_PDF_SKIP_HANDLER_V1
+    try:
+        code, body = http_get(url)
+    except RuntimeError as _e:
+        if 'MS_SKIP_PDF_URL' in str(_e):
+            try:
+                safe_log(WEBQUEUE_LOG, "fetch: skip pdf url='%s'" % url)
+            except Exception:
+                pass
+            return False, ""
+        raise
     if code != 200 or not body:
         return False, ""
 
