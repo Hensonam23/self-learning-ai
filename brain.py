@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# MS_FORCE_BYPASS_COOLDOWN_V6
 # MachineSpirit brain.py
 # Single-file, file-backed (JSON in ./data).
 # Phase 1: queuehealth + retry/backoff + clearer logs
@@ -2008,7 +2009,7 @@ def run_webqueue(limit: int = 3, autoupgrade: bool = True) -> Dict[str, Any]:
                 mark_failed(item, why, final=True)
                 safe_log(WEBQUEUE_LOG, f"webqueue: finalize junk topic='{item.get('topic','')}' reason='{why}'")
                 finalized += 1
-            elif why == "max_attempts_reached":
+            elif (why == "max_attempts_reached") and not (str(item.get('reason','')).strip().upper().startswith('FORCE')):
                 mark_failed(item, "max_attempts_reached", final=True)
                 safe_log(WEBQUEUE_LOG, f"webqueue: finalize max attempts topic='{item.get('topic','')}' attempts={item.get('attempts',0)}")
                 finalized += 1
