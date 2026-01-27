@@ -34,6 +34,173 @@ AUTO_WEBLEARN = (os.environ.get("MS_AUTO_WEBLEARN", "1").strip().lower() not in 
 
 app = FastAPI(title=APP_NAME, version=VERSION)
 
+# =========================
+# FASTLEARN_V1_BEGIN
+# =========================
+import os as _os
+import re as _re
+import json as _json
+import datetime as _dt
+import sys as _sys
+import time as _time
+import subprocess as _subprocess
+from pathlib import Path as _Path
+
+_MS_FASTLEARN_ENABLED = (_os.environ.get("MS_FASTLEARN_ENABLED", "1").strip() == "1")
+_MS_FASTLEARN_CONF_THRESHOLD = float(_os.environ.get("MS_FASTLEARN_CONF_THRESHOLD", "0.70"))
+_MS_FASTLEARN_WINDOW_S = int(_os.environ.get("MS_FASTLEARN_WINDOW_S", "60"))
+_MS_FASTLEARN_MAX_PER_WINDOW = int(_os.environ.get("MS_FASTLEARN_MAX_PER_WINDOW", "3"))
+_MS_FASTLEARN_WEBQUEUE_TIMEOUT_S = int(_os.environ.get("MS_FASTLEARN_WEBQUEUE_TIMEOUT_S", "25"))
+_MS_FASTLEARN_FLOCK_WAIT_S = int(_os.environ.get("MS_FASTLEARN_FLOCK_WAIT_S", "3"))
+
+_FASTLEARN_EVENTS = []  # timestamps (seconds)
+
+_REPO_DIR_FL = _Path(_os.environ.get("MS_REPO_DIR", str(_Path(__file__).resolve().parent))).resolve()
+_KNOWLEDGE_PATH_FL = _Path(_os.environ.get("MS_KNOWLEDGE_PATH", str(_REPO_DIR_FL / "data" / "local_knowledge.json"))).resolve()
+_QUEUE_PATH_FL = _REPO_DIR_FL / "data" / "research_queue.json"
+_LOCK_PATH_FL = _REPO_DIR_FL / ".machinespirit.lock"
+_BRAIN_PATH_FL = _REPO_DIR_FL / "brain.py"
+
+def _fl_norm_text(text: str) -> str:
+    t = (text or "").strip()
+    t = _re.sub(r"^\s*(what is|what's|what are|define|explain)\s+", "", t, flags=_re.IGNORECASE).strip()
+    t = _re.sub(r"[?!.]+$", "", t).strip()
+    t = _re.sub(r"\s+", " ", t).strip()
+    return t.lower()
+
+def _fl_looks_junky(topic: str) -> bool:
+    if not topic:
+        return True
+    if len(topic) > 80:
+        return True
+    if "http://" in topic or "https://" in topic or "www." in topic:
+        return True
+    if "/" in topic or "\\" in topic:
+        return True
+    if _re.search(r"\b(sudo|rm\s+-rf|chmod\s+777|curl\s+|wget\s+|ssh\s+)\b", topic):
+        return True
+    if _re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", topic):
+        return True
+    return False
+
+def _fl_rate_limited() -> bool:
+    now = _time.time()
+    while _FASTLEARN_EVENTS and (now - _FASTLEARN_EVENTS[0]) > _MS_FASTLEARN_WINDOW_S:
+        _FASTLEARN_EVENTS.pop(0)
+    return len(_FASTLEARN_EVENTS) >= _MS_FASTLEARN_MAX_PER_WINDOW
+
+def _fl_load_local(topic_norm: str):
+    try:
+        if not _KNOWLEDGE_PATH_FL.exists():
+            return None
+        db = _json.loads(_KNOWLEDGE_PATH_FL.read_text(encoding="utf-8", errors="replace") or "{}")
+        if not isinstance(db, dict):
+            return None
+        ent = db.get(topic_norm)
+        return ent if isinstance(ent, dict) else None
+    except Exception:
+        return None
+
+def _fl_enqueue(topic_norm: str, current_conf: float):
+    today = _dt.date.today().isoformat()
+    item = {
+        "topic": topic_norm,
+        "reason": "User asked (fastlearn)",
+        "requested_on": today,
+        "status": "pending",
+        "current_confidence": float(current_conf or 0.0),
+    }
+
+    _QUEUE_PATH_FL.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        q = _json.loads(_QUEUE_PATH_FL.read_text(encoding="utf-8", errors="replace") or "[]")
+        if not isinstance(q, list):
+            q = []
+    except Exception:
+        q = []
+
+    for e in q:
+        if isinstance(e, dict) and (e.get("topic") == topic_norm):
+            return False
+
+    q.append(item)
+
+    tmp = _QUEUE_PATH_FL.with_suffix(".json.tmp")
+    tmp.write_text(_json.dumps(q, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    _os.replace(tmp, _QUEUE_PATH_FL)
+    return True
+
+def _fl_run_webqueue_once():
+    if not _BRAIN_PATH_FL.exists():
+        print("fastlearn: brain.py not found, cannot run webqueue")
+        return False
+
+    cmd = [
+        "/usr/bin/flock", "-w", str(_MS_FASTLEARN_FLOCK_WAIT_S),
+        str(_LOCK_PATH_FL),
+        _sys.executable, str(_BRAIN_PATH_FL),
+        "--webqueue", "--limit", "1",
+    ]
+
+    try:
+        r = _subprocess.run(
+            cmd,
+            cwd=str(_REPO_DIR_FL),
+            capture_output=True,
+            text=True,
+            timeout=_MS_FASTLEARN_WEBQUEUE_TIMEOUT_S,
+        )
+        out = (r.stdout or "").strip()
+        err = (r.stderr or "").strip()
+        if out:
+            print("fastlearn: webqueue stdout:", out[-500:])
+        if err:
+            print("fastlearn: webqueue stderr:", err[-500:])
+        return (r.returncode == 0)
+    except _subprocess.TimeoutExpired:
+        print("fastlearn: webqueue timed out")
+        return False
+    except Exception as e:
+        print("fastlearn: webqueue failed:", type(e).__name__, str(e))
+        return False
+
+def _fastlearn_try(text: str):
+    if not _MS_FASTLEARN_ENABLED:
+        return
+    topic = _fl_norm_text(text)
+    if _fl_looks_junky(topic):
+        return
+
+    ent = _fl_load_local(topic)
+    conf = 0.0
+    if ent:
+        try:
+            conf = float(ent.get("confidence", 0.0) or 0.0)
+        except Exception:
+            conf = 0.0
+        if ent.get("answer") and conf >= _MS_FASTLEARN_CONF_THRESHOLD:
+            return
+
+    queued = _fl_enqueue(topic, conf)
+
+    if _fl_rate_limited():
+        if queued:
+            print("fastlearn: rate-limited, queued topic=%r conf=%.2f" % (topic, conf))
+        return
+
+    if queued:
+        print("fastlearn: queued topic=%r conf=%.2f" % (topic, conf))
+
+    _FASTLEARN_EVENTS.append(_time.time())
+
+    ran = _fl_run_webqueue_once()
+    if ran:
+        print("fastlearn: webqueue attempted for topic=%r" % (topic,))
+# =========================
+# FASTLEARN_V1_END
+# =========================
+
 # single-process concurrency guard (uvicorn can run multiple workers, but your systemd unit uses 1)
 _BRAIN_LOCK = asyncio.Lock()
 
@@ -352,6 +519,44 @@ async def _run_brain(line: str, timeout_s: int) -> Dict[str, Any]:
 # ----------------------------
 # Routes
 # ----------------------------
+
+# =========================
+# SMALLTALK_HELPERS_SAFE_V1
+# =========================
+import re as _re_smalltalk
+
+_SMALLTALK_SET = {
+    "hi","hello","hey","yo","sup","hiya","howdy",
+    "thanks","thank you","thx",
+    "ok","okay","k","cool","nice",
+    "good morning","good afternoon","good evening",
+    "goodnight","good night",
+    "how are you","how r u","hru","how you doing","how's it going","hows it going",
+}
+
+def _is_smalltalk_msg(text: str) -> bool:
+    t = (text or "").strip().lower()
+    t = _re_smalltalk.sub(r"\s+", " ", t).strip()
+    if not t:
+        return True
+    if t in _SMALLTALK_SET:
+        return True
+    if len(t) <= 3 and t in {"yo","k","ok","kk"}:
+        return True
+    return False
+
+def _smalltalk_reply(text: str) -> str:
+    t = (text or "").strip().lower()
+    if t in {"hi","hello","hey","yo","hiya","howdy","sup"}:
+        return "Hey 🙂 Ask me something like: 'what is VLAN' or 'explain NAT'."
+    if "how are you" in t or "how's it going" in t or "hows it going" in t:
+        return "Doing good. What do you want to learn or build today?"
+    if "thank" in t or t == "thx":
+        return "No problem."
+    if t in {"ok","okay","k","cool","nice"}:
+        return "👍"
+    return "Hey. Ask me a question and I’ll try to answer it."
+
 @app.get("/")
 async def root() -> Dict[str, Any]:
     return {"ok": True, "app": APP_NAME, "version": VERSION}
@@ -493,6 +698,36 @@ def _local_facts_answer_v3(text: str):
     return None
 @app.post("/ask", response_model=AskResponse)
 async def ask(request: Request, req: AskRequest) -> AskResponse:
+    # FASTLEARN_CALL_IN_ASK
+    try:
+        _fl_text = ""
+        if "payload" in locals():
+            _fl_text = getattr(payload, "text", "") or ""
+        # =========================
+        # SMALLTALK_BYPASS_SAFE_V1
+        # =========================
+        _txt = (getattr(req, 'text', '') or '').strip()
+        if _is_smalltalk_msg(_txt):
+            _ans = _smalltalk_reply(_txt)
+            return {
+                'ok': True,
+                'topic': 'chat',
+                'answer': _ans,
+                'duration_s': 0.0,
+                'error': None,
+                'raw': None,
+                'theme': {'theme': 'none', 'intensity': 'light'},
+            }
+
+        if not _fl_text:
+            for _v in locals().values():
+                _t = getattr(_v, "text", "") if hasattr(_v, "text") else ""
+                if isinstance(_t, str) and _t.strip():
+                    _fl_text = _t
+                    break
+        _fastlearn_try(_fl_text)
+    except Exception:
+        pass
     _require_auth(request)
     t0 = time.time()
 
