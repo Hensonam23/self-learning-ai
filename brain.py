@@ -169,6 +169,117 @@ def forced_url_for_topic(topic: str) -> str:
     except Exception:
         return ""
 
+
+# MS_RFC_SUMMARIZER_HELPERS_V1
+# RFC plain-text summarizer helpers (keeps answers clean)
+def _is_rfc_txt_url(url: str) -> bool:
+    u = (url or '').strip().lower()
+    if not u:
+        return False
+    if 'rfc-editor.org' in u and '/rfc/' in u and u.endswith('.txt'):
+        return True
+    return False
+
+def _rfc_clean_lines(raw: str):
+    raw = (raw or '').replace('\x0c', '\n')
+    ls = [x.rstrip() for x in raw.splitlines()]
+    out = []
+    bad = re.compile(r'(ISSN:|Internet Engineering Task Force|IETF|Status of This Memo|Copyright|Table of Contents|Author\'?s Address|Authors\'? Addresses|Obsoletes:|Updates:)', re.I)
+    for line in ls:
+        t = line.strip()
+        if not t:
+            out.append('')
+            continue
+        if bad.search(t):
+            continue
+        if re.match(r'^RFC\s+\d+\b', t):
+            continue
+        out.append(line)
+    cleaned = []
+    last_blank = False
+    for line in out:
+        if line.strip() == '':
+            if last_blank:
+                continue
+            last_blank = True
+            cleaned.append('')
+        else:
+            last_blank = False
+            cleaned.append(line)
+    return cleaned
+
+def _rfc_extract_section(lines, heading: str):
+    h = heading.strip().lower()
+    start = None
+    for i, L in enumerate(lines):
+        if L.strip().lower() == h:
+            start = i + 1
+            break
+    if start is None:
+        return ''
+    buf = []
+    for j in range(start, min(start + 800, len(lines))):
+        t = lines[j].strip()
+        if not t:
+            if buf:
+                buf.append('')
+            continue
+        if t.lower() in ('status of this memo', 'copyright notice'):
+            break
+        if re.match(r'^\d+\.\s', t):
+            if heading.lower() != 'introduction':
+                break
+        if len(buf) > 120:
+            break
+        buf.append(t)
+    txt = ' '.join(x for x in buf if x != '').strip()
+    txt = re.sub(r'\s+', ' ', txt)
+    return txt
+
+def _sentences(text: str):
+    text = re.sub(r'\s+', ' ', (text or '').strip())
+    if not text:
+        return []
+    parts = re.split(r'(?<=[\.\!\?])\s+', text)
+    out = []
+    for s in parts:
+        s = s.strip()
+        if len(s) < 12:
+            continue
+        out.append(s)
+        if len(out) >= 10:
+            break
+    return out
+
+def _rfc_make_answer(topic: str, raw: str, url: str) -> str:
+    ls = _rfc_clean_lines(raw)
+    abstract = _rfc_extract_section(ls, 'Abstract')
+    intro = ''
+    joined = '\n'.join(ls)
+    m = re.search(r'(?im)^\s*1\.\s*introduction\s*$', joined)
+    if m:
+        idx = joined[:m.start()].count('\n')
+        intro = _rfc_extract_section(ls[idx:], '1. Introduction')
+    if not intro:
+        intro = _rfc_extract_section(ls, 'Introduction')
+
+    blob = (abstract + ' ' + intro).strip()
+    ss = _sentences(blob)
+    title = (topic or '').strip().upper() or 'RFC'
+    definition = ss[0] if ss else (abstract[:240] if abstract else 'This RFC describes a networking protocol/standard.')
+    kps = []
+    for x in ss[1:]:
+        kps.append(x)
+        if len(kps) >= 4:
+            break
+    if not kps and intro:
+        kps = _sentences(intro)[0:3]
+
+    out = [f"{title}", "", "Definition:", f"- {definition}", "", "Key points:"]
+    for kp in kps:
+        out.append(f"- {kp}")
+    out += ["", "Sources:", f"- Direct URL: {url}"]
+    return '\n'.join(out).strip() + "\n"
 def process_forcerfc_command(line: str) -> str:
     try:
         import shlex
@@ -2011,6 +2122,25 @@ def web_learn_topic(topic: str, forced_url: str = "", avoid_domains: Optional[Li
                 label = get_domain(chosen_url) or "Web"
                 answer = structured_synthesis(topic, txt, chosen_url, label)
                 sources.append(chosen_url)
+                # MS_RFC_SUMMARY_OVERRIDE_V1
+                # If we learned from an RFC .txt, override the final answer with a cleaner RFC summary.
+                try:
+                    if chosen_url and _is_rfc_txt_url(chosen_url):
+                        _raw = ''
+                        try:
+                            _hg = globals().get('http_get')
+                            if callable(_hg):
+                                _raw = _hg(chosen_url) or ''
+                        except Exception:
+                            _raw = ''
+                        if _raw:
+                            answer = _rfc_make_answer(topic, _raw, chosen_url)
+                except Exception as _e:
+                    try:
+                        safe_log(WEBQUEUE_LOG, "weblearn: rfc summary override failed topic='%s' ex='%s'" % (topic, _e))
+                    except Exception:
+                        pass
+                
                 return True, answer, sources, chosen_url
             sources.append(chosen_url)
             safe_log(WEBQUEUE_LOG, f"weblearn: fetch failed best_url='{chosen_url}' trying ddg_lite + wiki fallback")
