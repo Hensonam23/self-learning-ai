@@ -77,3 +77,7 @@ proposals/
 
 # local certs (never commit)
 certs/
+
+# local restore scratch
+ms_api.py.pre_restore.*
+ms_api.py.bak.*
