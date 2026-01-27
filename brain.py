@@ -85,6 +85,22 @@ AUTONOMY_LOG = os.path.join(LOGS_DIR, "autonomy.log")
 DEFAULT_MAX_QUEUE_ATTEMPTS = 3
 DEFAULT_COOLDOWN_SECONDS = 6 * 60 * 60  # 6 hours
 
+# MS_FORCED_RFC_MAP_V1
+# Topics that should prefer an RFC/standards doc over random blogs/Wikipedia.
+# Key match is substring match against normalized topic.
+FORCED_RFC_KEYWORDS = {
+    'geneve': 'https://www.rfc-editor.org/rfc/rfc8926',
+    'vxlan':  'https://www.rfc-editor.org/rfc/rfc7348.txt',
+}
+
+def forced_url_for_topic(topic: str) -> str:
+    t = (topic or '').strip().lower()
+    for k, u in FORCED_RFC_KEYWORDS.items():
+        if k in t:
+            return u
+    return ''
+
+
 # -----------------------------
 # Phase 2: Topic expansion (guardrailed)
 # -----------------------------
@@ -1649,19 +1665,13 @@ def ddg_lite_search(query: str, max_results: int = 10) -> List[Dict[str, str]]:
     return results
 
 def web_learn_topic(topic: str, forced_url: str = "", avoid_domains: Optional[List[str]] = None) -> Tuple[bool, str, List[str], str]:
-    # MS_RFC_PREFETCH_VXLAN_TOP_V1
-    # Prefer RFC 7348 for VXLAN before DDG/Wiki.
+    # MS_FORCE_RFC_BY_TOPIC_WEBLEARN_V1
     try:
-        _t = (topic or '').strip().lower()
-        _forced = locals().get('forced_url')
-        if (not _forced) and ('vxlan' in _t or 'virtual extensible lan' in _t):
-            _rfc = 'https://www.rfc-editor.org/rfc/rfc7348'
-            ok, txt = fetch_page_text(_rfc)
-            if ok and txt:
-                answer = structured_synthesis(topic, txt, _rfc, 'rfc-editor.org')
-                sources = [_rfc]
-                chosen_url = _rfc
-                return True, answer, sources, chosen_url
+        if not forced_url:
+            _fu = forced_url_for_topic(topic)
+            if _fu:
+                forced_url = _fu
+                safe_log(WEBQUEUE_LOG, f"weblearn: forced_url by topic='{{topic}}' url='{{forced_url}}'")
     except Exception:
         pass
 
@@ -2062,20 +2072,16 @@ def run_webqueue(limit: int = 3, autoupgrade: bool = True) -> Dict[str, Any]:
                 if d and d not in avoid:
                     avoid.append(d)
 
-        # MS_FORCE_VXLAN_RFC7348_RUN_WEBQUEUE_V2
-        try:
-            _t = (topic or '').strip().lower()
-            _reason = (item.get('reason','') or '')
-            if ('vxlan' in _t) or ('virtual extensible lan' in _t):
-                # Always force RFC7348 on VXLAN, especially when we're doing a FORCE relearn.
-                forced = 'https://www.rfc-editor.org/rfc/rfc7348.txt'
-                safe_log(WEBQUEUE_LOG, f"webqueue: vxlan forced_url='{forced}' reason='{_reason}'")
-        except Exception as _e:
-            try:
-                safe_log(WEBQUEUE_LOG, f"webqueue: vxlan force hook failed ex='{_e}'")
-            except Exception:
-                pass
 
+        # MS_FORCE_RFC_BY_TOPIC_RUN_WEBQUEUE_V1
+        try:
+            if not forced:
+                _fu = forced_url_for_topic(topic)
+                if _fu:
+                    forced = _fu
+                    safe_log(WEBQUEUE_LOG, f"webqueue: forced_url by topic='{topic}' url='{forced}' reason='{item.get('reason','')}'")
+        except Exception:
+            pass
 
         ok2, answer, sources, chosen_url = web_learn_topic(topic, forced_url=forced, avoid_domains=avoid)
 
