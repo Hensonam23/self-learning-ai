@@ -1,0 +1,43 @@
+{
+  "deny_topic_contains": [
+    "my name is",
+    "my phone",
+    "my email",
+    "my address",
+    "my password",
+    "passcode",
+    "api key",
+    "ssh -v",
+    "authorization:"
+  ],
+  "deny_text_regex": [
+    "(?i)\\b(my name is|my email|my phone|my address)\\b",
+    "(?i)\\b(password|passcode|api key|token|secret)\\b\\s*[:=]\\s*\\S+",
+    "(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}",
+    "(?i)\\bssh\\b[^\\n]*@[^\\s]+",
+    "(?i)authorization:\\s*[^\\n]+",
+    "(?i)bearer\\s+[A-Za-z0-9._-]+"
+  ],
+  "scrub_text_regex": [
+    { "pattern": "(?i)\\b10\\.(\\d{1,3}\\.){2}\\d{1,3}\\b", "replacement": "10.x.x.x" },
+    { "pattern": "(?i)\\b192\\.168\\.(\\d{1,3}\\.)\\d{1,3}\\b", "replacement": "192.168.x.x" },
+    { "pattern": "(?i)\\b172\\.(1[6-9]|2\\d|3[01])\\.(\\d{1,3})\\.(\\d{1,3})\\b", "replacement": "172.16-31.x.x" },
+    { "pattern": "(?i)authorization:\\s*[^\\n]+", "replacement": "Authorization: <redacted>" },
+    { "pattern": "(?i)bearer\\s+[A-Za-z0-9._-]+", "replacement": "Bearer <redacted>" },
+    { "pattern": "(?i)\\baaron@\\S+", "replacement": "<user@host>" },
+    { "pattern": "(?i)\\baaron\\b", "replacement": "<user>" },
+    { "pattern": "(?i)\\bmachinespirit\\b", "replacement": "<device>" }
+  ],
+  "allow_topic_exact": [
+    "subnet",
+    "subnetting",
+    "subnet mask",
+    "cidr",
+    "rfc 1918",
+    "private ip addressing",
+    "osi model",
+    "nat",
+    "vlan",
+    "icmp ping"
+  ]
+}
