@@ -93,3 +93,15 @@ data/*.bak.*
 
 # local overrides (do not commit)
 data/forced_rfc_map.json
+
+# --- machine spirit local junk ---
+*.bak
+*.bak.*
+*.save
+*.save.*
+*~
+*.swp
+*.tmp
+*.old
+*.orig
+*.rej
