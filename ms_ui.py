@@ -215,24 +215,13 @@ HTML_TEMPLATE = r"""<!doctype html>
     
 /* --- MachineSpirit Admin UI (floating) --- */
 #msAdminBox{
-  position: fixed;
-  top: 12px;
-  right: 12px;
-  z-index: 9999;
-  display: flex;
+  display: inline-flex;
   gap: 8px;
   align-items: center;
-  padding: 8px 10px;
-  border: 1px solid rgba(255,255,255,0.10);
-  background: rgba(18, 20, 30, 0.70);
-  backdrop-filter: blur(6px);
-  border-radius: 12px;
-  color: rgba(255,255,255,0.85);
-  font: 14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial;
 }
-#msAdminState{
-  opacity: 0.85;
-}
+
+#msAdminState{ display:none; }
+
 /* --- end MachineSpirit Admin UI --- */
 :root{
       --panel: rgba(18, 20, 30, 0.68);
@@ -455,13 +444,7 @@ HTML_TEMPLATE = r"""<!doctype html>
 </head>
 <body>
 
-<!-- MachineSpirit Admin UI (floating) -->
-<div id="msAdminBox">
-  <button class="btn" id="msAdminBtn" type="button">Admin Login</button>
-  <button class="btn" id="msAdminOutBtn" type="button" style="display:none;">Logout</button>
-  <span id="msAdminState">User</span>
-</div>
-<!-- end MachineSpirit Admin UI -->
+
 
   <div class="app">
     <div class="topbar">
@@ -471,6 +454,12 @@ HTML_TEMPLATE = r"""<!doctype html>
       </div>
 
       <div class="actions">
+        <div id="msAdminBox">
+  <button class="btn" id="msAdminBtn" type="button">Admin</button>
+  <button class="btn" id="msAdminOutBtn" type="button" style="display:none;">Logout</button>
+  <span id="msAdminState">User</span>
+</div>
+
         <div id="themePill" class="pill">Theme: loading...</div>
         <button class="btn" id="resetBtn">Reset chat</button>
       </div>
