@@ -230,14 +230,6 @@ HTML_TEMPLATE = r"""<!doctype html>
   color: rgba(255,255,255,0.85);
   font: 14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial;
 }
-#msAdminBox button{
-  cursor: pointer;
-  border: 1px solid rgba(255,255,255,0.14);
-  background: rgba(255,255,255,0.06);
-  color: rgba(255,255,255,0.92);
-  padding: 6px 10px;
-  border-radius: 10px;
-}
 #msAdminState{
   opacity: 0.85;
 }
@@ -465,8 +457,8 @@ HTML_TEMPLATE = r"""<!doctype html>
 
 <!-- MachineSpirit Admin UI (floating) -->
 <div id="msAdminBox">
-  <button id="msAdminBtn" type="button">Admin Login</button>
-  <button id="msAdminOutBtn" type="button" style="display:none;">Logout</button>
+  <button class="btn" id="msAdminBtn" type="button">Admin Login</button>
+  <button class="btn" id="msAdminOutBtn" type="button" style="display:none;">Logout</button>
   <span id="msAdminState">User</span>
 </div>
 <!-- end MachineSpirit Admin UI -->
