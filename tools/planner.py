@@ -69,23 +69,17 @@ def cmd_learn_now(_args):
         print("EMPTY")
         return
     try:
-        import learning_shim  # must exist in your repo
+        # Use answer_engine directly for learning
+        from answer_engine import respond
         print(f"[planner] learning-now: {topic}")
-        if hasattr(learning_shim, "search_and_learn"):
-            res = learning_shim.search_and_learn(topic)
-        elif hasattr(learning_shim, "learn"):
-            res = learning_shim.learn(topic)
-        else:
-            raise RuntimeError("learning_shim has no learn/search_and_learn")
-
-        # If shim returns (summary, sources) capture it
-        if isinstance(res, tuple) and len(res) >= 1:
-            summary = res[0] or f"Learned topic: {topic}"
-            sources = res[1] if len(res) > 1 else []
-            add_knowledge(topic, summary, sources or [])
-        else:
-            add_knowledge(topic, f"Learn completed for: {topic}", [])
-
+        
+        # Generate a learning prompt for the topic
+        prompt = f"Learn and explain: {topic}"
+        result = respond(prompt)
+        
+        # Store the learned knowledge
+        add_knowledge(topic, result or f"Learned topic: {topic}", [])
+        
         print("[planner] learn complete")
     except Exception as e:
         append_note(f"LEARN-NOW FAILED for topic: {topic}. Error: {e}")
