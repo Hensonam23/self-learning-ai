@@ -214,12 +214,6 @@ HTML_TEMPLATE = r"""<!doctype html>
   <style>
     
 /* --- MachineSpirit Admin UI (floating) --- */
-#msAdminBox{
-  display: inline-flex;
-  gap: 8px;
-  align-items: center;
-}
-
 #msAdminState{ display:none; }
 
 /* --- end MachineSpirit Admin UI --- */
@@ -454,13 +448,10 @@ HTML_TEMPLATE = r"""<!doctype html>
       </div>
 
       <div class="actions">
-        <div id="msAdminBox">
-  <button class="btn" id="msAdminBtn" type="button">Admin</button>
-  <button class="btn" id="msAdminOutBtn" type="button" style="display:none;">Logout</button>
-  <span id="msAdminState">User</span>
-</div>
-
-        <div id="themePill" class="pill">Theme: loading...</div>
+<button class="btn" id="msAdminBtn" type="button">Admin Login</button>
+<button class="btn" id="msAdminOutBtn" type="button" style="display:none;">Logout</button>
+<span id="msAdminState" style="display:none;">User</span>
+<div id="themePill" class="pill">Theme: loading...</div>
         <button class="btn" id="resetBtn">Reset chat</button>
       </div>
     </div>
