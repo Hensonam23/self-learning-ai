@@ -673,7 +673,7 @@ def _local_facts_answer_v3(text: str):
         ans = (ent.get("answer") or "").strip() if isinstance(ent, dict) else ""
         if ans:
             return ("my name", ans)
-        return ("my name", 'I don’t know your name yet. Tell me: "my name is Aaron" and I’ll remember it.')
+        return ("my name", 'I don’t know your name yet. Tell me: "my name is <your name>" and I’ll remember it.')
 
     # --- NAME: bot ---
     if any(x in cand for x in ("your name", "what is your name", "what's your name")):

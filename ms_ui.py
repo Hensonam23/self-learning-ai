@@ -462,7 +462,7 @@ HTML_TEMPLATE = r"""<!doctype html>
           <h3>Chat</h3>
           <div class="hint">
             Ask normally. To correct: <b>no it's: ...</b><br/>
-            To save your name: <b>my name is Aaron</b>
+            To save your name: <b>my name is &lt;your name&gt;</b>
           </div>
 
           <div id="themePanel" class="theme-panel">
