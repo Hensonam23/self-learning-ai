@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 mkdir -p exports
 ts="$(date +%Y%m%d_%H%M%S)"
 log="exports/nightly_push_${ts}.log"
-ln -sf "" exports/nightly_push_latest.log
+ln -sf "$(basename "$log")" exports/nightly_push_latest.log
 
 exec > >(tee -a "$log") 2>&1
 
