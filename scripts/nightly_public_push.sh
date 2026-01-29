@@ -10,8 +10,24 @@ exec > >(tee -a "$log") 2>&1
 
 echo "=== Nightly public knowledge push: $ts ==="
 
+# Security + reliability defaults
+umask 077
+export GIT_TERMINAL_PROMPT=0
+export GIT_ASKPASS=/bin/true
+
+# Prevent overlapping runs
+lockfile="exports/nightly_push.lock"
+exec 9>"$lockfile"
+command -v flock >/dev/null 2>&1 && flock -n 9 || { echo "OK: already running (lock held)."; exit 0; }
+
+# If a rebase is already in progress, fail closed
+if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
+  echo "REFUSING: rebase already in progress. Fix it manually before nightly pushes."
+  exit 20
+fi
+
 # keep in sync
-(git pull --rebase origin main || true)
+git pull --rebase origin main
 
 
 # Make sure repo is in a clean-ish state before we start
@@ -54,6 +70,23 @@ rg -n -e '\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-
 # Block name-prompt strings from ever entering the public pack
 rg -n -i "my name is|what is my name|whats my name|what's my name|do you know my name" \
   knowledge/public_local_knowledge.json && { echo "FAIL: name-prompt string detected"; exit 6; } || true
+
+
+# Sanity check: public pack must be valid JSON dict, reasonable sizes
+python3 - <<'PY'
+import json
+p="knowledge/public_local_knowledge.json"
+obj=json.load(open(p,"r",encoding="utf-8"))
+assert isinstance(obj, dict), "public pack must be a dict"
+assert len(obj) > 0, "public pack is empty"
+for k,v in list(obj.items())[:50]:
+    assert isinstance(k, str) and k.strip(), "empty topic key"
+    if isinstance(v, dict):
+        ans = (v.get("answer") or "")
+        if ans and len(ans) > 20000:
+            raise AssertionError(f"answer too long for topic: {k}")
+print("OK: public pack JSON sanity check passed. topics =", len(obj))
+PY
 
 echo "OK: scans passed."
 
