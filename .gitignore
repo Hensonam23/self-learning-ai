@@ -105,3 +105,9 @@ data/forced_rfc_map.json
 *.old
 *.orig
 *.rej
+
+# Local-only exports (portable packs)
+/exports/
+knowledge/portable_local_knowledge.json
+knowledge/portable_manifest.json
+knowledge/portable_knowledge_pack.tgz
