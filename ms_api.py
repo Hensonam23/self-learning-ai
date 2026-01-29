@@ -32,6 +32,78 @@ KNOWLEDGE_PATH = Path(
 
 AUTO_WEBLEARN = (os.environ.get("MS_AUTO_WEBLEARN", "1").strip().lower() not in ("0", "false", "no", "off"))
 
+
+# --- MS_PRIVATE_PROFILE_V1: local-only sensitive memory (NEVER commit/export) ---
+# Stores personal info locally in: data/private_profile.json
+from pathlib import Path as _MS_PP_Path
+import json as _MS_PP_json
+import os as _MS_PP_os
+
+_MS_PRIVATE_PROFILE_PATH = (_MS_PP_Path(__file__).resolve().parent / "data" / "private_profile.json")
+
+def _pp_load() -> dict:
+    try:
+        if _MS_PRIVATE_PROFILE_PATH.exists():
+            obj = _MS_PP_json.loads(_MS_PRIVATE_PROFILE_PATH.read_text(encoding="utf-8"))
+            if isinstance(obj, dict):
+                return obj
+    except Exception:
+        pass
+    return {"user_name": None, "email": None, "phone": None, "address": None}
+
+def _pp_save(obj: dict) -> bool:
+    try:
+        _MS_PRIVATE_PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _MS_PRIVATE_PROFILE_PATH.with_suffix(".tmp")
+        tmp.write_text(_MS_PP_json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        _MS_PP_os.replace(tmp, _MS_PRIVATE_PROFILE_PATH)
+        return True
+    except Exception:
+        return False
+
+def _pp_get_name():
+    nm = _pp_get_field("user_name")
+    return nm if nm else None
+
+def _pp_set_name(nm: str) -> bool:
+    nm = (nm or "").strip()
+    if not nm:
+        return False
+    return _pp_set_field("user_name", nm)
+
+def _pp_get_field(key: str):
+    try:
+        obj = _pp_load()
+        val = obj.get(key, None)
+        if isinstance(val, str):
+            val = val.strip()
+            return val if val else None
+        return val
+    except Exception:
+        return None
+
+def _pp_set_field(key: str, val) -> bool:
+    try:
+        if not key:
+            return False
+        obj = _pp_load()
+        obj[key] = val
+        return _pp_save(obj)
+    except Exception:
+        return False
+
+def _pp_forget_field(key: str) -> bool:
+    try:
+        obj = _pp_load()
+        if key in obj:
+            obj[key] = None
+            return _pp_save(obj)
+        return True
+    except Exception:
+        return False
+# --- end MS_PRIVATE_PROFILE_V1 ---
+
+
 app = FastAPI(title=APP_NAME, version=VERSION)
 
 # =========================
