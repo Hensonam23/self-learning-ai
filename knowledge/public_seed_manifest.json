@@ -1,0 +1,28 @@
+{
+  "meta": {
+    "generated_utc": "2026-01-28T23:31:29.943669+00:00",
+    "source_file": "data/local_knowledge.json",
+    "rules_file": "knowledge/privacy_rules.json",
+    "kept_count": 158,
+    "removed_count": 4,
+    "empty_topic_skipped": 0
+  },
+  "removed": [
+    {
+      "topic": "{\"text\":\"subnet mask\"}",
+      "reason": "junk_topic_json"
+    },
+    {
+      "topic": "no my name is: aaron",
+      "reason": "deny_topic_contains:my name is"
+    },
+    {
+      "topic": "no, my name is: aaron",
+      "reason": "deny_topic_contains:my name is"
+    },
+    {
+      "topic": "my name is aaron",
+      "reason": "deny_topic_contains:my name is"
+    }
+  ]
+}
