@@ -50,6 +50,11 @@ rg -n -i '[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}' knowledge/public_local_knowledg
 rg -n -e '\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b' \
   knowledge/public_local_knowledge.json && { echo "FAIL: private IP detected"; exit 5; } || true
 
+
+# Block name-prompt strings from ever entering the public pack
+rg -n -i "my name is|what is my name|whats my name|what's my name|do you know my name" \
+  knowledge/public_local_knowledge.json && { echo "FAIL: name-prompt string detected"; exit 6; } || true
+
 echo "OK: scans passed."
 
 # Commit + push (main only)
