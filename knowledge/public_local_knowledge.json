@@ -1,700 +1,4 @@
 {
-  "subnetting": {
-    "answer": "SUBNETTING\n\nDefinition:\n- The practice of dividing a network into two or more networks is called subnetting.\n\nKey points:\n- A subnet, or subnetwork, is a logical subdivision of an IP network.\n\nExamples:\n- Example: 192.168.x.x/24 has 256 total addresses (0-255), with usable hosts typically .1 to .254 (depends on context).\n- Example: /26 splits a /24 into 4 subnets (each block size 64).\n\nCommon mistakes:\n- Mistake: confusing the subnet mask with the network address.\n- Mistake: forgetting that network + broadcast addresses are usually not usable host addresses in IPv4.\n\nPractice recognition:\n- Quick check: /24 = 255.255.255.0, /16 = 255.255.0.0, /8 = 255.0.0.0.\n- Quick check: block size = 256 - last mask octet (when the split is in the last octet).\n- Quick check: usable hosts in subnet = 2^(host bits) - 2 (typical IPv4).\n\nSources:\n- Wikipedia: https://en.wikipedia.org/wiki/Subnet",
-    "confidence": 0.92,
-    "sources": [
-      "https://www.cloudflare.com/learning/network-layer/what-is-a-subnet/",
-      "https://duckduckgo.com/y.js?ad_domain=amazon.com&ad_provider=bingv7aa&ad_type=txad&click_metadata=MCTjtBjqASgYKlFjpsZT1MeRo1lURZCZ5meg1OLCutJmEUhc-yXSFubcDIyEOWi6CytrIDkp6O3u2R4D_yTcm1f3w37zEO19-Ir-l3WWga88lFfiq4aY7Qp4AeJyf-L6AIk3JwSCFsYzcaz0u4ExM6CT0nTGyINaCoo9RWFdyco.oYHVt48chirErRzPifMyBQ&rut=ce6b17f7b4b5db0ed9fabd80f22fa57782961943cade75c9c54e930158eefe85&u3=https://www.bing.com/aclick?ld=e83q-1bdHZaLqIucTbk433GTVUCUwBg9Di293IXixSsPz2whBiu19QEQ71zGpMs7SAoED6CtdCwfBlD5HER4KDQfkzYqVnaljh59YYm29PyMwdEaANmkT0M7EgIhS0Jeg0OyjqOAVFc5U9LGbKYvXd7v2b_TO0X2GfpRCOuUOsVfBSIyv-Qba3kih9HH-lpAczgyink76mYE6UDvLEChC0iJahP0Q&u=aHR0cHMlM2ElMmYlMmZ3d3cuYW1hem9uLmNvbSUyZnMlMmYlM2ZpZSUzZFVURjglMjZrZXl3b3JkcyUzZGlwJTJic3VibmV0dGluZyUyYndvcmtib29rJTI2aW5kZXglM2RhcHMlMjZ0YWclM2R0eHRzdGRiZ2R0LTIwJTI2cmVmJTNkcGRfc2xfN3hhNTY0eHByMl9iJTI2YWRncnBpZCUzZDEyMzkxNTA4OTAyNDg0MTMlMjZodmFkaWQlM2Q3NzQ0NzA3MTUyNjM0MyUyNmh2bmV0dyUzZHMlMjZodnFtdCUzZGIlMjZodmJtdCUzZGJiJTI2aHZkZXYlM2RjJTI2aHZsb2NpbnQlM2QlMjZodmxvY3BoeSUzZDExMTMzNCUyNmh2dGFyZ2lkJTNka3dkLTc3NDQ3MzY3Nzk1NDg5JTNhbG9jLTE5MCUyNmh5ZGFkY3IlM2Q3OTUwXzEzNjA4MjQ2JTI2bWNpZCUzZDBhYTNiYmU0NzVkMjMzZmI4Y2MyN2FlOGUwNzAyZTcxJTI2bGFuZ3VhZ2UlM2Rlbl9VUyUyNm1zY2xraWQlM2Q2MTUwYjM5M2NmMWIxNmYzZDA0N2RhZjdmNWU3MjcxNQ&rlid=6150b393cf1b16f3d047daf7f5e72715&vqd=4-142529999144525234072803710481876402434&iurl={1}IG=9F11DFC752FC47A3A430B43B4921CBD2&CID=3DA7858C7751651B203A935376DD6461&ID=DevEx,5045.1",
-      "https://duckduckgo.com/y.js?ad_domain=amazon.com&ad_provider=bingv7aa&ad_type=txad&click_metadata=2cFlLmTQUBubdAiZd5ROnlk1HjpwyvQYD3obLgkF9LBNrWh1Xlcz6w8Q9l5lz-dXKuukmGFXnQe8u8V6sRv1YCGQevj19SxB86PvF5ANBgsNdR_Y6jMPPFhazFJwOA8wKKWCw6S_Lis09W-kZIYBEgJndsVyFQl7Budk0e7SkJo.BFAF3bdvP1yloWC5z0-kmg&rut=756182d95508a8b03545421c7dc96b4750689c61e5295754adf1d6198a3e3020&u3=https://www.bing.com/aclick?ld=e80YTtbS26__kxTlrZN5NeUTVUCUzGJgGBaldVPZ6q8oXKquDztexd8SffRegxEV_6kXuul8e7-Ah4GUat1Zpf2sL6KQx54VOCSIa4wVaSQhHNLm9fMf3W7cixARghFKOAcPabcgWbfUmgxo1EXHDVRFQjJfqBw7VhbQ5NKsu-HZJF_cS43Avyks4Dyf5ZyW6AQzn_SJANgItQv6LKFjBNNFSSnu4&u=aHR0cHMlM2ElMmYlMmZ3d3cuYW1hem9uLmNvbSUyZnMlMmYlM2ZpZSUzZFVURjglMjZrZXl3b3JkcyUzZGlwJTJic3VibmV0dGluZyUyYmJvb2slMjZpbmRleCUzZGFwcyUyNnRhZyUzZHR4dHN0ZGJnZHQtMjAlMjZyZWYlM2RwZF9zbF80YnJzb2lmM3BrX2IlMjZhZGdycGlkJTNkMTI0MTM0OTY0NTUwNjc1MSUyNmh2YWRpZCUzZDc3NTg0NDg0Mzg1NDk5JTI2aHZuZXR3JTNkcyUyNmh2cW10JTNkYiUyNmh2Ym10JTNkYmIlMjZodmRldiUzZGMlMjZodmxvY2ludCUzZCUyNmh2bG9jcGh5JTNkMTExMDUyJTI2aHZ0YXJnaWQlM2Rrd2QtNzc1ODQ3NjA0MzQyOTklM2Fsb2MtMTkwJTI2aHlkYWRjciUzZDIwOTU1XzEzNDQ5MjAwJTI2bWNpZCUzZDJjMGYzZmEyMzk3NDM4MjA4ZThmZjdkODMyNTc5MTJkJTI2bGFuZ3VhZ2UlM2Rlbl9VUyUyNm1zY2xraWQlM2RjMDdkNDkwNTEyNGMxZmE4NmRkNzIwNjEyOGIxYjUxZA&rlid=c07d4905124c1fa86dd7206128b1b51d&vqd=4-154505639846965170722597731736024292916&iurl={1}IG=96F2FCA532AF4321A80E02B6417C8B33&CID=29F8B1F8740D62CA13BAA72775D86375&ID=DevEx,5045.1"
-    ],
-    "updated_on": "2025-12-19T21:39:08"
-  },
-  "dns": {
-    "answer": "DNS\n\nDefinition:\n- Character Case For all parts of the DNS that are part of the official protocol, all comparisons between character strings (e.g., labels, domain names, etc.) are done in a case-insensitive manner.\n\nKey points:\n- The domain system is a mixture of functions and data types which are an official protocol and functions and data types which are still experimental.\n- The official protocol parts include standard queries, responses and the Internet class RR data formats (e.g., host addresses).\n- Since the previous RFC set, several definitions have changed, so some previous definitions are obsolete.\n- Experimental or obsolete features are clearly marked in these RFCs, and such information should be used with caution.\n- The reader is especially cautioned not to depend on the values which appear in examples to be current or complete, since their purpose is primarily pedagogical.\n\nExamples:\n- Example: A record maps a name to an IPv4 address.\n- Example: CNAME is an alias pointing one name to another name.\n\nCommon mistakes:\n- Mistake: assuming DNS changes apply instantly (caching/TTL can delay).\n- Mistake: mixing up authoritative vs recursive DNS roles.\n\nPractice recognition:\n- Quick check: if a name resolves sometimes but not others, suspect caching/TTL or split-horizon DNS.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc1035.txt",
-    "confidence": 0.85,
-    "sources": [
-      "Wikipedia: https://en.wikipedia.org/wiki/Domain_Name_System",
-      "https://www.rfc-editor.org/rfc/rfc1034.txt",
-      "https://www.rfc-editor.org/rfc/rfc1035.txt"
-    ]
-  },
-  "tcp vs udp": {
-    "answer": "TCP vs UDP - Research Note\n\nTCP and UDP are transport layer protocols used to deliver data between applications.\n\nTCP:\n- Connection oriented\n- Reliable and ordered delivery\n- Uses acknowledgements and retransmissions\n- Used for web, email, file transfer\n\nUDP:\n- Connectionless\n- No delivery guarantees\n- Lower overhead and faster\n- Used for DNS, streaming, VoIP, gaming\n\nTCP prioritizes reliability. UDP prioritizes speed and simplicity.",
-    "confidence": 0.92
-  },
-  "routing vs switching": {
-    "answer": "Routing vs Switching - Research Note\n\nSwitching operates at Layer 2 using MAC addresses. Switches forward traffic within the same local network.\n\nRouting operates at Layer 3 using IP addresses. Routers move traffic between different networks and subnets.\n\nSwitches handle LAN traffic. Routers connect networks together and break broadcast domains.",
-    "confidence": 0.92
-  },
-  "dhcp": {
-    "answer": "DHCP\n\nDefinition:\n- Abstract The Dynamic Host Configuration Protocol (DHCP) provides a framework for passing configuration information to hosts on a TCPIP network.\n\nKey points:\n- Please refer to the current edition of the \"Internet Official Protocol Standards\" (STD 1) for the standardization state and status of this protocol.\n- DHCP captures the behavior of BOOTP relay agents [7, 21], and DHCP participants can interoperate with BOOTP participants [9].\n- 8 2.1 Configuration parameters repository .\n- 11 2.2 Dynamic allocation of network addresses .\n- 13 3.1 Client-server interaction - allocating a network address.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc2131.txt",
-    "confidence": 0.85,
-    "sources": [
-      "https://www.rfc-editor.org/rfc/rfc2131.txt"
-    ]
-  },
-  "vlan": {
-    "answer": "VLAN (Virtual LAN) - Research Note\n\nA VLAN allows a single physical switch to be divided into multiple logical networks. Devices in different VLANs cannot communicate without routing.\n\nPort types:\n- Access ports carry one VLAN\n- Trunk ports carry multiple VLANs using tagging\n\n802.1Q tagging identifies VLAN traffic on trunk links.\n\nEach VLAN typically maps to its own IP subnet. Inter-VLAN communication requires a router or Layer 3 switch.",
-    "confidence": 0.85
-  },
-  "firewall basics": {
-    "answer": "Firewall Basics - Research Note\n\nA firewall controls network traffic using rules based on IP addresses, ports, protocols, and direction.\n\nStateful firewalls track active connections and automatically allow return traffic.\n\nStateless firewalls evaluate each packet independently without tracking connections.\n\nFirewalls commonly use a default deny approach and are placed at network boundaries to improve security.",
-    "confidence": 0.85
-  },
-  "test topic": {
-    "answer": "this is a test answer",
-    "confidence": 0.95,
-    "sources": [
-      "https://www.examtopics.com/",
-      "https://cakap.com/en/simulation-test/topik/"
-    ],
-    "updated_on": "2026-01-06"
-  },
-  "subnet": {
-    "answer": "SUBNET\n\nDefinition:\n- What Is Subnetting and Subnet Mask?\n\nKey points:\n- Subnetting and subnet masks are fundamental concepts in network administration that often seem complex to beginners but become invaluable once mastered.\n- They allow network administrators to divide large IP address spaces into smaller, manageable segments while optimizing bandwidth usage and improving security.\n- Subnetting is the process of dividing a larger IP network into smaller, more manageable subnetworks (subnets).\n- This division allows network administrators to create logical segments within their infrastructure, improving organization, security, and resource allocation.\n- Think of subnetting like dividing a large city into districts.\n- Each district has its own services, governance, and communication patterns, but all districts remain part of the larger city.\n\nExamples:\n- Example: 192.168.x.x/24 has 256 total addresses (0-255), with usable hosts typically .1 to .254 (depends on context).\n- Example: /26 splits a /24 into 4 subnets (each block size 64).\n\nCommon mistakes:\n- Mistake: confusing the subnet mask with the network address.\n- Mistake: forgetting that network + broadcast addresses are usually not usable host addresses in IPv4.\n\nPractice recognition:\n- Quick check: /24 = 255.255.255.0, /16 = 255.255.0.0, /8 = 255.0.0.0.\n- Quick check: block size = 256 - last mask octet (when the split is in the last octet).\n- Quick check: usable hosts in subnet = 2^(host bits) - 2 (typical IPv4).\n\nSources:\n- Direct URL: https://www.networkkings.org/what-is-subnetting",
-    "confidence": 0.92,
-    "sources": [
-      "Wikipedia: https://en.wikipedia.org/wiki/Subnet",
-      "https://www.rfc-editor.org/rfc/rfc950.txt",
-      "https://www.networkkings.org/what-is-subnetting"
-    ],
-    "updated_on": "2026-01-06"
-  },
-  "private ip addressing": {
-    "answer": "PRIVATE IP ADDRESSING\n\nDefinition:\n- In this article, we will see private IP addresses in networking.\n\nKey points:\n- Private IP Addresses are those addresses that work within the local network.\n- These addresses are non-routable on the Internet.\n- The address is assigned by the network router to your particular device.\n- The unique private IP address is provided to every device which is on the same network.\n- In this way, devices communicate with one another on the same network without connecting to the entire Internet.\n\nExamples:\n- Example private IPv4 blocks: 10.x.x.x/8, 172.16-31.x.x/12, 192.168.x.x/16.\n- Example: home routers typically use NAT so private addresses can reach the public internet.\n\nCommon mistakes:\n- Mistake: thinking private IPs are routable on the public internet (they are not).\n- Mistake: assuming NAT is security by itself (it helps, but it’s not a firewall).\n\nPractice recognition:\n- Quick check: if the IP starts with 10., 192.168., or 172.16-172.31, it’s likely private RFC1918 space.\n\nSources:\n- geeksforgeeks.org: https://www.geeksforgeeks.org/computer-networks/private-ip-addresses-in-networking/",
-    "confidence": 0.8500000000000001,
-    "sources": [
-      "https://www.rfc-editor.org/rfc/rfc1918.txt",
-      "https://www.geeksforgeeks.org/computer-networks/private-ip-addresses-in-networking/"
-    ],
-    "updated_on": "2026-01-06"
-  },
-  "cidr": {
-    "answer": "CIDR\n\nDefinition:\n- Analysis of CIDR's Effect on Global Routing State ..............19 10.\n\nKey points:\n- Copyright Notice Copyright (C) The Internet Society (2006).\n- Fuller & Li Best Current Practice [Page 1] RFC 4632 CIDR Address Strategy August 2006 Table of Contents 1.\n- Introduction ....................................................3 2.\n- History and Problem Description .................................3 3.\n- Classless Addressing as a Solution ..............................4 3.1.\n\nExamples:\n- Example: 192.168.x.x/24 has 256 total addresses (0-255), with usable hosts typically .1 to .254 (depends on context).\n- Example: /26 splits a /24 into 4 subnets (each block size 64).\n\nCommon mistakes:\n- Mistake: confusing the subnet mask with the network address.\n- Mistake: forgetting that network + broadcast addresses are usually not usable host addresses in IPv4.\n\nPractice recognition:\n- Quick check: /24 = 255.255.255.0, /16 = 255.255.0.0, /8 = 255.0.0.0.\n- Quick check: block size = 256 - last mask octet (when the split is in the last octet).\n- Quick check: usable hosts in subnet = 2^(host bits) - 2 (typical IPv4).\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc4632.txt",
-    "confidence": 0.92,
-    "sources": [
-      "https://aws.amazon.com/what-is/cidr/",
-      "https://www.ipaddressguide.com/cidr",
-      "https://www.coursera.org/articles/cidr",
-      "https://www.geeksforgeeks.org/computer-networks/classless-inter-domain-routing-cidr/",
-      "https://whatismyipaddress.com/cidr",
-      "Wikipedia: https://en.wikipedia.org/wiki/Classless_Inter-Domain_Routing",
-      "https://www.rfc-editor.org/rfc/rfc4632",
-      "https://www.rfc-editor.org/rfc/rfc4632.txt"
-    ]
-  },
-  "subnet mask": {
-    "answer": "SUBNET MASK\n\nDefinition:\n- Subnet Mask # of nets Net.\n\nKey points:\n- This memo does not specify an Internet standard of any kind.\n- Abstract This memo clarifies issues surrounding subnetting IP networks by providing a standard subnet table.\n- This table includes subnetting for Class A, B, and C networks, as well as Network IDs, host ranges and IP broadcast addresses with emphasis on Class C subnets.\n- This memo is intended as an informational companion to Subneting RFC [1] and the Hosts Requirements RFC [2].\n- Introduction The growth of networking since the time of STD 5, RFC 950 and STD 3, RFC 1123 has resulted in larger and more complex network subnetting.\n\nExamples:\n- Example: 192.168.x.x/24 has 256 total addresses (0-255), with usable hosts typically .1 to .254 (depends on context).\n- Example: /26 splits a /24 into 4 subnets (each block size 64).\n\nCommon mistakes:\n- Mistake: confusing the subnet mask with the network address.\n- Mistake: forgetting that network + broadcast addresses are usually not usable host addresses in IPv4.\n\nPractice recognition:\n- Quick check: /24 = 255.255.255.0, /16 = 255.255.0.0, /8 = 255.0.0.0.\n- Quick check: block size = 256 - last mask octet (when the split is in the last octet).\n- Quick check: usable hosts in subnet = 2^(host bits) - 2 (typical IPv4).\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc1878.txt",
-    "confidence": 0.92,
-    "sources": [
-      "https://en.wikipedia.org/wiki/Subnet",
-      "Wikipedia: https://en.wikipedia.org/wiki/Subnet",
-      "https://www.calculator.net/ip-subnet-calculator.html",
-      "https://www.rfc-editor.org/rfc/rfc1878",
-      "https://www.rfc-editor.org/rfc/rfc1878.txt"
-    ]
-  },
-  "vlsm": {
-    "answer": "VLSM\n\nDefinition:\n- This memo does not specify an Internet standard of any kind.\n\nKey points:\n- Abstract This memo clarifies issues surrounding subnetting IP networks by providing a standard subnet table.\n- This table includes subnetting for Class A, B, and C networks, as well as Network IDs, host ranges and IP broadcast addresses with emphasis on Class C subnets.\n- This memo is intended as an informational companion to Subneting RFC [1] and the Hosts Requirements RFC [2].\n- Introduction The growth of networking since the time of STD 5, RFC 950 and STD 3, RFC 1123 has resulted in larger and more complex network subnetting.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc1878.txt",
-    "confidence": 0.92,
-    "sources": [
-      "https://en.wikipedia.org/wiki/Classless_Inter-Domain_Routing",
-      "Wikipedia: https://en.wikipedia.org/wiki/Classless_Inter-Domain_Routing",
-      "https://www.rfc-editor.org/rfc/rfc1878",
-      "https://www.rfc-editor.org/rfc/rfc1878.txt"
-    ]
-  },
-  "tls basics": {
-    "answer": "TLS BASICS\n\nDefinition:\n- , B.A.S.I.C.\n\nKey points:\n- For other uses, see Basics (disambiguation) .\n- Later that night, they bonded over a mutual love of The Beatles , 1970s and 1980s cartoon theme songs and old Sierra adventure games.\n- &#91; 4 &#93; Though lacking any real experience with the instrument, Schroeder willingly purchased his first bass guitar, and the trio was born.\n- During this time, the group start performing songs with more complicated three-part harmony.\n- During late 2002 and early 2003, The Basics recorded and released an album called Get Back through MGM Distribution .\n- They began what was to become regular tours of the East and West coasts of Australia.\n\nSources:\n- Direct URL: https://en.wikipedia.org/wiki/The_Basics",
-    "confidence": 0.92,
-    "sources": [
-      "https://www.rfc-editor.org/rfc/rfc8446",
-      "https://www.rfc-editor.org/rfc/rfc8446.txt",
-      "https://en.wikipedia.org/wiki/The_Basics"
-    ]
-  },
-  "https": {
-    "answer": "HTTPS\n\nDefinition:\n- It does not specify an Internet standard of any kind.\n\nKey points:\n- Copyright Notice Copyright (C) The Internet Society (2000).\n- Abstract This memo describes how to use TLS to secure HTTP connections over the Internet.\n- Current practice is to layer HTTP over SSL (the predecessor to TLS), distinguishing secured traffic from insecure traffic by the use of a different server port.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc2818.txt",
-    "confidence": 0.8,
-    "sources": [
-      "https://en.wikipedia.org/wiki/HTTPS",
-      "https://www.rfc-editor.org/rfc/rfc2818.txt"
-    ]
-  },
-  "certificates": {
-    "answer": "CERTIFICATES\n\nDefinition:\n- If an internal link led you here, you may wish to change the link to point directly to the intended article.\n\nKey points:\n- Text is available under the Creative Commons Attribution-ShareAlike 4.0 License ; additional terms may apply.\n- By using this site, you agree to the Terms of Use and Privacy Policy .\n- Wikipedia® is a registered trademark of the Wikimedia Foundation, Inc.\n\nSources:\n- Direct URL: https://en.wikipedia.org/wiki/Certificate",
-    "confidence": 0.92,
-    "sources": [
-      "https://en.wikipedia.org/wiki/Certificate",
-      "Wikipedia: https://en.wikipedia.org/wiki/Certificate",
-      "https://www.rfc-editor.org/rfc/rfc5280.txt"
-    ]
-  },
-  "public key cryptography": {
-    "answer": "PUBLIC KEY CRYPTOGRAPHY\n\nDefinition:\n- public key cryptography (PKC) - Glossary | CSRC You are viewing this page in an unauthorized frame window.\n\nKey points:\n- This is a potential security issue, you are being redirected to https://csrc.nist.gov .\n- This site requires JavaScript to be enabled for complete site functionality.\n- Secure .gov websites use HTTPS A lock ( Lock Locked padlock icon ) or https:// means you’ve safely connected to the .gov website.\n- Share sensitive information only on official, secure websites.\n- Sources: FIPS 204 under asymmetric cryptography Encryption system that uses a public-private key pair for encryption and/or digital signature.\n\nSources:\n- Direct URL: https://csrc.nist.gov/glossary/term/public_key_cryptography",
-    "confidence": 0.92,
-    "sources": [
-      "https://csrc.nist.gov/glossary/term/public_key_cryptography",
-      "https://www.geeksforgeeks.org/computer-networks/public-key-encryption/",
-      "Wikipedia: https://en.wikipedia.org/wiki/Public-key_cryptography",
-      "https://datatracker.ietf.org/doc/html/rfc4949"
-    ]
-  },
-  "bash": {
-    "answer": "Topic: bash\nCreated: 2026-01-10T13:43:11.618285\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-28"
-  },
-  "c+": {
-    "answer": "C+\n\nDefinition:\n- Privacy policy About Wikipedia Disclaimers Contact Wikipedia Legal & safety contacts Code of Conduct Developers Statistics Cookie statement Mobile view Search Search Toggle the table of contents C+ 3 languages Add topic\n\nKey points:\n- See also [ edit ] Search for \"c+\" &#160;or \"c-plus\" on Wikipedia.\n- If an internal link led you here, you may wish to change the link to point directly to the intended article.\n- Text is available under the Creative Commons Attribution-ShareAlike 4.0 License ; additional terms may apply.\n- By using this site, you agree to the Terms of Use and Privacy Policy .\n- Wikipedia® is a registered trademark of the Wikimedia Foundation, Inc.\n\nSources:\n- Direct URL: https://en.wikipedia.org/wiki/C%2B",
-    "confidence": 0.92,
-    "sources": [
-      "https://github.com/microsoft/STL",
-      "https://medium.com/javarevisited/top-10-courses-to-learn-c-for-beginners-best-and-free-4afc262a544e",
-      "Wikipedia: https://en.wikipedia.org/wiki/C%2B",
-      "https://en.wikipedia.org/wiki/C%2B"
-    ]
-  },
-  "rfc 6890": {
-    "answer": "RFC 6890\n\nDefinition:\n- Section 2.2.1 of this document describes information that both registries will maintain for each entry.\n\nKey points:\n- Haberman JHU April 2013 Special-Purpose IP Address Registries Abstract This memo reiterates the assignment of an IPv4 address block (192.0.0.0/24) to IANA.\n- It also instructs IANA to restructure its IPv4 and IPv6 Special-Purpose Address Registries.\n- This memo obsoletes RFCs 4773, 5156, 5735, and 5736.\n\nSources:\n- www.rfc-editor.org: https://www.rfc-editor.org/rfc/rfc6890.html",
-    "confidence": 0.92,
-    "sources": [
-      "https://www.rfc-editor.org/rfc/rfc6890.html"
-    ]
-  },
-  "udp": {
-    "answer": "UDP\n\nDefinition:\n- UDP Header UDP header is 8 bytes long, followed by the data payload.\n\nKey points:\n- It contains all the essential information needed for transmission.\n- Each port number field is 16 bits, giving a range from 0 to 65535, where port 0 is reserved.\n- Port numbers are used to identify and separate different user requests or processes.\n- UDP Header Field Size Description Source Port 16 bits Identifies the sender’s port number.\n- Destination Port 16 bits Identifies the receiver’s port number.\n\nSources:\n- Direct URL: https://www.geeksforgeeks.org/computer-networks/user-datagram-protocol-udp/",
-    "confidence": 0.92,
-    "sources": [
-      "https://www.rfc-editor.org/rfc/rfc768.txt",
-      "https://www.geeksforgeeks.org/computer-networks/user-datagram-protocol-udp/"
-    ]
-  },
-  "port forwarding": {
-    "answer": "PORT FORWARDING\n\nDefinition:\n- When configuring port forwarding, the network administrator sets aside one port number on the gateway for the exclusive use of communicating with a service in the private network, located on a specific host.\n\nKey points:\n- Hosts on the private network are connected to an Ethernet switch or communicate via a wireless LAN .\n- The NAT device's external interface is configured with a public IP address.\n- The computers behind the router, on the other hand, are invisible to hosts on the Internet as they each communicate only with a private IP address.\n- External hosts must know this port number and the address of the gateway to communicate with the network-internal service.\n- In Linux kernels, this is achieved by packet filter rules in the iptables or netfilter kernel components.\n- When used on gateway devices, a port forward may be implemented with a single rule to translate the destination address and port.\n\nSources:\n- Direct URL: https://en.wikipedia.org/wiki/Port_forwarding",
-    "confidence": 0.8700000000000001,
-    "sources": [
-      "https://www.wikihow.com/Set-Up-Port-Forwarding-on-a-Router",
-      "Wikipedia: https://en.wikipedia.org/wiki/Port_forwarding",
-      "https://en.wikipedia.org/wiki/Port_forwarding"
-    ]
-  },
-  "snat vs dnat": {
-    "answer": "SNAT VS DNAT\n\nDefinition:\n- These are the Source NAT (SNAT) and Destination NAT (DNAT) which help to seamless communication.\n\nKey points:\n- However, these elements have a set of differences as they are opposite of each other.\n- Let us deep dive into this article to learn more about SNAT and DNAT along with their key differences.\n- What is Source Network Address Translation (SNAT)?\n- SNAT, as the name suggests, is a technique that translates source IP addresses generally when connecting from a private IP address to a public IP address.\n- It maps the source client IP address in a request to a translation defined on a BIG-IP device.\n\nSources:\n- Direct URL: https://www.geeksforgeeks.org/computer-networks/difference-between-snat-and-dnat/",
-    "confidence": 0.8700000000000001,
-    "sources": [
-      "https://www.geeksforgeeks.org/computer-networks/difference-between-snat-and-dnat/",
-      "https://ipwithease.com/snat-vs-dnat/"
-    ]
-  },
-  "pat": {
-    "answer": "PAT\n\nDefinition:\n- I bent down to pat the little puppy .\n\nKey points:\n- '/us/autocomplete/amp?dataset=' + stateSearch.dataset + '&q=' + stateSearch.term : 'https://'\"> 0 && stateHdr.searchDesk ?\n- More examples Fewer examples She patted him on the head as she went past.\n- He patted her on the back affectionately .\n- Pat the vegetables dry with a paper towel .\n- (Definition of pat from the Cambridge Academic Content Dictionary © Cambridge University Press) What is the pronunciation of pat ?\n\nSources:\n- Direct URL: https://dictionary.cambridge.org/us/dictionary/english/pat",
-    "confidence": 0.92,
-    "sources": [
-      "https://dictionary.cambridge.org/us/dictionary/english/pat",
-      "https://www.healthline.com/health/paroxysmal-atrial-tachycardia",
-      "https://www.cjtc.wa.gov/physical-ability-test-pat"
-    ]
-  },
-  "dns record types": {
-    "answer": "DNS RECORD TYPES\n\nDefinition:\n- Network admins use different DNS record types to customize service delivery and manage various network functions.\n\nKey points:\n- This tutorial will provide a comprehensive list of DNS record types with examples and use cases.\n- DNS records, also known as zone files , store critical information about domains .\n- These text-based files use the DNS syntax and are housed on DNS servers .\n- DNS servers use the information in DNS records to route internet traffic.\n- Moreover, they designate mail servers for email delivery, link domain names to IP addresses, and enforce security protocols, among other critical functions.\n\nExamples:\n- Example: A record maps a name to an IPv4 address.\n- Example: CNAME is an alias pointing one name to another name.\n\nCommon mistakes:\n- Mistake: assuming DNS changes apply instantly (caching/TTL can delay).\n- Mistake: mixing up authoritative vs recursive DNS roles.\n\nPractice recognition:\n- Quick check: if a name resolves sometimes but not others, suspect caching/TTL or split-horizon DNS.\n\nSources:\n- Direct URL: https://phoenixnap.com/kb/dns-record-types",
-    "confidence": 0.91,
-    "sources": [
-      "https://phoenixnap.com/kb/dns-record-types",
-      "https://www.cloudflare.com/learning/dns/dns-records/",
-      "Wikipedia: https://en.wikipedia.org/wiki/List_of_DNS_record_types"
-    ]
-  },
-  "recursive vs authoritative dns": {
-    "answer": "RECURSIVE VS AUTHORITATIVE DNS\n\nDefinition:\n- Recursive: The Difference Between DNS Server Types Authoritative DNS November 10, 2023 Vercara > Resources > Blog > Authoritative vs.\n\nKey points:\n- This file mapped hostnames to IP addresses.\n- However, as networks grew, managing the host file across all computers became unmanageable.\n- To address this issue, the Domain Name System (DNS) was created as a scalable solution.\n- Today, DNS is one of the fundamental technologies that powers the Internet.\n- DNS is a distributed database and network protocol that converts human-readable network locations to machine-readable Internet Protocol (IP) addresses.\n\nExamples:\n- Example: A record maps a name to an IPv4 address.\n- Example: CNAME is an alias pointing one name to another name.\n\nCommon mistakes:\n- Mistake: assuming DNS changes apply instantly (caching/TTL can delay).\n- Mistake: mixing up authoritative vs recursive DNS roles.\n\nPractice recognition:\n- Quick check: if a name resolves sometimes but not others, suspect caching/TTL or split-horizon DNS.\n\nSources:\n- Direct URL: https://vercara.digicert.com/resources/authoritative-vs-recursive-the-difference-between-dns-server-types",
-    "confidence": 0.8700000000000001,
-    "sources": [
-      "https://vercara.digicert.com/resources/authoritative-vs-recursive-the-difference-between-dns-server-types",
-      "https://www.dnsfilter.com/blog/authoritative-vs-recursive-dns"
-    ]
-  },
-  "dns caching": {
-    "answer": "DNS CACHING\n\nDefinition:\n- Now, to learn about DNS caching, check out the article \"What is DNS caching\" for information on its function, importance, and more.\n\nKey points:\n- Instead of querying a DNS server every time you visit a website, your computer or network checks the cache first, reducing load times and improving efficiency.\n- Cache Storage : The IP address is saved locally (on your device, router, or ISP’s servers) for a set time ( TTL, or Time to Live ).\n- Subsequent Requests : Future visits to example.com skip the DNS lookup and use the cached IP, making the connection faster.\n- DNS Cache Hierarchy DNS caching occurs at multiple levels, forming a hierarchical structure that optimizes performance.\n- Browser Cache: The first layer of DNS caching occurs in a web browser.\n\nExamples:\n- Example: A record maps a name to an IPv4 address.\n- Example: CNAME is an alias pointing one name to another name.\n\nCommon mistakes:\n- Mistake: assuming DNS changes apply instantly (caching/TTL can delay).\n- Mistake: mixing up authoritative vs recursive DNS roles.\n\nPractice recognition:\n- Quick check: if a name resolves sometimes but not others, suspect caching/TTL or split-horizon DNS.\n\nSources:\n- Direct URL: https://www.geeksforgeeks.org/computer-networks/what-is-dns-caching/",
-    "confidence": 0.8700000000000001,
-    "sources": [
-      "https://www.geeksforgeeks.org/computer-networks/what-is-dns-caching/",
-      "https://www.thewindowsclub.com/flush-windows-dns-cache"
-    ]
-  },
-  "network address": {
-    "answer": "NETWORK ADDRESS\n\nDefinition:\n- The first part of an IP address is used as a network address, the last part as a host address.\n\nKey points:\n- TCP/IP addressing and subnetting - Windows Client | Microsoft Learn Skip to main content Skip to Ask Learn chat experience This browser is no longer supported.\n- Upgrade to Microsoft Edge to take advantage of the latest features, security updates, and technical support.\n- You can try signing in or changing directories .\n- Access to this page requires authorization.\n- A glossary is included at the end of article.\n- These networks are arbitrarily defined into three main classes (along with a few others) that have predefined sizes.\n\nSources:\n- Direct URL: https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/tcpip-addressing-and-subnetting",
-    "confidence": 0.7200000000000001,
-    "sources": [
-      "https://www.geeksforgeeks.org/computer-networks/what-is-a-network-address/",
-      "https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/tcpip-addressing-and-subnetting"
-    ]
-  },
-  "ipv6 basics": {
-    "answer": "IPV6 BASICS\n\nDefinition:\n- What is IPv6?\n\nKey points:\n- Last Updated : 31 Jul, 2025 The next generation Internet Protocol (IP) address standard, known as IPv6, is meant to work in cooperation with IPv4 .\n- Because so many connected devices are being used, the original IP address scheme, known as IPv4, is running out of addresses.\n- This new IP address version is being deployed to fulfil the need for more Internet addresses.\n- With 128-bit address space, it allows 340 undecillion unique address space.\n- IPv6 support a theoretical maximum of 340, 282, 366, 920, 938, 463, 463, 374, 607, 431, 768, 211, 456.\n- Representation of IPv6 An IPv6 address consists of eight groups of four hexadecimal digits separated by ' .\n\nSources:\n- Direct URL: https://www.geeksforgeeks.org/computer-networks/what-is-ipv6/",
-    "confidence": 0.8700000000000001,
-    "sources": [
-      "https://www.geeksforgeeks.org/computer-networks/what-is-ipv6/",
-      "http://www.steves-internet-guide.com/ipv6-guide/"
-    ]
-  },
-  "icmp": {
-    "answer": "ICMP\n\nDefinition:\n- Since the Internet Protocol (IP) itself does not have an inbuilt error-reporting or correction mechanism, ICMP is a supporting protocol within the IP suite that helps in reporting errors and sending diagnostic messages.\n\nKey points:\n- Operational queries : For example, echo requests and replies used in tools like ping.\n- Uses of ICMP Error Reporting If a message cannot be delivered, ICMP informs the source about the failure.\n- Example: If a packet is too large and cannot be forwarded, the receiver drops the packet and sends an ICMP error message to the sender.\n- Network Diagnostics Traceroute : Used to determine the path packets take across routers to reach the destination.\n- Ping : Sends echo-request and echo-reply messages to measure round-trip time and test connectivity.\n- How ICMP Works ICMP is connectionless (unlike TCP) and does not require a handshake.\n\nSources:\n- Direct URL: https://www.geeksforgeeks.org/computer-networks/internet-control-message-protocol-icmp/",
-    "confidence": 0.91,
-    "sources": [
-      "https://www.geeksforgeeks.org/computer-networks/internet-control-message-protocol-icmp/",
-      "https://www.cloudflare.com/learning/ddos/glossary/internet-control-message-protocol-icmp/",
-      "Wikipedia: https://en.wikipedia.org/wiki/Internet_Control_Message_Protocol"
-    ]
-  },
-  "arp": {
-    "answer": "ARP\n\nDefinition:\n- Arp or ARP may refer to:\n\nKey points:\n\nSources:\n- Wikipedia: https://en.wikipedia.org/wiki/Arp",
-    "confidence": 0.7100000000000001,
-    "sources": [
-      "https://www.geeksforgeeks.org/ethical-hacking/how-address-resolution-protocol-arp-works/",
-      "Wikipedia: https://en.wikipedia.org/wiki/Arp"
-    ]
-  },
-  "bgp basics": {
-    "answer": "BGP BASICS\n\nDefinition:\n- Polyphasic sleep or segmented sleep is the system of sleeping during multiple periods over the course of 24 hours, in contrast to monophasic sleep, a single period of sleep within 24 hours.\n\nKey points:\n- Polyphasic usually means more than two periods of sleep, as distinct from biphasic sleep, meaning two periods of sleep.\n- The term polyphasic sleep was first used in the early 20th century by psychologist J.\n- Szymanski, who observed daily fluctuations in activity patterns.\n\nSources:\n- Wikipedia: https://en.wikipedia.org/wiki/Polyphasic_sleep",
-    "confidence": 0.78,
-    "sources": [
-      "https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/iproute_bgp/configuration/xe-16/irg-xe-16-book/configuring-a-basic-bgp-network.html",
-      "https://research.cec.sc.edu/files/cyberinfra/files/2024-08 BGP Basics & Routing Security.pdf",
-      "Wikipedia: https://en.wikipedia.org/wiki/Polyphasic_sleep"
-    ]
-  },
-  "as number": {
-    "answer": "Topic: as number\nCreated: 2026-01-17T08:13:35.445205\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-28"
-  },
-  "route selection": {
-    "answer": "Topic: route selection\nCreated: 2026-01-17T02:13:32.978240\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-28"
-  },
-  "prefix": {
-    "answer": "Topic: prefix\nCreated: 2026-01-16T20:33:30.649133\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-28"
-  },
-  "hello": {
-    "answer": "Topic: hello\nCreated: 2026-01-16T21:03:30.878862\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-28"
-  },
-  "help": {
-    "answer": "Topic: help\nCreated: 2026-01-17T02:13:32.978336\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-26"
-  },
-  "ram": {
-    "answer": "Topic: ram\nCreated: 2026-01-17T02:13:32.978378\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-26"
-  },
-  "what is nat": {
-    "answer": "Topic: what is nat\nCreated: 2026-01-17T02:13:32.978418\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-26"
-  },
-  "lan": {
-    "answer": "Topic: lan\nCreated: 2026-01-16T20:53:30.814133\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-26"
-  },
-  "warhammer": {
-    "answer": "WARHAMMER\n\nDefinition:\n- If an internal link led you here, you may wish to change the link to point directly to the intended article.\n\nKey points:\n- Text is available under the Creative Commons Attribution-ShareAlike 4.0 License ; additional terms may apply.\n- By using this site, you agree to the Terms of Use and Privacy Policy .\n- Wikipedia® is a registered trademark of the Wikimedia Foundation, Inc.\n\nSources:\n- Direct URL: https://en.wikipedia.org/wiki/Warhammer",
-    "confidence": 0.8700000000000001,
-    "sources": [
-      "https://www.warhammer.com/en-US/home",
-      "https://www.warhammer.com/en-GB/home",
-      "Wikipedia: https://en.wikipedia.org/wiki/Warhammer",
-      "https://en.wikipedia.org/wiki/Warhammer"
-    ]
-  },
-  "who are you?": {
-    "answer": "WHO ARE YOU?\n\nDefinition:\n- (album) , a 2008 album by Nico Touches the Walls Who Are You?\n\nKey points:\n- Who Are You also may refer to: Music [ edit ] Who Are You?\n- (2008 TV series) , a South Korean television series Who Are You?\n- (1939 film) , an Italian comedy film Who Are You?\n- (2001 film) , a Portuguese historical drama film Yaare Neenu Cheluve ( lit.\n- If an internal link led you here, you may wish to change the link to point directly to the intended article.\n\nSources:\n- Direct URL: https://en.wikipedia.org/wiki/Who_Are_You_(disambiguation)",
-    "confidence": 0.92,
-    "sources": [
-      "https://genius.com/The-who-who-are-you-lyrics",
-      "https://www.youtube.com/watch?v=24wWxeywfZo",
-      "Wikipedia: https://en.wikipedia.org/wiki/Who_Are_You_(disambiguation)",
-      "https://en.wikipedia.org/wiki/Who_Are_You_(disambiguation)"
-    ]
-  },
-  "autonomous system number (asn)": {
-    "answer": "AUTONOMOUS SYSTEM NUMBER (ASN)\n\nDefinition:\n- An Autonomous System (AS) is a group of one or more IP prefixes (lists of IP addresses accessible on a network) run by one or more network operators that maintain a single, clearly-defined routing policy.\n\nKey points:\n- There are two different formats to represent ASNs: 2-byte and 4-byte .\n- This format provides for 65,536 ASNs (0 to 65535).\n- From these ASNs, the Internet Assigned Numbers Authority (IANA) reserved 1,023 of them (64512 to 65534) for private use.\n- This format provides for 2 32 or 4,294,967,296 ASNs (0 to 4294967295).\n- IANA reserved a block of 94,967,295 ASNs (4200000000 to 4294967294) for private use.\n- Up until the Internet Engineering Task Force (IETF) proposed a gradual transition to 4-byte ASNs in 2007, all ASNs were 2-byte.\n\nSources:\n- arin.net: https://www.arin.net/resources/guide/asn/",
-    "confidence": 0.92,
-    "sources": [
-      "https://www.iana.org/assignments/as-numbers/as-numbers.xhtml",
-      "https://www.cloudflare.com/learning/network-layer/what-is-an-autonomous-system/",
-      "Wikipedia: https://en.wikipedia.org/wiki/Autonomous_system_(Internet)",
-      "https://www.arin.net/resources/guide/asn/"
-    ]
-  },
-  "routing longest prefix match": {
-    "answer": "ROUTING LONGEST PREFIX MATCH\n\nDefinition:\n- Solved: Longest prefix match - Cisco Community Heads Up : The post you are writing will appear in a public forum.\n\nKey points:\n- Please ensure all content is appropriate for public consumption.\n- Review the employee guidelines for the community here .\n- To totally explain it simply, the longest prefix match is a matching address within a subnet using the least amount of addresses.\n- the /30 subnet will have be said to be a closer match but this is more-so in terms of binary.\n- An address of 192.168.x.x would totally be a network address for a /30 subnet but it would be a usable address for a /24 subnet.\n\nSources:\n- community.cisco.com: https://community.cisco.com/t5/routing/longest-prefix-match/td-p/4794030",
-    "confidence": 0.95,
-    "sources": [
-      "user (ui correction)",
-      "https://community.cisco.com/t5/routing/longest-prefix-match/td-p/4794030"
-    ]
-  },
-  "bgp route selection": {
-    "answer": "BGP route selection is how a router picks the best path when it has multiple routes to the same prefix. It compares route attributes in order until one route wins. A common order is: highest Weight (Cisco), highest Local Preference, prefer locally originated, shortest AS Path, best Origin (IGP > EGP > Incomplete), lowest MED (usually only compared from the same neighboring AS), prefer eBGP over iBGP, lowest IGP cost to the next hop, then tie-breakers like oldest route, lowest router ID, lowest neighbor IP.",
-    "confidence": 0.95,
-    "sources": [
-      "user (ui correction)",
-      "https://www.comparitech.com/net-admin/bgp-attributes-and-path-selection/"
-    ]
-  },
-  "cidr prefix": {
-    "answer": "CIDR PREFIX\n\nDefinition:\n- That&#8217;s why we created this awesome looking IPv4 CIDR cheat sheet for you to use.\n\nKey points:\n- Feel free to print it out and hang it up or share a link to it with your colleagues and peers.\n- Check out ManageEngine OpUtils to efficiently discover, track and allocate IP addresses from an easy-to-use, centralized console.\n- Free CIDR Subnet Mask Cheat Sheet Click on the subnet mask chart to view the printable, searchable PDF version.\n- Scroll down below for the CIDR subnet mask tables.\n- It involves dividing the available IP addresses into subnetworks or subnets, each with its own unique range of addresses.\n\nExamples:\n- Example: 192.168.x.x/24 has 256 total addresses (0-255), with usable hosts typically .1 to .254 (depends on context).\n- Example: /26 splits a /24 into 4 subnets (each block size 64).\n\nCommon mistakes:\n- Mistake: confusing the subnet mask with the network address.\n- Mistake: forgetting that network + broadcast addresses are usually not usable host addresses in IPv4.\n\nPractice recognition:\n- Quick check: /24 = 255.255.255.0, /16 = 255.255.0.0, /8 = 255.0.0.0.\n- Quick check: block size = 256 - last mask octet (when the split is in the last octet).\n- Quick check: usable hosts in subnet = 2^(host bits) - 2 (typical IPv4).\n\nSources:\n- networkproguide.com: https://networkproguide.com/cidr-subnet-mask-ipv4-cheat-sheet/",
-    "confidence": 0.9100000000000001,
-    "sources": [
-      "https://www.freecodecamp.org/news/subnet-cheat-sheet-24-subnet-mask-30-26-27-29-and-other-ip-address-cidr-network-references/",
-      "https://www.geeksforgeeks.org/computer-networks/classless-inter-domain-routing-cidr/",
-      "https://networkproguide.com/cidr-subnet-mask-ipv4-cheat-sheet/"
-    ]
-  },
-  "network address subnetting": {
-    "answer": "NETWORK ADDRESS SUBNETTING\n\nDefinition:\n- Most networks do not need such a large number of IP addresses.\n\nKey points:\n- If they use default IP subnets, all unused IP addresses will waste.\n- It allows us breaks default IP subnets as per network requirement and size.\n- An IP address contains two addresses: network address and host address .\n- All IP addresses in an IP group have the same network address.\n- All IP addresses in an IP group have different host addresses.\n\nExamples:\n- Example: 192.168.x.x/24 has 256 total addresses (0-255), with usable hosts typically .1 to .254 (depends on context).\n- Example: /26 splits a /24 into 4 subnets (each block size 64).\n\nCommon mistakes:\n- Mistake: confusing the subnet mask with the network address.\n- Mistake: forgetting that network + broadcast addresses are usually not usable host addresses in IPv4.\n\nPractice recognition:\n- Quick check: /24 = 255.255.255.0, /16 = 255.255.0.0, /8 = 255.0.0.0.\n- Quick check: block size = 256 - last mask octet (when the split is in the last octet).\n- Quick check: usable hosts in subnet = 2^(host bits) - 2 (typical IPv4).\n\nSources:\n- computernetworkingnotes.com: https://www.computernetworkingnotes.com/ccna-study-guide/subnetting-tutorial-subnetting-explained-with-examples.html",
-    "confidence": 0.9100000000000001,
-    "sources": [
-      "https://www.geeksforgeeks.org/computer-networks/introduction-to-subnetting/",
-      "https://www.networkkings.org/what-is-subnetting",
-      "https://www.computernetworkingnotes.com/ccna-study-guide/subnetting-tutorial-subnetting-explained-with-examples.html"
-    ]
-  },
-  "coding": {
-    "answer": "coding is: Coding, or programming, is the process of writing instructions (code) in a specific language that a computer can understand and execute to perform tasks, from building websites and apps to analyzing data, essentially acting as a set of step-by-step recipes for technology. It involves using programming languages like Python or JavaScript to tell computers what to do, enabling human-device interaction and the creation of software",
-    "confidence": 0.95,
-    "sources": [
-      "user (ui correction)"
-    ]
-  },
-  "highest weight (cisco only, local to the router)": {
-    "answer": "Topic: highest weight (cisco only, local to the router)\nCreated: 2026-01-17T12:58:37.421708\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-26"
-  },
-  "fallout new vegas": {
-    "answer": "a popular 2010 open-world action RPG set in a post-nuclear desert wasteland, where players control a courier betrayed and left for dead, seeking revenge while navigating conflicts between factions vying for control of the iconic, untouched New Vegas strip. Developed by Obsidian Entertainment and published by Bethesda, it's known for its deep storytelling, player choices impacting numerous faction outcomes, and rich world-building, building on Fallout 3's engine and style but offering distinct storylines and characters",
-    "confidence": 0.9,
-    "sources": [
-      "https://fallout.bethesda.net/games/fallout-new-vegas"
-    ]
-  },
-  "highest local preference (preferred exit from your as)": {
-    "answer": "Topic: highest local preference (preferred exit from your as)\nCreated: 2026-01-17T12:58:37.421765\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-27"
-  },
-  "prefer routes that were originated locally (network/aggregate/redistribute)": {
-    "answer": "PREFER ROUTES THAT WERE ORIGINATED LOCALLY (NETWORK/AGGREGATE/REDISTRIBUTE)\n\nDefinition:\n- Solved: BGP Best Path Selection Algorithm Question - Cisco Community Heads Up : The post you are writing will appear in a public forum.\n\nKey points:\n- Please ensure all content is appropriate for public consumption.\n- Review the employee guidelines for the community here .\n- That is, prefer a route that was learned from an IGP or from a direct connection on the same router.\n- 3) If #2 is true, how does the receiving router know which path leads back to the \"true\" origin?\n- Thank so much for any help you can provide in clearing this up.\n\nSources:\n- Direct URL: https://community.cisco.com/t5/routing/bgp-best-path-selection-algorithm-question/td-p/4413753",
-    "confidence": 0.5,
-    "sources": [
-      "https://community.cisco.com/t5/routing/bgp-best-path-selection-algorithm-question/td-p/4413753"
-    ]
-  },
-  "shortest as path (fewer as hops)": {
-    "answer": "Topic: shortest as path (fewer as hops)\nCreated: 2026-01-17T12:58:37.421855\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-27"
-  },
-  "best origin type (igp better than egp better than incomplete)": {
-    "answer": "Topic: best origin type (igp better than egp better than incomplete)\nCreated: 2026-01-17T12:58:37.421914\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-27"
-  },
-  "lowest med (only compared when routes come from the same neighboring as, usually)": {
-    "answer": "Topic: lowest med (only compared when routes come from the same neighboring as, usually)\nCreated: 2026-01-17T12:58:37.421962\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-27"
-  },
-  "no it is: a popular 2010 open-world action rpg set in a post-nuclear desert wasteland, where players control a courier betrayed and left for dead, seeking revenge while navigating conflicts between factions vying for control of the iconic, untouched new vegas strip. developed by obsidian entertainment and published by bethesda, it's known for its deep storytelling, player choices impacting numerous faction outcomes, and rich world-building, building on fallout 3's engine and style but offering distinct storylines and characters": {
-    "answer": "a popular 2010 open-world action RPG set in a post-nuclear desert wasteland, where players control a courier betrayed and left for dead, seeking revenge while navigating conflicts between factions vying for control of the iconic, untouched New Vegas strip. Developed by Obsidian Entertainment and published by Bethesda, it's known for its deep storytelling, player choices impacting numerous faction outcomes, and rich world-building, building on Fallout 3's engine and style but offering distinct storylines and characters",
-    "confidence": 0.9,
-    "sources": []
-  },
-  "fallout 4": {
-    "answer": "a critically acclaimed, open-world action role-playing game (RPG) set in a post-apocalyptic version of Boston (the Commonwealth) where players explore, fight, scavenge, craft, and build settlements after a nuclear war.",
-    "confidence": 0.95,
-    "sources": [
-      "https://fallout.bethesda.net/en/games/fallout-4"
-    ]
-  },
-  "fallout 3?": {
-    "answer": "FALLOUT 3?\n\nDefinition:\n- Emotes Icons Photomode Seasons Skins Styles Utility Updates Burning Springs C.A.M.P.\n\nKey points:\n- For Black Isle Studios 's canceled Fallout 3, see Van Buren .\n- For an overview of Fallout 3 -related articles, see Portal:Fallout 3 .\n- &#8221; Fallout 3 is a post-apocalyptic role-playing video game developed by Bethesda Game Studios and published by Bethesda Softworks .\n- It is the third major installment in the Fallout series (fifth overall) and a sequel to Interplay Entertainment 's Fallout and Fallout 2 .\n- It was released on October 28, 2008, in North America, on October 31, 2008, in Europe and Australia and on December 4, 2008, in Japan.\n\nSources:\n- fallout.fandom.com: https://fallout.fandom.com/wiki/Fallout_3",
-    "confidence": 0.92,
-    "sources": [
-      "https://fallout.bethesda.net/en/games/fallout-3",
-      "https://store.steampowered.com/app/22300/Fallout_3/",
-      "https://gamerant.com/fallout-3-new-vegas-remakes-leak-steam/",
-      "https://fallout.fandom.com/wiki/Fallout_3"
-    ]
-  },
-  "fallout 3": {
-    "answer": "Fallout 3\nis a highly influential 2008 open-world action role-playing game (RPG) developed by Bethesda Game Studios, set in a retro-futuristic, post-nuclear war version of the Washington, D.C. area (the Capital Wasteland) in the year 2277, where players explore, fight mutated creatures and factions, and search for their missing father, emphasizing player choice in a vast, dangerous world with a distinctive 1950s sci-fi aesthetic",
-    "confidence": 0.92,
-    "sources": [
-      "https://en.wikipedia.org/wiki/Fallout_3"
-    ]
-  },
-  "prefer ebgp over ibgp": {
-    "answer": "Topic: prefer ebgp over ibgp\nCreated: 2026-01-17T12:58:37.422010\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-27"
-  },
-  "lowest igp cost to the next hop": {
-    "answer": "Topic: lowest igp cost to the next hop\nCreated: 2026-01-17T12:58:37.422050\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-27"
-  },
-  "definition:": {
-    "answer": "Topic: definition:\nCreated: 2026-01-17T13:03:37.456589\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-26"
-  },
-  "bgp route selection is how a router chooses the âbestâ route when it learns multiple routes to the same destination prefix. it compares route attributes in a set order until one route wins.": {
-    "answer": "",
-    "confidence": 0.0,
-    "sources": [
-      "https://www.cisco.com/c/en/us/td/docs/iosxr/cisco8000/bgp/b-bgp-config-cisco8000/m-bgp-path-selection-and-route-preference.pdf"
-    ]
-  },
-  "common best path order (typical idea, vendor can vary):": {
-    "answer": "Topic: common best path order (typical idea, vendor can vary):\nCreated: 2026-01-17T13:03:37.456700\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-26"
-  },
-  "highest local preference (your as preferred exit)": {
-    "answer": "Topic: highest local preference (your as preferred exit)\nCreated: 2026-01-17T13:03:37.456743\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-26"
-  },
-  "prefer locally originated (network, aggregate, redistribute)": {
-    "answer": "Topic: prefer locally originated (network, aggregate, redistribute)\nCreated: 2026-01-17T13:03:37.456786\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-27"
-  },
-  "shortest as path": {
-    "answer": "Topic: shortest as path\nCreated: 2026-01-17T13:03:37.456824\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-27"
-  },
-  "best origin type (igp is best, then egp, then incomplete)": {
-    "answer": "Topic: best origin type (igp is best, then egp, then incomplete)\nCreated: 2026-01-17T13:03:37.456866\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-27"
-  },
-  "lowest med (usually only compared when routes come from the same neighboring as)": {
-    "answer": "Topic: lowest med (usually only compared when routes come from the same neighboring as)\nCreated: 2026-01-17T13:03:37.456911\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-27"
-  },
-  "lowest igp metric to the next hop": {
-    "answer": "Topic: lowest igp metric to the next hop\nCreated: 2026-01-17T13:03:37.456953\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-26"
-  },
-  "tie breakers like oldest route, lowest router id, lowest neighbor ip": {
-    "answer": "Topic: tie breakers like: oldest route, lowest router id, lowest neighbor ip\nCreated: 2026-01-17T12:58:37.422094\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-26"
-  },
-  "key point:": {
-    "answer": "Topic: key point:\nCreated: 2026-01-17T13:03:37.457030\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-26"
-  },
-  "most of the time, admins control routing by changing local preference, as path, or med, so the âbestâ path matches what the network wants.": {
-    "answer": "MOST OF THE TIME, ADMINS CONTROL ROUTING BY CHANGING LOCAL PREFERENCE, AS PATH, OR MED, SO THE ÂBESTÂ PATH MATCHES WHAT THE NETWORK WANTS.\n\nDefinition:\n- BGP Local Preference vs.\n\nKey points:\n- [email&#160;protected] +1 530 567 4539 Courses Subscription Guides About Contact Home Guides BGP Nolan Brightwood Thu, 15 Aug 2024 BGP Local Preference vs.\n- MED: Key Differences and Use Cases Table of Contents BGP Local Preference vs.\n- MED: Key Differences and Use Cases BGP Local Preference vs.\n- Two BGP attributes crucial in dictating routing decisions are the Local Preference and the Multi-Exit Discriminator (MED).\n- Though both serve to influence path selection, their applications and effects differ significantly.\n- This guide delves into the nuances that set these attributes apart and scenarios where each finds its most effective use.\n\nSources:\n- Direct URL: https://netseccloud.com/bgp-local-preference-vs-med-key-differences-and-use-cases",
-    "confidence": 0.5,
-    "sources": [
-      "https://netseccloud.com/bgp-local-preference-vs-med-key-differences-and-use-cases"
-    ]
-  },
-  "sources:": {
-    "answer": "Topic: sources:\nCreated: 2026-01-17T13:03:37.457134\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-26"
-  },
-  "fallout 3 the video game": {
-    "answer": "Topic: fallout 3 the video game\nCreated: 2026-01-17T14:08:37.982732\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-27"
-  },
-  "fallout 3 about": {
-    "answer": "Topic: fallout 3 about\nCreated: 2026-01-17T14:08:37.982823\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-27"
-  },
-  "common decision order (most routers follow something close to this):": {
-    "answer": "Topic: common decision order (most routers follow something close to this):\nCreated: 2026-01-17T12:58:37.421608\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-27"
-  },
-  "ddrm": {
-    "answer": "DDRM\n\nDefinition:\n- Images for Demonstration Purposes A list of images for demonstration purposes can be found here: https://github.com/jiamings/ddrm-exp-datasets .\n\nKey points:\n- Search code, repositories, users, issues, pull requests...\n- --> Search Clear Search syntax tips Provide feedback --> We read every piece of feedback, and take your input very seriously.\n- Cancel Create saved search Sign in Sign up Appearance settings Resetting focus You signed in with another tab or window.\n- You signed out in another tab or window.\n- You switched accounts on another tab or window.\n- It does so efficiently and without problem-specific supervised training.\n\nSources:\n- Direct URL: https://github.com/bahjat-kawar/ddrm",
-    "confidence": 0.8700000000000001,
-    "sources": [
-      "https://arxiv.org/abs/2201.11793",
-      "https://github.com/bahjat-kawar/ddrm"
-    ]
-  },
-  "a processor": {
-    "answer": "A PROCESSOR\n\nDefinition:\n- What is a Processor?\n\nKey points:\n- Types of Processors and Their Uses Explained Close Menu Subscribe to Updates Get the latest creative news from FooBar about art, design and business.\n- By signing up, you agree to the our terms and our Privacy Policy agreement.\n- The Brain of Your Digital Devices Explained What is a Processor?\n- The Brain of Your Digital Devices By Shintu Dhang March 20, 2025 4 Mins Read Facebook Twitter Pinterest LinkedIn Tumblr Email What is a Processor?\n- Share Facebook Twitter LinkedIn Pinterest Email Have you ever wondered how your smartphone , laptop , or even your smartwatch works so efficiently?\n- The secret lies in a small but powerful component called the processor , also known as the Central Processing Unit (CPU) .\n\nSources:\n- Direct URL: https://www.exhibit.tech/explained/what-is-processor/",
-    "confidence": 0.8700000000000001,
-    "sources": [
-      "https://www.geeksforgeeks.org/computer-organization-architecture/what-is-processor/",
-      "https://www.exhibit.tech/explained/what-is-processor/"
-    ]
-  },
-  "hdmi": {
-    "answer": "HDMI\n\nDefinition:\n- This wikiHow teaches you how to connect your PC to a TV using an HDMI cable.\n\nKey points:\n- Please log in with your username or email to continue.\n- Facebook Google wikiHow Account No account yet?\n- Stan Kats is a Professional Technologist and the COO and Chief Technologist for The STG IT Consulting Group in West Hollywood, California.\n- Stan holds a BA in International Relations from The University of Southern California.\n- He began his career working in the Fortune 500 IT world.\n- Stan founded his companies to offer an enterprise-level of expertise for small businesses and individuals.\n\nSources:\n- Direct URL: https://www.wikihow.com/Connect-PC-to-TV-with-HDMI",
-    "confidence": 0.8700000000000001,
-    "sources": [
-      "https://www.hdmi.org/spec/index",
-      "https://www.wikihow.com/Connect-PC-to-TV-with-HDMI"
-    ]
-  },
-  "what are the fallout video games about": {
-    "answer": "The Fallout series is about exploring a retrofuturistic, post-apocalyptic America after a devastating nuclear war in 2077, focusing on survival, rebuilding, and moral choices in a world blending 1950s culture with advanced atomic tech, where players navigate wastelands, fight mutants, raiders, and deal with warring factions while discovering secrets of the pre-war world and Vault-Tec's experiments.",
-    "confidence": 0.9,
-    "sources": [
-      "https://fallout.fandom.com/wiki/Fallout_series"
-    ]
-  },
-  "the fallout series about": {
-    "answer": "The Fallout series is about exploring a retrofuturistic, post-apocalyptic America after a devastating nuclear war in 2077, focusing on survival, rebuilding, and moral choices in a world blending 1950s culture with advanced atomic tech, where players navigate wastelands, fight mutants, raiders, and deal with warring factions while discovering secrets of the pre-war world and Vault-Tec's experiments.",
-    "confidence": 0.9,
-    "sources": []
-  },
-  "i couldn't save a clean answer yet": {
-    "answer": "Aaorn",
-    "confidence": 0.9,
-    "sources": []
-  },
-  "fallout series": {
-    "answer": "FALLOUT SERIES\n\nDefinition:\n- All Rights Reserved.\n\nKey points:\n- Fallout | Bethesda.net Close Global Navigation Menu Games Games Fallout 76 DOOM: The Dark Ages Fallout 4: Anniversary Edition The Elder Scrolls IV: Oblivion Remastered Indiana Jones and the Great Circle Starfield The Elder Scrolls Online Heretic + HeXen All Games Creations & Mods Creations & Mods Fallout 4 Skyrim Special Edition Starfield The Elder Scrolls Online DOOM Eternal DOOM + DOOM II Heretic + HeXen Community Community Community Hub Events Slayers Club QuakeCon News News Latest News Shop Shop Merchandise Redeem Code Bethesda Bundle Support Support Service Status Help Site Game Manuals Facebook Twitter YouTube Instagram Discord Account Management Log Out Log In / Sign Up English Explor\n\nSources:\n- fallout.bethsoft.com: http://fallout.bethsoft.com/",
-    "confidence": 0.88,
-    "sources": [
-      "https://www.imdb.com/title/tt12637874/",
-      "Wikipedia: https://en.wikipedia.org/wiki/Fallout_(franchise)",
-      "http://fallout.bethsoft.com/"
-    ]
-  },
-  "football": {
-    "answer": ": In America, \"football\" refers to American football, a full-contact sport where two teams of 11 players on a rectangular field try to score by advancing an oval ball into the opponent's end zone, using a combination of running, passing, and strategic plays, evolving from rugby but allowing hand-held possession and forward passes, with the NFL's Super Bowl being the championship game. It's distinct from association football (soccer) and is the country's most popular sport, characterized by downs (four attempts to gain 10 yards), tackles, and scoring touchdowns, field goals, and safeties.",
-    "confidence": 0.9,
-    "sources": [
-      "https://www.nfl.com/"
-    ]
-  },
-  "tie breakers like: oldest route, lowest router id, lowest neighbor ip": {
-    "answer": "Topic: tie breakers like: oldest route, lowest router id, lowest neighbor ip\nCreated: 2026-01-17T12:58:37.422094\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-27"
-  },
-  "no, itâs actually: bgp route selection": {
-    "answer": "",
-    "confidence": 0.0,
-    "sources": [
-      "https://www.cisco.com/c/en/us/td/docs/iosxr/cisco8000/bgp/b-bgp-config-cisco8000/m-bgp-path-selection-and-route-preference.pdf"
-    ]
-  },
-  "ai": {
-    "answer": "AI\n\nKey points:\n- OpenAI Skip to main content Log in Switch to ChatGPT (opens in a new window) Sora (opens in a new window) API Platform (opens in a new window) Research Safety For Business For Developers ChatGPT Sora Stories Company News Research Back to main menu Research Index Research Overview Research Residency OpenAI for Science Latest Advancements GPT-5.2 GPT-5.1 Sora 2 GPT-5 OpenAI o3 and o4-mini GPT-4.5 Safety Back to main menu Safety Approach Security & Privacy For Business Back to main menu Business Overview Solutions Learn Startups ChatGPT Pricing API Pricing Contact Sales For Developers Back to main menu API Platform API Pricing Agents Codex Open Models Community (opens in a new window) ChatGPT B\n\nSources:\n- openai.com: https://openai.com/",
-    "confidence": 0.8700000000000001,
-    "sources": [
-      "https://deepai.org/?lang=en",
-      "https://deepai.org/chat/what-is-ai",
-      "Wikipedia: https://en.wikipedia.org/wiki/Ai",
-      "https://openai.com/"
-    ]
-  },
-  "the seattle seahawks record": {
-    "answer": "THE SEATTLE SEAHAWKS RECORD\n\nDefinition:\n- All rights reserved.\n\nKey points:\n- &#xAE; SEAHAWKS, SEAHAWKS LOGO, SPIRIT OF 12, WE ARE 12, BRING ON THE 12, LEGION OF BOOM, 12 and 12S are trademarks of the Seattle Seahawks.\n- It is highly recommended that you use the latest versions of a supported browser in order to receive an optimal viewing experience.\n- The following browsers are supported: Chrome, Edge (v80 and later), Firefox and Safari.\n\nSources:\n- Direct URL: https://www.seahawks.com/team/standings/",
-    "confidence": 0.8700000000000001,
-    "sources": [
-      "https://www.pro-football-reference.com/teams/sea/index.htm",
-      "https://www.seahawks.com/team/standings/"
-    ]
-  },
-  "your name": {
-    "answer": "Machine Spirit",
-    "confidence": 0.9,
-    "sources": [
-      "https://www.imdb.com/title/tt5311514/",
-      "Wikipedia: https://en.wikipedia.org/wiki/Your_Name"
-    ]
-  },
-  "what day is it": {
-    "answer": "WHAT DAY IS IT\n\nDefinition:\n- Day .\n\nKey points:\n- See more °F Weather 42 °F Scattered clouds.\n- Become a Supporter Browse our site advert free.\n- Exclusive calendar templates for PDF Calendar.\n\nSources:\n- Direct URL: https://www.timeanddate.com/worldclock/usa/tacoma",
-    "confidence": 0.8700000000000001,
-    "sources": [
-      "https://www.calendardate.com/todays.htm",
-      "https://www.timeanddate.com/worldclock/usa/tacoma"
-    ]
-  },
-  "date": {
-    "answer": "DATE\n\nDefinition:\n- &copy; 2026 www.calendardate.com.\n\nKey points:\n- Contact Us Terms and Conditions Site Map We use cookies to personalize content, ads, and provide social media interaction and analyze traffic on our site.\n- By using our site you consent to our Privacy Policy .\n\nSources:\n- Direct URL: https://www.calendardate.com/todays.htm",
-    "confidence": 0.8700000000000001,
-    "sources": [
-      "https://www.timeanddate.com/",
-      "https://www.calendardate.com/todays.htm"
-    ]
-  },
-  "the date": {
-    "answer": "THE DATE\n\nDefinition:\n- Personal World Clock Set the current time of your favorite locations across time zones.\n\nKey points:\n- DST changes worldwide Time Zones Time Zone Map World map of time zones, accounting for all DST changes in real time.\n- Time Zone Converter Calculate the time difference between places and time zones.\n- Meeting Planner Find the best time to have a meeting across time zones.\n- Event Time Announcer Calculate and share global times for your event.\n- Add Your Own Events Create your own events and add them to our calendar.\n\nSources:\n- Direct URL: https://www.timeanddate.com/",
-    "confidence": 0.8700000000000001,
-    "sources": [
-      "https://www.calendardate.com/todays.htm",
-      "https://www.timeanddate.com/"
-    ]
-  },
-  "cisco: bgp best path selection algorithm": {
-    "answer": "Topic: cisco: bgp best path selection algorithm\nCreated: 2026-01-17T13:03:37.457175\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-26"
-  },
-  "who are you": {
-    "answer": "WHO ARE YOU\n\nDefinition:\n- Who Are You?\n\nKey points:\n- Subscribe Recent Issue Archive Tests Self Tests Self Tests are all about you.\n- Find out the answers to these questions and more with Psychology Today.\n- Which Jobs Attract \"Dark\" Personalities?\n- Do You Still Believe These Myths About The Mind?\n- Can You Spot Red Flags In A Relationship?\n- Sociopath Test Can You Spot Self-Sabotage?\n\nSources:\n- psychologytoday.com: https://www.psychologytoday.com/us/blog/fixing-families/202108/who-are-you-6-questions-to-help-you-find-out",
-    "confidence": 0.9100000000000001,
-    "sources": [
-      "https://www.youtube.com/watch?v=24wWxeywfZo",
-      "https://www.wikihow.com/Personality-Quiz",
-      "https://www.psychologytoday.com/us/blog/fixing-families/202108/who-are-you-6-questions-to-help-you-find-out"
-    ]
-  },
-  "a laptop": {
-    "answer": "A laptop is a portable, battery-powered computer with a built-in screen and keyboard.",
-    "confidence": 0.95,
-    "sources": [
-      "https://www.amazon.com/Notebooks-Laptop-Computers/b?node=565108",
-      "https://www.bestbuy.com/site/computers-pcs/laptop-computers/abcat0502000.c?id=abcat0502000",
-      "Wikipedia: https://en.wikipedia.org/wiki/Alappuzha",
-      "https://www.walmart.com/browse/electronics/all-laptop-computers/3944_1089430_3951_132960"
-    ]
-  },
-  "laptop": {
-    "answer": "LAPTOP\n\nDefinition:\n- A laptop is a portable personal computer (PC).\n\nKey points:\n\nSources:\n- Wikipedia: https://en.wikipedia.org/wiki/Laptop",
-    "confidence": 0.9100000000000001,
-    "sources": [
-      "https://www.bestbuy.com/site/computers-pcs/laptop-computers/abcat0502000.c?id=abcat0502000",
-      "Wikipedia: https://en.wikipedia.org/wiki/Laptop",
-      "https://www.amazon.com/Notebooks-Laptop-Computers/b?node=565108"
-    ]
-  },
-  "girl scouts": {
-    "answer": ": Girl Scouts is a U.S. youth organization for girls (K-12) focused on building courage, confidence, and character through a girl-led experience, empowering them with skills in leadership, outdoor adventure, STEM, life skills (like cookie sales), and community service, helping them reach their potential and make the world a better place.",
-    "confidence": 0.95,
-    "sources": [
-      "https://www.girlscouts.org/"
-    ]
-  },
   "__selftest_override_1769206923__": {
     "answer": "CLEANUP_DONE",
     "confidence": 0.95,
@@ -704,14 +8,6 @@
     "answer": "CLEANUP_DONE",
     "confidence": 0.95,
     "sources": []
-  },
-  "about renton technical college": {
-    "answer": "ABOUT RENTON TECHNICAL COLLEGE\n\nDefinition:\n- APPLY VISIT LEARN MORE NEWS View All News Student builds confidence at RTC Valeria has overcome more fears and found greater confidence......\n\nKey points:\n- Read More Renton Promise expands with Boeing grant The Boeing Company has awarded a $250,000 grant to support......\n- Intranet Washington Relay Service © 2026 Renton Technical College.\n\nSources:\n- Direct URL: https://rtc.edu/",
-    "confidence": 0.92,
-    "sources": [
-      "https://careerbridge.wa.gov/learn/educational-institutions/82",
-      "https://rtc.edu/"
-    ]
   },
   "__selftest_override_1769207151__": {
     "answer": "CLEANUP_DONE",
@@ -883,83 +179,10 @@
     "confidence": 0.95,
     "sources": []
   },
-  "the temperature in bonney lake, washington": {
-    "answer": "THE TEMPERATURE IN BONNEY LAKE, WASHINGTON\n\nDefinition:\n- Please try another search.\n\nKey points:\n- The major winter storm will continue to impact the Northeast U.S.\n- today with heavy snow as it shifts away from the East Coast.\n- Frigid temperatures will impact the eastern two-thirds of the U.S.\n- this week, and numerous record lows are forecast.\n- Sub-zero lows are expected nearly every morning from the Northern Plains through the Ohio Valley and into the Northeast.\n- Read More > Current conditions at Pierce County-Thun Field (KPLU) Lat: 47.104&deg;N Lon: 122.287&deg;W Elev: 538.0ft.\n\nSources:\n- forecast.weather.gov: https://forecast.weather.gov/MapClick.php?site=SEW&textField1=47.1874&textField2=-122.164",
-    "confidence": 0.5,
-    "sources": [
-      "https://forecast.weather.gov/MapClick.php?site=SEW&textField1=47.1874&textField2=-122.164"
-    ]
-  },
-  "geneve tunneling": {
-    "answer": "GENEVE TUNNELING\n\nDefinition:\n- This document describes Geneve, an encapsulation protocol designed to recognize and accommodate these changing capabilities and needs.\n\nKey points:\n- RFC 8926: Geneve: Generic Network Virtualization Encapsulation RFC 8926 Geneve Protocol November 2020 Gross, et al.\n- As a result of their role in tying together different elements of the system, the requirements on tunnels are influenced by all of these components.\n- Therefore, flexibility is the most important aspect of a tunneling protocol if it is to keep pace with the evolution of technology.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc8926",
-    "confidence": 0.8,
-    "sources": [
-      "https://www.rfc-editor.org/rfc/rfc8926"
-    ]
-  },
-  "bgp": {
-    "answer": "BGP\n\nDefinition:\n- Abstract This document discusses the Border Gateway Protocol (BGP), which is an inter-Autonomous System routing protocol.\n\nKey points:\n- Please refer to the current edition of the \"Internet Official Protocol Standards\" (STD 1) for the standardization state and status of this protocol.\n- Copyright Notice Copyright (C) The Internet Society (2006).\n- The primary function of a BGP speaking system is to exchange network reachability information with other BGP systems.\n- This network reachability information includes information on the list of Autonomous Systems (ASes) that reachability information traverses.\n- BGP-4 provides a set of mechanisms for supporting Classless Inter- Domain Routing (CIDR).\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc4271.txt",
-    "confidence": 0.8,
-    "sources": [
-      "https://www.rfc-editor.org/rfc/rfc4271.txt"
-    ]
-  },
-  "rfc 1918": {
-    "answer": "RFC 1918\n\nDefinition:\n- This document describes address allocation for private internets.\n\nKey points:\n- The allocation permits full network layer connectivity among all hosts inside an enterprise as well as among all public hosts of different enterprises.\n- The cost of using private internet address space is the potentially costly effort to renumber hosts and networks between public and private.\n- The Internet has grown beyond anyone's expectations.\n- Sustained exponential growth continues to introduce new challenges.\n\nExamples:\n- Example private IPv4 blocks: 10.x.x.x/8, 172.16-31.x.x/12, 192.168.x.x/16.\n- Example: home routers typically use NAT so private addresses can reach the public internet.\n\nCommon mistakes:\n- Mistake: thinking private IPs are routable on the public internet (they are not).\n- Mistake: assuming NAT is security by itself (it helps, but it’s not a firewall).\n\nPractice recognition:\n- Quick check: if the IP starts with 10., 192.168., or 172.16-172.31, it’s likely private RFC1918 space.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc1918.txt",
-    "confidence": 0.8,
-    "sources": [
-      "https://www.rfc-editor.org/rfc/rfc1918.txt"
-    ]
-  },
-  "nat": {
-    "answer": "NAT\n\nDefinition:\n- Preface The NAT operation described in this document extends address translation introduced in RFC 1631 and includes a new type of network address and TCP/UDP port translation.\n\nKey points:\n- It does not specify an Internet standard of any kind.\n- Copyright Notice Copyright (C) The Internet Society (2001).\n- In addition, this document corrects the Checksum adjustment algorithm published in RFC 1631 and attempts to discuss NAT operation and limitations in detail.\n- Abstract Basic Network Address Translation or Basic NAT is a method by which IP addresses are mapped from one group to another, transparent to end users.\n- Network topology outside a local domain can change in many ways.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc3022.txt",
-    "confidence": 0.8,
-    "sources": [
-      "https://www.rfc-editor.org/rfc/rfc3022.txt"
-    ]
-  },
-  "ospf": {
-    "answer": "OSPF\n\nDefinition:\n- Abstract This memo documents version 2 of the OSPF protocol.\n\nKey points:\n- Please refer to the current edition of the \"Internet Official Protocol Standards\" (STD 1) for the standardization state and status of this protocol.\n- Copyright Notice Copyright (C) The Internet Society (1998).\n- It is designed to be run internal to a single Autonomous System.\n- Each OSPF router maintains an identical database describing the Autonomous System's topology.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc2328.txt",
-    "confidence": 0.8,
-    "sources": [
-      "https://www.rfc-editor.org/rfc/rfc2328.txt"
-    ]
-  },
-  "ipsec": {
-    "answer": "IPSEC\n\nDefinition:\n- Abstract This document describes an updated version of the \"Security Architecture for IP\", which is designed to provide security services for traffic at the IP layer.\n\nKey points:\n- Please refer to the current edition of the \"Internet Official Protocol Standards\" (STD 1) for the standardization state and status of this protocol.\n- Copyright Notice Copyright (C) The Internet Society (2005).\n- This document obsoletes RFC 2401 (November 1998).\n- Kent & Seo Standards Track [Page 1] RFC 4301 Security Architecture for IP December 2005 Table of Contents 1.\n- Introduction ....................................................4 1.1.\n- Summary of Contents of Document ............................4 1.2.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc4301.txt",
-    "confidence": 0.8,
-    "sources": [
-      "https://www.rfc-editor.org/rfc/rfc4301.txt"
-    ]
-  },
-  "gre tunneling": {
-    "answer": "GRE TUNNELING\n\nDefinition:\n- Abstract This document specifies a protocol for encapsulation of an arbitrary network layer protocol over another arbitrary network layer protocol.\n\nKey points:\n- Please refer to the current edition of the \"Internet Official Protocol Standards\" (STD 1) for the standardization state and status of this protocol.\n- Copyright Notice Copyright (C) The Internet Society (2000).\n- Introduction A number of different proposals [RFC1234, RFC1226] currently exist for the encapsulation of one protocol over another protocol.\n- Other types of encapsulations [RFC1241, RFC1479] have been proposed for transporting IP over IP for policy purposes.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc2784.txt",
-    "confidence": 0.8,
-    "sources": [
-      "https://www.rfc-editor.org/rfc/rfc2784.txt"
-    ]
-  },
-  "tcp": {
-    "answer": "TCP\n\nDefinition:\n- This document describes the basic functionality expected in modern TCP implementations and replaces the protocol specification in RFC 793.\n\nKey points:\n- ﻿ Internet Engineering Task Force (IETF) W.\n- TCP is an important transport-layer protocol in the Internet protocol stack, and it has continuously evolved over decades of use and growth of the Internet.\n- Over this time, a number of changes have been made to TCP as it was specified in RFC 793, though these have only been documented in a piecemeal fashion.\n- This document collects and brings those changes together with the protocol specification from RFC 793.\n- This document obsoletes RFC 793, as well as RFCs 879, 2873, 6093, 6429, 6528, and 6691 that updated parts of RFC 793.\n- It updates RFCs 1011 and 1122, and it should be considered as a replacement for the portions of those documents dealing with TCP requirements.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc9293.txt",
-    "confidence": 0.8,
-    "sources": [
-      "https://www.rfc-editor.org/rfc/rfc9293.txt"
-    ]
-  },
-  "vxlan": {
-    "answer": "Topic: vxlan\nCreated: 2026-01-27T20:13:16.941260\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-27"
-  },
   "__selftest_override_1769513449__": {
     "answer": "CLEANUP_DONE",
     "confidence": 0.95,
     "sources": []
-  },
-  "what time is it": {
-    "answer": "Topic: what time is it\nCreated: 2026-01-27T20:13:16.941385\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
-    "confidence": 0.65,
-    "updated_on": "2026-01-27"
   },
   "__selftest_override_1769558298__": {
     "answer": "CLEANUP_DONE",
@@ -976,21 +199,512 @@
     "confidence": 0.95,
     "sources": []
   },
+  "a laptop": {
+    "answer": "A laptop is a portable, battery-powered computer with a built-in screen and keyboard.",
+    "confidence": 0.95,
+    "sources": [
+      "https://www.amazon.com/Notebooks-Laptop-Computers/b?node=565108",
+      "https://www.bestbuy.com/site/computers-pcs/laptop-computers/abcat0502000.c?id=abcat0502000",
+      "Wikipedia: https://en.wikipedia.org/wiki/Alappuzha",
+      "https://www.walmart.com/browse/electronics/all-laptop-computers/3944_1089430_3951_132960"
+    ]
+  },
+  "a processor": {
+    "answer": "A PROCESSOR\n\nDefinition:\n- What is a Processor?\n\nKey points:\n- Types of Processors and Their Uses Explained Close Menu Subscribe to Updates Get the latest creative news from FooBar about art, design and business.\n- By signing up, you agree to the our terms and our Privacy Policy agreement.\n- The Brain of Your Digital Devices Explained What is a Processor?\n- The Brain of Your Digital Devices By Shintu Dhang March 20, 2025 4 Mins Read Facebook Twitter Pinterest LinkedIn Tumblr Email What is a Processor?\n- Share Facebook Twitter LinkedIn Pinterest Email Have you ever wondered how your smartphone , laptop , or even your smartwatch works so efficiently?\n- The secret lies in a small but powerful component called the processor , also known as the Central Processing Unit (CPU) .\n\nSources:\n- Direct URL: https://www.exhibit.tech/explained/what-is-processor/",
+    "confidence": 0.8700000000000001,
+    "sources": [
+      "https://www.geeksforgeeks.org/computer-organization-architecture/what-is-processor/",
+      "https://www.exhibit.tech/explained/what-is-processor/"
+    ]
+  },
+  "about renton technical college": {
+    "answer": "ABOUT RENTON TECHNICAL COLLEGE\n\nDefinition:\n- APPLY VISIT LEARN MORE NEWS View All News Student builds confidence at RTC Valeria has overcome more fears and found greater confidence......\n\nKey points:\n- Read More Renton Promise expands with Boeing grant The Boeing Company has awarded a $250,000 grant to support......\n- Intranet Washington Relay Service © 2026 Renton Technical College.\n\nSources:\n- Direct URL: https://rtc.edu/",
+    "confidence": 0.92,
+    "sources": [
+      "https://careerbridge.wa.gov/learn/educational-institutions/82",
+      "https://rtc.edu/"
+    ]
+  },
+  "ai": {
+    "answer": "AI\n\nKey points:\n- OpenAI Skip to main content Log in Switch to ChatGPT (opens in a new window) Sora (opens in a new window) API Platform (opens in a new window) Research Safety For Business For Developers ChatGPT Sora Stories Company News Research Back to main menu Research Index Research Overview Research Residency OpenAI for Science Latest Advancements GPT-5.2 GPT-5.1 Sora 2 GPT-5 OpenAI o3 and o4-mini GPT-4.5 Safety Back to main menu Safety Approach Security & Privacy For Business Back to main menu Business Overview Solutions Learn Startups ChatGPT Pricing API Pricing Contact Sales For Developers Back to main menu API Platform API Pricing Agents Codex Open Models Community (opens in a new window) ChatGPT B\n\nSources:\n- openai.com: https://openai.com/",
+    "confidence": 0.8700000000000001,
+    "sources": [
+      "https://deepai.org/?lang=en",
+      "https://deepai.org/chat/what-is-ai",
+      "Wikipedia: https://en.wikipedia.org/wiki/Ai",
+      "https://openai.com/"
+    ]
+  },
+  "arp": {
+    "answer": "ARP\n\nDefinition:\n- Arp or ARP may refer to:\n\nKey points:\n\nSources:\n- Wikipedia: https://en.wikipedia.org/wiki/Arp",
+    "confidence": 0.7100000000000001,
+    "sources": [
+      "https://www.geeksforgeeks.org/ethical-hacking/how-address-resolution-protocol-arp-works/",
+      "Wikipedia: https://en.wikipedia.org/wiki/Arp"
+    ]
+  },
+  "as number": {
+    "answer": "Topic: as number\nCreated: 2026-01-17T08:13:35.445205\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-28"
+  },
+  "autonomous system number (asn)": {
+    "answer": "AUTONOMOUS SYSTEM NUMBER (ASN)\n\nDefinition:\n- An Autonomous System (AS) is a group of one or more IP prefixes (lists of IP addresses accessible on a network) run by one or more network operators that maintain a single, clearly-defined routing policy.\n\nKey points:\n- There are two different formats to represent ASNs: 2-byte and 4-byte .\n- This format provides for 65,536 ASNs (0 to 65535).\n- From these ASNs, the Internet Assigned Numbers Authority (IANA) reserved 1,023 of them (64512 to 65534) for private use.\n- This format provides for 2 32 or 4,294,967,296 ASNs (0 to 4294967295).\n- IANA reserved a block of 94,967,295 ASNs (4200000000 to 4294967294) for private use.\n- Up until the Internet Engineering Task Force (IETF) proposed a gradual transition to 4-byte ASNs in 2007, all ASNs were 2-byte.\n\nSources:\n- arin.net: https://www.arin.net/resources/guide/asn/",
+    "confidence": 0.92,
+    "sources": [
+      "https://www.iana.org/assignments/as-numbers/as-numbers.xhtml",
+      "https://www.cloudflare.com/learning/network-layer/what-is-an-autonomous-system/",
+      "Wikipedia: https://en.wikipedia.org/wiki/Autonomous_system_(Internet)",
+      "https://www.arin.net/resources/guide/asn/"
+    ]
+  },
+  "bash": {
+    "answer": "Topic: bash\nCreated: 2026-01-10T13:43:11.618285\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-28"
+  },
+  "best origin type (igp better than egp better than incomplete)": {
+    "answer": "Topic: best origin type (igp better than egp better than incomplete)\nCreated: 2026-01-17T12:58:37.421914\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-27"
+  },
+  "best origin type (igp is best, then egp, then incomplete)": {
+    "answer": "Topic: best origin type (igp is best, then egp, then incomplete)\nCreated: 2026-01-17T13:03:37.456866\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-27"
+  },
+  "bgp": {
+    "answer": "BGP\n\nDefinition:\n- Abstract This document discusses the Border Gateway Protocol (BGP), which is an inter-Autonomous System routing protocol.\n\nKey points:\n- Please refer to the current edition of the \"Internet Official Protocol Standards\" (STD 1) for the standardization state and status of this protocol.\n- Copyright Notice Copyright (C) The Internet Society (2006).\n- The primary function of a BGP speaking system is to exchange network reachability information with other BGP systems.\n- This network reachability information includes information on the list of Autonomous Systems (ASes) that reachability information traverses.\n- BGP-4 provides a set of mechanisms for supporting Classless Inter- Domain Routing (CIDR).\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc4271.txt",
+    "confidence": 0.8,
+    "sources": [
+      "https://www.rfc-editor.org/rfc/rfc4271.txt"
+    ]
+  },
+  "bgp basics": {
+    "answer": "BGP BASICS\n\nDefinition:\n- Polyphasic sleep or segmented sleep is the system of sleeping during multiple periods over the course of 24 hours, in contrast to monophasic sleep, a single period of sleep within 24 hours.\n\nKey points:\n- Polyphasic usually means more than two periods of sleep, as distinct from biphasic sleep, meaning two periods of sleep.\n- The term polyphasic sleep was first used in the early 20th century by psychologist J.\n- Szymanski, who observed daily fluctuations in activity patterns.\n\nSources:\n- Wikipedia: https://en.wikipedia.org/wiki/Polyphasic_sleep",
+    "confidence": 0.78,
+    "sources": [
+      "https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/iproute_bgp/configuration/xe-16/irg-xe-16-book/configuring-a-basic-bgp-network.html",
+      "https://research.cec.sc.edu/files/cyberinfra/files/2024-08 BGP Basics & Routing Security.pdf",
+      "Wikipedia: https://en.wikipedia.org/wiki/Polyphasic_sleep"
+    ]
+  },
+  "bgp route selection": {
+    "answer": "BGP route selection is how a router picks the best path when it has multiple routes to the same prefix. It compares route attributes in order until one route wins. A common order is: highest Weight (Cisco), highest Local Preference, prefer locally originated, shortest AS Path, best Origin (IGP > EGP > Incomplete), lowest MED (usually only compared from the same neighboring AS), prefer eBGP over iBGP, lowest IGP cost to the next hop, then tie-breakers like oldest route, lowest router ID, lowest neighbor IP.",
+    "confidence": 0.95,
+    "sources": [
+      "user (ui correction)",
+      "https://www.comparitech.com/net-admin/bgp-attributes-and-path-selection/"
+    ]
+  },
+  "bgp route selection is how a router chooses the âbestâ route when it learns multiple routes to the same destination prefix. it compares route attributes in a set order until one route wins.": {
+    "answer": "",
+    "confidence": 0.0,
+    "sources": [
+      "https://www.cisco.com/c/en/us/td/docs/iosxr/cisco8000/bgp/b-bgp-config-cisco8000/m-bgp-path-selection-and-route-preference.pdf"
+    ]
+  },
+  "c+": {
+    "answer": "C+\n\nDefinition:\n- Privacy policy About Wikipedia Disclaimers Contact Wikipedia Legal & safety contacts Code of Conduct Developers Statistics Cookie statement Mobile view Search Search Toggle the table of contents C+ 3 languages Add topic\n\nKey points:\n- See also [ edit ] Search for \"c+\" &#160;or \"c-plus\" on Wikipedia.\n- If an internal link led you here, you may wish to change the link to point directly to the intended article.\n- Text is available under the Creative Commons Attribution-ShareAlike 4.0 License ; additional terms may apply.\n- By using this site, you agree to the Terms of Use and Privacy Policy .\n- Wikipedia® is a registered trademark of the Wikimedia Foundation, Inc.\n\nSources:\n- Direct URL: https://en.wikipedia.org/wiki/C%2B",
+    "confidence": 0.92,
+    "sources": [
+      "https://github.com/microsoft/STL",
+      "https://medium.com/javarevisited/top-10-courses-to-learn-c-for-beginners-best-and-free-4afc262a544e",
+      "Wikipedia: https://en.wikipedia.org/wiki/C%2B",
+      "https://en.wikipedia.org/wiki/C%2B"
+    ]
+  },
+  "certificates": {
+    "answer": "CERTIFICATES\n\nDefinition:\n- If an internal link led you here, you may wish to change the link to point directly to the intended article.\n\nKey points:\n- Text is available under the Creative Commons Attribution-ShareAlike 4.0 License ; additional terms may apply.\n- By using this site, you agree to the Terms of Use and Privacy Policy .\n- Wikipedia® is a registered trademark of the Wikimedia Foundation, Inc.\n\nSources:\n- Direct URL: https://en.wikipedia.org/wiki/Certificate",
+    "confidence": 0.92,
+    "sources": [
+      "https://en.wikipedia.org/wiki/Certificate",
+      "Wikipedia: https://en.wikipedia.org/wiki/Certificate",
+      "https://www.rfc-editor.org/rfc/rfc5280.txt"
+    ]
+  },
+  "cidr": {
+    "answer": "CIDR\n\nDefinition:\n- Analysis of CIDR's Effect on Global Routing State ..............19 10.\n\nKey points:\n- Copyright Notice Copyright (C) The Internet Society (2006).\n- Fuller & Li Best Current Practice [Page 1] RFC 4632 CIDR Address Strategy August 2006 Table of Contents 1.\n- Introduction ....................................................3 2.\n- History and Problem Description .................................3 3.\n- Classless Addressing as a Solution ..............................4 3.1.\n\nExamples:\n- Example: 192.168.x.x/24 has 256 total addresses (0-255), with usable hosts typically .1 to .254 (depends on context).\n- Example: /26 splits a /24 into 4 subnets (each block size 64).\n\nCommon mistakes:\n- Mistake: confusing the subnet mask with the network address.\n- Mistake: forgetting that network + broadcast addresses are usually not usable host addresses in IPv4.\n\nPractice recognition:\n- Quick check: /24 = 255.255.255.0, /16 = 255.255.0.0, /8 = 255.0.0.0.\n- Quick check: block size = 256 - last mask octet (when the split is in the last octet).\n- Quick check: usable hosts in subnet = 2^(host bits) - 2 (typical IPv4).\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc4632.txt",
+    "confidence": 0.92,
+    "sources": [
+      "https://aws.amazon.com/what-is/cidr/",
+      "https://www.ipaddressguide.com/cidr",
+      "https://www.coursera.org/articles/cidr",
+      "https://www.geeksforgeeks.org/computer-networks/classless-inter-domain-routing-cidr/",
+      "https://whatismyipaddress.com/cidr",
+      "Wikipedia: https://en.wikipedia.org/wiki/Classless_Inter-Domain_Routing",
+      "https://www.rfc-editor.org/rfc/rfc4632",
+      "https://www.rfc-editor.org/rfc/rfc4632.txt"
+    ]
+  },
+  "cidr prefix": {
+    "answer": "CIDR PREFIX\n\nDefinition:\n- That&#8217;s why we created this awesome looking IPv4 CIDR cheat sheet for you to use.\n\nKey points:\n- Feel free to print it out and hang it up or share a link to it with your colleagues and peers.\n- Check out ManageEngine OpUtils to efficiently discover, track and allocate IP addresses from an easy-to-use, centralized console.\n- Free CIDR Subnet Mask Cheat Sheet Click on the subnet mask chart to view the printable, searchable PDF version.\n- Scroll down below for the CIDR subnet mask tables.\n- It involves dividing the available IP addresses into subnetworks or subnets, each with its own unique range of addresses.\n\nExamples:\n- Example: 192.168.x.x/24 has 256 total addresses (0-255), with usable hosts typically .1 to .254 (depends on context).\n- Example: /26 splits a /24 into 4 subnets (each block size 64).\n\nCommon mistakes:\n- Mistake: confusing the subnet mask with the network address.\n- Mistake: forgetting that network + broadcast addresses are usually not usable host addresses in IPv4.\n\nPractice recognition:\n- Quick check: /24 = 255.255.255.0, /16 = 255.255.0.0, /8 = 255.0.0.0.\n- Quick check: block size = 256 - last mask octet (when the split is in the last octet).\n- Quick check: usable hosts in subnet = 2^(host bits) - 2 (typical IPv4).\n\nSources:\n- networkproguide.com: https://networkproguide.com/cidr-subnet-mask-ipv4-cheat-sheet/",
+    "confidence": 0.9100000000000001,
+    "sources": [
+      "https://www.freecodecamp.org/news/subnet-cheat-sheet-24-subnet-mask-30-26-27-29-and-other-ip-address-cidr-network-references/",
+      "https://www.geeksforgeeks.org/computer-networks/classless-inter-domain-routing-cidr/",
+      "https://networkproguide.com/cidr-subnet-mask-ipv4-cheat-sheet/"
+    ]
+  },
+  "cisco: bgp best path selection algorithm": {
+    "answer": "Topic: cisco: bgp best path selection algorithm\nCreated: 2026-01-17T13:03:37.457175\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-26"
+  },
+  "coding": {
+    "answer": "coding is: Coding, or programming, is the process of writing instructions (code) in a specific language that a computer can understand and execute to perform tasks, from building websites and apps to analyzing data, essentially acting as a set of step-by-step recipes for technology. It involves using programming languages like Python or JavaScript to tell computers what to do, enabling human-device interaction and the creation of software",
+    "confidence": 0.95,
+    "sources": [
+      "user (ui correction)"
+    ]
+  },
+  "common best path order (typical idea, vendor can vary):": {
+    "answer": "Topic: common best path order (typical idea, vendor can vary):\nCreated: 2026-01-17T13:03:37.456700\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-26"
+  },
+  "common decision order (most routers follow something close to this):": {
+    "answer": "Topic: common decision order (most routers follow something close to this):\nCreated: 2026-01-17T12:58:37.421608\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-27"
+  },
+  "date": {
+    "answer": "DATE\n\nDefinition:\n- &copy; 2026 www.calendardate.com.\n\nKey points:\n- Contact Us Terms and Conditions Site Map We use cookies to personalize content, ads, and provide social media interaction and analyze traffic on our site.\n- By using our site you consent to our Privacy Policy .\n\nSources:\n- Direct URL: https://www.calendardate.com/todays.htm",
+    "confidence": 0.8700000000000001,
+    "sources": [
+      "https://www.timeanddate.com/",
+      "https://www.calendardate.com/todays.htm"
+    ]
+  },
+  "ddrm": {
+    "answer": "DDRM\n\nDefinition:\n- Images for Demonstration Purposes A list of images for demonstration purposes can be found here: https://github.com/jiamings/ddrm-exp-datasets .\n\nKey points:\n- Search code, repositories, users, issues, pull requests...\n- --> Search Clear Search syntax tips Provide feedback --> We read every piece of feedback, and take your input very seriously.\n- Cancel Create saved search Sign in Sign up Appearance settings Resetting focus You signed in with another tab or window.\n- You signed out in another tab or window.\n- You switched accounts on another tab or window.\n- It does so efficiently and without problem-specific supervised training.\n\nSources:\n- Direct URL: https://github.com/bahjat-kawar/ddrm",
+    "confidence": 0.8700000000000001,
+    "sources": [
+      "https://arxiv.org/abs/2201.11793",
+      "https://github.com/bahjat-kawar/ddrm"
+    ]
+  },
+  "definition:": {
+    "answer": "Topic: definition:\nCreated: 2026-01-17T13:03:37.456589\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-26"
+  },
+  "dhcp": {
+    "answer": "DHCP\n\nDefinition:\n- Abstract The Dynamic Host Configuration Protocol (DHCP) provides a framework for passing configuration information to hosts on a TCPIP network.\n\nKey points:\n- Please refer to the current edition of the \"Internet Official Protocol Standards\" (STD 1) for the standardization state and status of this protocol.\n- DHCP captures the behavior of BOOTP relay agents [7, 21], and DHCP participants can interoperate with BOOTP participants [9].\n- 8 2.1 Configuration parameters repository .\n- 11 2.2 Dynamic allocation of network addresses .\n- 13 3.1 Client-server interaction - allocating a network address.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc2131.txt",
+    "confidence": 0.85,
+    "sources": [
+      "https://www.rfc-editor.org/rfc/rfc2131.txt"
+    ]
+  },
+  "dns": {
+    "answer": "DNS\n\nDefinition:\n- Character Case For all parts of the DNS that are part of the official protocol, all comparisons between character strings (e.g., labels, domain names, etc.) are done in a case-insensitive manner.\n\nKey points:\n- The domain system is a mixture of functions and data types which are an official protocol and functions and data types which are still experimental.\n- The official protocol parts include standard queries, responses and the Internet class RR data formats (e.g., host addresses).\n- Since the previous RFC set, several definitions have changed, so some previous definitions are obsolete.\n- Experimental or obsolete features are clearly marked in these RFCs, and such information should be used with caution.\n- The reader is especially cautioned not to depend on the values which appear in examples to be current or complete, since their purpose is primarily pedagogical.\n\nExamples:\n- Example: A record maps a name to an IPv4 address.\n- Example: CNAME is an alias pointing one name to another name.\n\nCommon mistakes:\n- Mistake: assuming DNS changes apply instantly (caching/TTL can delay).\n- Mistake: mixing up authoritative vs recursive DNS roles.\n\nPractice recognition:\n- Quick check: if a name resolves sometimes but not others, suspect caching/TTL or split-horizon DNS.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc1035.txt",
+    "confidence": 0.85,
+    "sources": [
+      "Wikipedia: https://en.wikipedia.org/wiki/Domain_Name_System",
+      "https://www.rfc-editor.org/rfc/rfc1034.txt",
+      "https://www.rfc-editor.org/rfc/rfc1035.txt"
+    ]
+  },
+  "dns caching": {
+    "answer": "DNS CACHING\n\nDefinition:\n- Now, to learn about DNS caching, check out the article \"What is DNS caching\" for information on its function, importance, and more.\n\nKey points:\n- Instead of querying a DNS server every time you visit a website, your computer or network checks the cache first, reducing load times and improving efficiency.\n- Cache Storage : The IP address is saved locally (on your device, router, or ISP’s servers) for a set time ( TTL, or Time to Live ).\n- Subsequent Requests : Future visits to example.com skip the DNS lookup and use the cached IP, making the connection faster.\n- DNS Cache Hierarchy DNS caching occurs at multiple levels, forming a hierarchical structure that optimizes performance.\n- Browser Cache: The first layer of DNS caching occurs in a web browser.\n\nExamples:\n- Example: A record maps a name to an IPv4 address.\n- Example: CNAME is an alias pointing one name to another name.\n\nCommon mistakes:\n- Mistake: assuming DNS changes apply instantly (caching/TTL can delay).\n- Mistake: mixing up authoritative vs recursive DNS roles.\n\nPractice recognition:\n- Quick check: if a name resolves sometimes but not others, suspect caching/TTL or split-horizon DNS.\n\nSources:\n- Direct URL: https://www.geeksforgeeks.org/computer-networks/what-is-dns-caching/",
+    "confidence": 0.8700000000000001,
+    "sources": [
+      "https://www.geeksforgeeks.org/computer-networks/what-is-dns-caching/",
+      "https://www.thewindowsclub.com/flush-windows-dns-cache"
+    ]
+  },
+  "dns record types": {
+    "answer": "DNS RECORD TYPES\n\nDefinition:\n- Network admins use different DNS record types to customize service delivery and manage various network functions.\n\nKey points:\n- This tutorial will provide a comprehensive list of DNS record types with examples and use cases.\n- DNS records, also known as zone files , store critical information about domains .\n- These text-based files use the DNS syntax and are housed on DNS servers .\n- DNS servers use the information in DNS records to route internet traffic.\n- Moreover, they designate mail servers for email delivery, link domain names to IP addresses, and enforce security protocols, among other critical functions.\n\nExamples:\n- Example: A record maps a name to an IPv4 address.\n- Example: CNAME is an alias pointing one name to another name.\n\nCommon mistakes:\n- Mistake: assuming DNS changes apply instantly (caching/TTL can delay).\n- Mistake: mixing up authoritative vs recursive DNS roles.\n\nPractice recognition:\n- Quick check: if a name resolves sometimes but not others, suspect caching/TTL or split-horizon DNS.\n\nSources:\n- Direct URL: https://phoenixnap.com/kb/dns-record-types",
+    "confidence": 0.91,
+    "sources": [
+      "https://phoenixnap.com/kb/dns-record-types",
+      "https://www.cloudflare.com/learning/dns/dns-records/",
+      "Wikipedia: https://en.wikipedia.org/wiki/List_of_DNS_record_types"
+    ]
+  },
+  "fallout 3": {
+    "answer": "Fallout 3\nis a highly influential 2008 open-world action role-playing game (RPG) developed by Bethesda Game Studios, set in a retro-futuristic, post-nuclear war version of the Washington, D.C. area (the Capital Wasteland) in the year 2277, where players explore, fight mutated creatures and factions, and search for their missing father, emphasizing player choice in a vast, dangerous world with a distinctive 1950s sci-fi aesthetic",
+    "confidence": 0.92,
+    "sources": [
+      "https://en.wikipedia.org/wiki/Fallout_3"
+    ]
+  },
+  "fallout 3 about": {
+    "answer": "Topic: fallout 3 about\nCreated: 2026-01-17T14:08:37.982823\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-27"
+  },
+  "fallout 3 the video game": {
+    "answer": "Topic: fallout 3 the video game\nCreated: 2026-01-17T14:08:37.982732\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-27"
+  },
+  "fallout 3?": {
+    "answer": "FALLOUT 3?\n\nDefinition:\n- Emotes Icons Photomode Seasons Skins Styles Utility Updates Burning Springs C.A.M.P.\n\nKey points:\n- For Black Isle Studios 's canceled Fallout 3, see Van Buren .\n- For an overview of Fallout 3 -related articles, see Portal:Fallout 3 .\n- &#8221; Fallout 3 is a post-apocalyptic role-playing video game developed by Bethesda Game Studios and published by Bethesda Softworks .\n- It is the third major installment in the Fallout series (fifth overall) and a sequel to Interplay Entertainment 's Fallout and Fallout 2 .\n- It was released on October 28, 2008, in North America, on October 31, 2008, in Europe and Australia and on December 4, 2008, in Japan.\n\nSources:\n- fallout.fandom.com: https://fallout.fandom.com/wiki/Fallout_3",
+    "confidence": 0.92,
+    "sources": [
+      "https://fallout.bethesda.net/en/games/fallout-3",
+      "https://store.steampowered.com/app/22300/Fallout_3/",
+      "https://gamerant.com/fallout-3-new-vegas-remakes-leak-steam/",
+      "https://fallout.fandom.com/wiki/Fallout_3"
+    ]
+  },
+  "fallout 4": {
+    "answer": "a critically acclaimed, open-world action role-playing game (RPG) set in a post-apocalyptic version of Boston (the Commonwealth) where players explore, fight, scavenge, craft, and build settlements after a nuclear war.",
+    "confidence": 0.95,
+    "sources": [
+      "https://fallout.bethesda.net/en/games/fallout-4"
+    ]
+  },
+  "fallout new vegas": {
+    "answer": "a popular 2010 open-world action RPG set in a post-nuclear desert wasteland, where players control a courier betrayed and left for dead, seeking revenge while navigating conflicts between factions vying for control of the iconic, untouched New Vegas strip. Developed by Obsidian Entertainment and published by Bethesda, it's known for its deep storytelling, player choices impacting numerous faction outcomes, and rich world-building, building on Fallout 3's engine and style but offering distinct storylines and characters",
+    "confidence": 0.9,
+    "sources": [
+      "https://fallout.bethesda.net/games/fallout-new-vegas"
+    ]
+  },
+  "fallout series": {
+    "answer": "FALLOUT SERIES\n\nDefinition:\n- All Rights Reserved.\n\nKey points:\n- Fallout | Bethesda.net Close Global Navigation Menu Games Games Fallout 76 DOOM: The Dark Ages Fallout 4: Anniversary Edition The Elder Scrolls IV: Oblivion Remastered Indiana Jones and the Great Circle Starfield The Elder Scrolls Online Heretic + HeXen All Games Creations & Mods Creations & Mods Fallout 4 Skyrim Special Edition Starfield The Elder Scrolls Online DOOM Eternal DOOM + DOOM II Heretic + HeXen Community Community Community Hub Events Slayers Club QuakeCon News News Latest News Shop Shop Merchandise Redeem Code Bethesda Bundle Support Support Service Status Help Site Game Manuals Facebook Twitter YouTube Instagram Discord Account Management Log Out Log In / Sign Up English Explor\n\nSources:\n- fallout.bethsoft.com: http://fallout.bethsoft.com/",
+    "confidence": 0.88,
+    "sources": [
+      "https://www.imdb.com/title/tt12637874/",
+      "Wikipedia: https://en.wikipedia.org/wiki/Fallout_(franchise)",
+      "http://fallout.bethsoft.com/"
+    ]
+  },
+  "firewall basics": {
+    "answer": "Firewall Basics - Research Note\n\nA firewall controls network traffic using rules based on IP addresses, ports, protocols, and direction.\n\nStateful firewalls track active connections and automatically allow return traffic.\n\nStateless firewalls evaluate each packet independently without tracking connections.\n\nFirewalls commonly use a default deny approach and are placed at network boundaries to improve security.",
+    "confidence": 0.85
+  },
+  "football": {
+    "answer": ": In America, \"football\" refers to American football, a full-contact sport where two teams of 11 players on a rectangular field try to score by advancing an oval ball into the opponent's end zone, using a combination of running, passing, and strategic plays, evolving from rugby but allowing hand-held possession and forward passes, with the NFL's Super Bowl being the championship game. It's distinct from association football (soccer) and is the country's most popular sport, characterized by downs (four attempts to gain 10 yards), tackles, and scoring touchdowns, field goals, and safeties.",
+    "confidence": 0.9,
+    "sources": [
+      "https://www.nfl.com/"
+    ]
+  },
+  "geneve tunneling": {
+    "answer": "GENEVE TUNNELING\n\nDefinition:\n- This document describes Geneve, an encapsulation protocol designed to recognize and accommodate these changing capabilities and needs.\n\nKey points:\n- RFC 8926: Geneve: Generic Network Virtualization Encapsulation RFC 8926 Geneve Protocol November 2020 Gross, et al.\n- As a result of their role in tying together different elements of the system, the requirements on tunnels are influenced by all of these components.\n- Therefore, flexibility is the most important aspect of a tunneling protocol if it is to keep pace with the evolution of technology.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc8926",
+    "confidence": 0.8,
+    "sources": [
+      "https://www.rfc-editor.org/rfc/rfc8926"
+    ]
+  },
+  "girl scouts": {
+    "answer": ": Girl Scouts is a U.S. youth organization for girls (K-12) focused on building courage, confidence, and character through a girl-led experience, empowering them with skills in leadership, outdoor adventure, STEM, life skills (like cookie sales), and community service, helping them reach their potential and make the world a better place.",
+    "confidence": 0.95,
+    "sources": [
+      "https://www.girlscouts.org/"
+    ]
+  },
   "git status": {
     "answer": "Topic: git status\nCreated: 2026-01-10T14:08:11.806526\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
     "confidence": 0.65,
     "updated_on": "2026-01-28"
+  },
+  "gre tunneling": {
+    "answer": "GRE TUNNELING\n\nDefinition:\n- Abstract This document specifies a protocol for encapsulation of an arbitrary network layer protocol over another arbitrary network layer protocol.\n\nKey points:\n- Please refer to the current edition of the \"Internet Official Protocol Standards\" (STD 1) for the standardization state and status of this protocol.\n- Copyright Notice Copyright (C) The Internet Society (2000).\n- Introduction A number of different proposals [RFC1234, RFC1226] currently exist for the encapsulation of one protocol over another protocol.\n- Other types of encapsulations [RFC1241, RFC1479] have been proposed for transporting IP over IP for policy purposes.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc2784.txt",
+    "confidence": 0.8,
+    "sources": [
+      "https://www.rfc-editor.org/rfc/rfc2784.txt"
+    ]
+  },
+  "hdmi": {
+    "answer": "HDMI\n\nDefinition:\n- This wikiHow teaches you how to connect your PC to a TV using an HDMI cable.\n\nKey points:\n- Please log in with your username or email to continue.\n- Facebook Google wikiHow Account No account yet?\n- Stan Kats is a Professional Technologist and the COO and Chief Technologist for The STG IT Consulting Group in West Hollywood, California.\n- Stan holds a BA in International Relations from The University of Southern California.\n- He began his career working in the Fortune 500 IT world.\n- Stan founded his companies to offer an enterprise-level of expertise for small businesses and individuals.\n\nSources:\n- Direct URL: https://www.wikihow.com/Connect-PC-to-TV-with-HDMI",
+    "confidence": 0.8700000000000001,
+    "sources": [
+      "https://www.hdmi.org/spec/index",
+      "https://www.wikihow.com/Connect-PC-to-TV-with-HDMI"
+    ]
+  },
+  "hello": {
+    "answer": "Topic: hello\nCreated: 2026-01-16T21:03:30.878862\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-28"
+  },
+  "help": {
+    "answer": "Topic: help\nCreated: 2026-01-17T02:13:32.978336\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-26"
+  },
+  "highest local preference (preferred exit from your as)": {
+    "answer": "Topic: highest local preference (preferred exit from your as)\nCreated: 2026-01-17T12:58:37.421765\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-27"
+  },
+  "highest local preference (your as preferred exit)": {
+    "answer": "Topic: highest local preference (your as preferred exit)\nCreated: 2026-01-17T13:03:37.456743\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-26"
+  },
+  "highest weight (cisco only, local to the router)": {
+    "answer": "Topic: highest weight (cisco only, local to the router)\nCreated: 2026-01-17T12:58:37.421708\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-26"
+  },
+  "https": {
+    "answer": "HTTPS\n\nDefinition:\n- It does not specify an Internet standard of any kind.\n\nKey points:\n- Copyright Notice Copyright (C) The Internet Society (2000).\n- Abstract This memo describes how to use TLS to secure HTTP connections over the Internet.\n- Current practice is to layer HTTP over SSL (the predecessor to TLS), distinguishing secured traffic from insecure traffic by the use of a different server port.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc2818.txt",
+    "confidence": 0.8,
+    "sources": [
+      "https://en.wikipedia.org/wiki/HTTPS",
+      "https://www.rfc-editor.org/rfc/rfc2818.txt"
+    ]
+  },
+  "i couldn't save a clean answer yet": {
+    "answer": "Aaorn",
+    "confidence": 0.9,
+    "sources": []
+  },
+  "icmp": {
+    "answer": "ICMP\n\nDefinition:\n- Since the Internet Protocol (IP) itself does not have an inbuilt error-reporting or correction mechanism, ICMP is a supporting protocol within the IP suite that helps in reporting errors and sending diagnostic messages.\n\nKey points:\n- Operational queries : For example, echo requests and replies used in tools like ping.\n- Uses of ICMP Error Reporting If a message cannot be delivered, ICMP informs the source about the failure.\n- Example: If a packet is too large and cannot be forwarded, the receiver drops the packet and sends an ICMP error message to the sender.\n- Network Diagnostics Traceroute : Used to determine the path packets take across routers to reach the destination.\n- Ping : Sends echo-request and echo-reply messages to measure round-trip time and test connectivity.\n- How ICMP Works ICMP is connectionless (unlike TCP) and does not require a handshake.\n\nSources:\n- Direct URL: https://www.geeksforgeeks.org/computer-networks/internet-control-message-protocol-icmp/",
+    "confidence": 0.91,
+    "sources": [
+      "https://www.geeksforgeeks.org/computer-networks/internet-control-message-protocol-icmp/",
+      "https://www.cloudflare.com/learning/ddos/glossary/internet-control-message-protocol-icmp/",
+      "Wikipedia: https://en.wikipedia.org/wiki/Internet_Control_Message_Protocol"
+    ]
+  },
+  "icmp ping": {
+    "answer": "ICMP PING\n\nDefinition:\n- Since the Internet Protocol (IP) itself does not have an inbuilt error-reporting or correction mechanism, ICMP is a supporting protocol within the IP suite that helps in reporting errors and sending diagnostic messages.\n\nKey points:\n- Operational queries : For example, echo requests and replies used in tools like ping.\n- Uses of ICMP Error Reporting If a message cannot be delivered, ICMP informs the source about the failure.\n- Example: If a packet is too large and cannot be forwarded, the receiver drops the packet and sends an ICMP error message to the sender.\n- Network Diagnostics Traceroute : Used to determine the path packets take across routers to reach the destination.\n- Ping : Sends echo-request and echo-reply messages to measure round-trip time and test connectivity.\n- How ICMP Works ICMP is connectionless (unlike TCP) and does not require a handshake.\n\nSources:\n- Direct URL: https://www.geeksforgeeks.org/computer-networks/internet-control-message-protocol-icmp/",
+    "confidence": 0.5,
+    "sources": [
+      "https://www.geeksforgeeks.org/computer-networks/internet-control-message-protocol-icmp/"
+    ]
+  },
+  "ipsec": {
+    "answer": "IPSEC\n\nDefinition:\n- Abstract This document describes an updated version of the \"Security Architecture for IP\", which is designed to provide security services for traffic at the IP layer.\n\nKey points:\n- Please refer to the current edition of the \"Internet Official Protocol Standards\" (STD 1) for the standardization state and status of this protocol.\n- Copyright Notice Copyright (C) The Internet Society (2005).\n- This document obsoletes RFC 2401 (November 1998).\n- Kent & Seo Standards Track [Page 1] RFC 4301 Security Architecture for IP December 2005 Table of Contents 1.\n- Introduction ....................................................4 1.1.\n- Summary of Contents of Document ............................4 1.2.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc4301.txt",
+    "confidence": 0.8,
+    "sources": [
+      "https://www.rfc-editor.org/rfc/rfc4301.txt"
+    ]
+  },
+  "ipv6 basics": {
+    "answer": "IPV6 BASICS\n\nDefinition:\n- What is IPv6?\n\nKey points:\n- Last Updated : 31 Jul, 2025 The next generation Internet Protocol (IP) address standard, known as IPv6, is meant to work in cooperation with IPv4 .\n- Because so many connected devices are being used, the original IP address scheme, known as IPv4, is running out of addresses.\n- This new IP address version is being deployed to fulfil the need for more Internet addresses.\n- With 128-bit address space, it allows 340 undecillion unique address space.\n- IPv6 support a theoretical maximum of 340, 282, 366, 920, 938, 463, 463, 374, 607, 431, 768, 211, 456.\n- Representation of IPv6 An IPv6 address consists of eight groups of four hexadecimal digits separated by ' .\n\nSources:\n- Direct URL: https://www.geeksforgeeks.org/computer-networks/what-is-ipv6/",
+    "confidence": 0.8700000000000001,
+    "sources": [
+      "https://www.geeksforgeeks.org/computer-networks/what-is-ipv6/",
+      "http://www.steves-internet-guide.com/ipv6-guide/"
+    ]
+  },
+  "key point:": {
+    "answer": "Topic: key point:\nCreated: 2026-01-17T13:03:37.457030\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-26"
+  },
+  "lan": {
+    "answer": "Topic: lan\nCreated: 2026-01-16T20:53:30.814133\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-26"
+  },
+  "laptop": {
+    "answer": "LAPTOP\n\nDefinition:\n- A laptop is a portable personal computer (PC).\n\nKey points:\n\nSources:\n- Wikipedia: https://en.wikipedia.org/wiki/Laptop",
+    "confidence": 0.9100000000000001,
+    "sources": [
+      "https://www.bestbuy.com/site/computers-pcs/laptop-computers/abcat0502000.c?id=abcat0502000",
+      "Wikipedia: https://en.wikipedia.org/wiki/Laptop",
+      "https://www.amazon.com/Notebooks-Laptop-Computers/b?node=565108"
+    ]
+  },
+  "lowest igp cost to the next hop": {
+    "answer": "Topic: lowest igp cost to the next hop\nCreated: 2026-01-17T12:58:37.422050\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-27"
+  },
+  "lowest igp metric to the next hop": {
+    "answer": "Topic: lowest igp metric to the next hop\nCreated: 2026-01-17T13:03:37.456953\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-26"
+  },
+  "lowest med (only compared when routes come from the same neighboring as, usually)": {
+    "answer": "Topic: lowest med (only compared when routes come from the same neighboring as, usually)\nCreated: 2026-01-17T12:58:37.421962\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-27"
+  },
+  "lowest med (usually only compared when routes come from the same neighboring as)": {
+    "answer": "Topic: lowest med (usually only compared when routes come from the same neighboring as)\nCreated: 2026-01-17T13:03:37.456911\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-27"
+  },
+  "most of the time, admins control routing by changing local preference, as path, or med, so the âbestâ path matches what the network wants.": {
+    "answer": "MOST OF THE TIME, ADMINS CONTROL ROUTING BY CHANGING LOCAL PREFERENCE, AS PATH, OR MED, SO THE ÂBESTÂ PATH MATCHES WHAT THE NETWORK WANTS.\n\nDefinition:\n- BGP Local Preference vs.\n\nKey points:\n- [email&#160;protected] +1 530 567 4539 Courses Subscription Guides About Contact Home Guides BGP Nolan Brightwood Thu, 15 Aug 2024 BGP Local Preference vs.\n- MED: Key Differences and Use Cases Table of Contents BGP Local Preference vs.\n- MED: Key Differences and Use Cases BGP Local Preference vs.\n- Two BGP attributes crucial in dictating routing decisions are the Local Preference and the Multi-Exit Discriminator (MED).\n- Though both serve to influence path selection, their applications and effects differ significantly.\n- This guide delves into the nuances that set these attributes apart and scenarios where each finds its most effective use.\n\nSources:\n- Direct URL: https://netseccloud.com/bgp-local-preference-vs-med-key-differences-and-use-cases",
+    "confidence": 0.5,
+    "sources": [
+      "https://netseccloud.com/bgp-local-preference-vs-med-key-differences-and-use-cases"
+    ]
+  },
+  "nat": {
+    "answer": "NAT\n\nDefinition:\n- Preface The NAT operation described in this document extends address translation introduced in RFC 1631 and includes a new type of network address and TCP/UDP port translation.\n\nKey points:\n- It does not specify an Internet standard of any kind.\n- Copyright Notice Copyright (C) The Internet Society (2001).\n- In addition, this document corrects the Checksum adjustment algorithm published in RFC 1631 and attempts to discuss NAT operation and limitations in detail.\n- Abstract Basic Network Address Translation or Basic NAT is a method by which IP addresses are mapped from one group to another, transparent to end users.\n- Network topology outside a local domain can change in many ways.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc3022.txt",
+    "confidence": 0.8,
+    "sources": [
+      "https://www.rfc-editor.org/rfc/rfc3022.txt"
+    ]
+  },
+  "network address": {
+    "answer": "NETWORK ADDRESS\n\nDefinition:\n- The first part of an IP address is used as a network address, the last part as a host address.\n\nKey points:\n- TCP/IP addressing and subnetting - Windows Client | Microsoft Learn Skip to main content Skip to Ask Learn chat experience This browser is no longer supported.\n- Upgrade to Microsoft Edge to take advantage of the latest features, security updates, and technical support.\n- You can try signing in or changing directories .\n- Access to this page requires authorization.\n- A glossary is included at the end of article.\n- These networks are arbitrarily defined into three main classes (along with a few others) that have predefined sizes.\n\nSources:\n- Direct URL: https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/tcpip-addressing-and-subnetting",
+    "confidence": 0.7200000000000001,
+    "sources": [
+      "https://www.geeksforgeeks.org/computer-networks/what-is-a-network-address/",
+      "https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/tcpip-addressing-and-subnetting"
+    ]
+  },
+  "network address subnetting": {
+    "answer": "NETWORK ADDRESS SUBNETTING\n\nDefinition:\n- Most networks do not need such a large number of IP addresses.\n\nKey points:\n- If they use default IP subnets, all unused IP addresses will waste.\n- It allows us breaks default IP subnets as per network requirement and size.\n- An IP address contains two addresses: network address and host address .\n- All IP addresses in an IP group have the same network address.\n- All IP addresses in an IP group have different host addresses.\n\nExamples:\n- Example: 192.168.x.x/24 has 256 total addresses (0-255), with usable hosts typically .1 to .254 (depends on context).\n- Example: /26 splits a /24 into 4 subnets (each block size 64).\n\nCommon mistakes:\n- Mistake: confusing the subnet mask with the network address.\n- Mistake: forgetting that network + broadcast addresses are usually not usable host addresses in IPv4.\n\nPractice recognition:\n- Quick check: /24 = 255.255.255.0, /16 = 255.255.0.0, /8 = 255.0.0.0.\n- Quick check: block size = 256 - last mask octet (when the split is in the last octet).\n- Quick check: usable hosts in subnet = 2^(host bits) - 2 (typical IPv4).\n\nSources:\n- computernetworkingnotes.com: https://www.computernetworkingnotes.com/ccna-study-guide/subnetting-tutorial-subnetting-explained-with-examples.html",
+    "confidence": 0.9100000000000001,
+    "sources": [
+      "https://www.geeksforgeeks.org/computer-networks/introduction-to-subnetting/",
+      "https://www.networkkings.org/what-is-subnetting",
+      "https://www.computernetworkingnotes.com/ccna-study-guide/subnetting-tutorial-subnetting-explained-with-examples.html"
+    ]
+  },
+  "no it is: a popular 2010 open-world action rpg set in a post-nuclear desert wasteland, where players control a courier betrayed and left for dead, seeking revenge while navigating conflicts between factions vying for control of the iconic, untouched new vegas strip. developed by obsidian entertainment and published by bethesda, it's known for its deep storytelling, player choices impacting numerous faction outcomes, and rich world-building, building on fallout 3's engine and style but offering distinct storylines and characters": {
+    "answer": "a popular 2010 open-world action RPG set in a post-nuclear desert wasteland, where players control a courier betrayed and left for dead, seeking revenge while navigating conflicts between factions vying for control of the iconic, untouched New Vegas strip. Developed by Obsidian Entertainment and published by Bethesda, it's known for its deep storytelling, player choices impacting numerous faction outcomes, and rich world-building, building on Fallout 3's engine and style but offering distinct storylines and characters",
+    "confidence": 0.9,
+    "sources": []
+  },
+  "no, itâs actually: bgp route selection": {
+    "answer": "",
+    "confidence": 0.0,
+    "sources": [
+      "https://www.cisco.com/c/en/us/td/docs/iosxr/cisco8000/bgp/b-bgp-config-cisco8000/m-bgp-path-selection-and-route-preference.pdf"
+    ]
   },
   "osi model": {
     "answer": "osi model (synthesized)\n\nDefinition:\n- The data to be transmitted is composed at the topmost layer of the transmitting device (layer N ) into a protocol data unit ( PDU ).\n- The PDU is passed to layer N−1 , where it is known as the service data unit ( SDU ).\n- At layer N−1 the SDU is concatenated with a header, a footer, or both, producing a layer N−1 PDU . It is then passed to layer N−2 .\n\nHow it works:\n- Break it into the main components or layers.\n- For each component, say what it is responsible for, and what it is not responsible for.\n- When troubleshooting, map the symptom to the layer or component that most likely owns it.\n\nExamples:\n- Write one simple example first, then one realistic example you might see at work.\n- If it is a model or standard, explain what changes when you move between layers or parts.\n\nCommon mistakes:\n- Mixing up similar sounding terms.\n- Memorizing lists without understanding what actually changes in real systems.\n- Using the wrong layer or component when troubleshooting.\n\nRelated keywords (from sources):\n- layer\n- model\n- osi\n- networking\n- iso\n- data\n- standards\n- 160\n- reference\n- network\n\nQuick check (answer these to prove you understand it):\n- What problem does osi model solve?\n- What are the main parts or layers of osi model?\n- How does osi model relate to layer and model?\n\nSources used:\n- https://en.wikipedia.org/wiki/OSI_model",
     "confidence": 0.65,
     "updated_on": "2026-01-28"
   },
-  "the weather today": {
-    "answer": "THE WEATHER TODAY\n\nDefinition:\n- Please try another search.\n\nKey points:\n- Please select one of the following: Your local forecast office is Seattle, WA Prolonged Extreme Cold; Eastern U.S.\n- Winter Storm Another Arctic blast will surge south across the northern Plains Thursday night, crossing the Midwest and reaching the Gulf Coast Friday night.\n- Confidence continues to increase for significant heavy snow across much of the Southern Appalachians, Carolinas, and southern Mid-Atlantic Friday into Sunday.\n- Read More > Current conditions at Tacoma, Tacoma Narrows Airport (KTIW) Lat: 47.2675&deg;N Lon: 122.57611&deg;W Elev: 315.0ft.\n- New precipitation amounts between a quarter and half of an inch possible.\n- New precipitation amounts between a tenth and quarter of an inch possible.\n\nSources:\n- Direct URL: https://forecast.weather.gov/zipcity.php?inputstring=Tacoma,WA",
-    "confidence": 0.5,
+  "ospf": {
+    "answer": "OSPF\n\nDefinition:\n- Abstract This memo documents version 2 of the OSPF protocol.\n\nKey points:\n- Please refer to the current edition of the \"Internet Official Protocol Standards\" (STD 1) for the standardization state and status of this protocol.\n- Copyright Notice Copyright (C) The Internet Society (1998).\n- It is designed to be run internal to a single Autonomous System.\n- Each OSPF router maintains an identical database describing the Autonomous System's topology.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc2328.txt",
+    "confidence": 0.8,
     "sources": [
-      "https://forecast.weather.gov/zipcity.php?inputstring=Tacoma,WA"
+      "https://www.rfc-editor.org/rfc/rfc2328.txt"
+    ]
+  },
+  "pat": {
+    "answer": "PAT\n\nDefinition:\n- I bent down to pat the little puppy .\n\nKey points:\n- '/us/autocomplete/amp?dataset=' + stateSearch.dataset + '&q=' + stateSearch.term : 'https://'\"> 0 && stateHdr.searchDesk ?\n- More examples Fewer examples She patted him on the head as she went past.\n- He patted her on the back affectionately .\n- Pat the vegetables dry with a paper towel .\n- (Definition of pat from the Cambridge Academic Content Dictionary © Cambridge University Press) What is the pronunciation of pat ?\n\nSources:\n- Direct URL: https://dictionary.cambridge.org/us/dictionary/english/pat",
+    "confidence": 0.92,
+    "sources": [
+      "https://dictionary.cambridge.org/us/dictionary/english/pat",
+      "https://www.healthline.com/health/paroxysmal-atrial-tachycardia",
+      "https://www.cjtc.wa.gov/physical-ability-test-pat"
+    ]
+  },
+  "ping": {
+    "answer": "PING\n\nDefinition:\n- Ping may refer to:\n\nKey points:\n\nSources:\n- Wikipedia: https://en.wikipedia.org/wiki/Ping",
+    "confidence": 0.75,
+    "sources": [
+      "https://ping.com/en-us",
+      "https://www.meter.net/ping-test/",
+      "Wikipedia: https://en.wikipedia.org/wiki/Ping"
+    ]
+  },
+  "port forwarding": {
+    "answer": "PORT FORWARDING\n\nDefinition:\n- When configuring port forwarding, the network administrator sets aside one port number on the gateway for the exclusive use of communicating with a service in the private network, located on a specific host.\n\nKey points:\n- Hosts on the private network are connected to an Ethernet switch or communicate via a wireless LAN .\n- The NAT device's external interface is configured with a public IP address.\n- The computers behind the router, on the other hand, are invisible to hosts on the Internet as they each communicate only with a private IP address.\n- External hosts must know this port number and the address of the gateway to communicate with the network-internal service.\n- In Linux kernels, this is achieved by packet filter rules in the iptables or netfilter kernel components.\n- When used on gateway devices, a port forward may be implemented with a single rule to translate the destination address and port.\n\nSources:\n- Direct URL: https://en.wikipedia.org/wiki/Port_forwarding",
+    "confidence": 0.8700000000000001,
+    "sources": [
+      "https://www.wikihow.com/Set-Up-Port-Forwarding-on-a-Router",
+      "Wikipedia: https://en.wikipedia.org/wiki/Port_forwarding",
+      "https://en.wikipedia.org/wiki/Port_forwarding"
     ]
   },
   "powershell": {
@@ -1001,20 +715,306 @@
       "Wikipedia: https://en.wikipedia.org/wiki/PowerShell"
     ]
   },
-  "icmp ping": {
-    "answer": "ICMP PING\n\nDefinition:\n- Since the Internet Protocol (IP) itself does not have an inbuilt error-reporting or correction mechanism, ICMP is a supporting protocol within the IP suite that helps in reporting errors and sending diagnostic messages.\n\nKey points:\n- Operational queries : For example, echo requests and replies used in tools like ping.\n- Uses of ICMP Error Reporting If a message cannot be delivered, ICMP informs the source about the failure.\n- Example: If a packet is too large and cannot be forwarded, the receiver drops the packet and sends an ICMP error message to the sender.\n- Network Diagnostics Traceroute : Used to determine the path packets take across routers to reach the destination.\n- Ping : Sends echo-request and echo-reply messages to measure round-trip time and test connectivity.\n- How ICMP Works ICMP is connectionless (unlike TCP) and does not require a handshake.\n\nSources:\n- Direct URL: https://www.geeksforgeeks.org/computer-networks/internet-control-message-protocol-icmp/",
+  "prefer ebgp over ibgp": {
+    "answer": "Topic: prefer ebgp over ibgp\nCreated: 2026-01-17T12:58:37.422010\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-27"
+  },
+  "prefer locally originated (network, aggregate, redistribute)": {
+    "answer": "Topic: prefer locally originated (network, aggregate, redistribute)\nCreated: 2026-01-17T13:03:37.456786\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-27"
+  },
+  "prefer routes that were originated locally (network/aggregate/redistribute)": {
+    "answer": "PREFER ROUTES THAT WERE ORIGINATED LOCALLY (NETWORK/AGGREGATE/REDISTRIBUTE)\n\nDefinition:\n- Solved: BGP Best Path Selection Algorithm Question - Cisco Community Heads Up : The post you are writing will appear in a public forum.\n\nKey points:\n- Please ensure all content is appropriate for public consumption.\n- Review the employee guidelines for the community here .\n- That is, prefer a route that was learned from an IGP or from a direct connection on the same router.\n- 3) If #2 is true, how does the receiving router know which path leads back to the \"true\" origin?\n- Thank so much for any help you can provide in clearing this up.\n\nSources:\n- Direct URL: https://community.cisco.com/t5/routing/bgp-best-path-selection-algorithm-question/td-p/4413753",
     "confidence": 0.5,
     "sources": [
-      "https://www.geeksforgeeks.org/computer-networks/internet-control-message-protocol-icmp/"
+      "https://community.cisco.com/t5/routing/bgp-best-path-selection-algorithm-question/td-p/4413753"
     ]
   },
-  "ping": {
-    "answer": "PING\n\nDefinition:\n- Ping may refer to:\n\nKey points:\n\nSources:\n- Wikipedia: https://en.wikipedia.org/wiki/Ping",
-    "confidence": 0.75,
+  "prefix": {
+    "answer": "Topic: prefix\nCreated: 2026-01-16T20:33:30.649133\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-28"
+  },
+  "private ip addressing": {
+    "answer": "PRIVATE IP ADDRESSING\n\nDefinition:\n- In this article, we will see private IP addresses in networking.\n\nKey points:\n- Private IP Addresses are those addresses that work within the local network.\n- These addresses are non-routable on the Internet.\n- The address is assigned by the network router to your particular device.\n- The unique private IP address is provided to every device which is on the same network.\n- In this way, devices communicate with one another on the same network without connecting to the entire Internet.\n\nExamples:\n- Example private IPv4 blocks: 10.x.x.x/8, 172.16-31.x.x/12, 192.168.x.x/16.\n- Example: home routers typically use NAT so private addresses can reach the public internet.\n\nCommon mistakes:\n- Mistake: thinking private IPs are routable on the public internet (they are not).\n- Mistake: assuming NAT is security by itself (it helps, but it’s not a firewall).\n\nPractice recognition:\n- Quick check: if the IP starts with 10., 192.168., or 172.16-172.31, it’s likely private RFC1918 space.\n\nSources:\n- geeksforgeeks.org: https://www.geeksforgeeks.org/computer-networks/private-ip-addresses-in-networking/",
+    "confidence": 0.8500000000000001,
     "sources": [
-      "https://ping.com/en-us",
-      "https://www.meter.net/ping-test/",
-      "Wikipedia: https://en.wikipedia.org/wiki/Ping"
+      "https://www.rfc-editor.org/rfc/rfc1918.txt",
+      "https://www.geeksforgeeks.org/computer-networks/private-ip-addresses-in-networking/"
+    ],
+    "updated_on": "2026-01-06"
+  },
+  "public key cryptography": {
+    "answer": "PUBLIC KEY CRYPTOGRAPHY\n\nDefinition:\n- public key cryptography (PKC) - Glossary | CSRC You are viewing this page in an unauthorized frame window.\n\nKey points:\n- This is a potential security issue, you are being redirected to https://csrc.nist.gov .\n- This site requires JavaScript to be enabled for complete site functionality.\n- Secure .gov websites use HTTPS A lock ( Lock Locked padlock icon ) or https:// means you’ve safely connected to the .gov website.\n- Share sensitive information only on official, secure websites.\n- Sources: FIPS 204 under asymmetric cryptography Encryption system that uses a public-private key pair for encryption and/or digital signature.\n\nSources:\n- Direct URL: https://csrc.nist.gov/glossary/term/public_key_cryptography",
+    "confidence": 0.92,
+    "sources": [
+      "https://csrc.nist.gov/glossary/term/public_key_cryptography",
+      "https://www.geeksforgeeks.org/computer-networks/public-key-encryption/",
+      "Wikipedia: https://en.wikipedia.org/wiki/Public-key_cryptography",
+      "https://datatracker.ietf.org/doc/html/rfc4949"
+    ]
+  },
+  "ram": {
+    "answer": "Topic: ram\nCreated: 2026-01-17T02:13:32.978378\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-26"
+  },
+  "recursive vs authoritative dns": {
+    "answer": "RECURSIVE VS AUTHORITATIVE DNS\n\nDefinition:\n- Recursive: The Difference Between DNS Server Types Authoritative DNS November 10, 2023 Vercara > Resources > Blog > Authoritative vs.\n\nKey points:\n- This file mapped hostnames to IP addresses.\n- However, as networks grew, managing the host file across all computers became unmanageable.\n- To address this issue, the Domain Name System (DNS) was created as a scalable solution.\n- Today, DNS is one of the fundamental technologies that powers the Internet.\n- DNS is a distributed database and network protocol that converts human-readable network locations to machine-readable Internet Protocol (IP) addresses.\n\nExamples:\n- Example: A record maps a name to an IPv4 address.\n- Example: CNAME is an alias pointing one name to another name.\n\nCommon mistakes:\n- Mistake: assuming DNS changes apply instantly (caching/TTL can delay).\n- Mistake: mixing up authoritative vs recursive DNS roles.\n\nPractice recognition:\n- Quick check: if a name resolves sometimes but not others, suspect caching/TTL or split-horizon DNS.\n\nSources:\n- Direct URL: https://vercara.digicert.com/resources/authoritative-vs-recursive-the-difference-between-dns-server-types",
+    "confidence": 0.8700000000000001,
+    "sources": [
+      "https://vercara.digicert.com/resources/authoritative-vs-recursive-the-difference-between-dns-server-types",
+      "https://www.dnsfilter.com/blog/authoritative-vs-recursive-dns"
+    ]
+  },
+  "rfc 1918": {
+    "answer": "RFC 1918\n\nDefinition:\n- This document describes address allocation for private internets.\n\nKey points:\n- The allocation permits full network layer connectivity among all hosts inside an enterprise as well as among all public hosts of different enterprises.\n- The cost of using private internet address space is the potentially costly effort to renumber hosts and networks between public and private.\n- The Internet has grown beyond anyone's expectations.\n- Sustained exponential growth continues to introduce new challenges.\n\nExamples:\n- Example private IPv4 blocks: 10.x.x.x/8, 172.16-31.x.x/12, 192.168.x.x/16.\n- Example: home routers typically use NAT so private addresses can reach the public internet.\n\nCommon mistakes:\n- Mistake: thinking private IPs are routable on the public internet (they are not).\n- Mistake: assuming NAT is security by itself (it helps, but it’s not a firewall).\n\nPractice recognition:\n- Quick check: if the IP starts with 10., 192.168., or 172.16-172.31, it’s likely private RFC1918 space.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc1918.txt",
+    "confidence": 0.8,
+    "sources": [
+      "https://www.rfc-editor.org/rfc/rfc1918.txt"
+    ]
+  },
+  "rfc 6890": {
+    "answer": "RFC 6890\n\nDefinition:\n- Section 2.2.1 of this document describes information that both registries will maintain for each entry.\n\nKey points:\n- Haberman JHU April 2013 Special-Purpose IP Address Registries Abstract This memo reiterates the assignment of an IPv4 address block (192.0.0.0/24) to IANA.\n- It also instructs IANA to restructure its IPv4 and IPv6 Special-Purpose Address Registries.\n- This memo obsoletes RFCs 4773, 5156, 5735, and 5736.\n\nSources:\n- www.rfc-editor.org: https://www.rfc-editor.org/rfc/rfc6890.html",
+    "confidence": 0.92,
+    "sources": [
+      "https://www.rfc-editor.org/rfc/rfc6890.html"
+    ]
+  },
+  "route selection": {
+    "answer": "Topic: route selection\nCreated: 2026-01-17T02:13:32.978240\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-28"
+  },
+  "routing longest prefix match": {
+    "answer": "ROUTING LONGEST PREFIX MATCH\n\nDefinition:\n- Solved: Longest prefix match - Cisco Community Heads Up : The post you are writing will appear in a public forum.\n\nKey points:\n- Please ensure all content is appropriate for public consumption.\n- Review the employee guidelines for the community here .\n- To totally explain it simply, the longest prefix match is a matching address within a subnet using the least amount of addresses.\n- the /30 subnet will have be said to be a closer match but this is more-so in terms of binary.\n- An address of 192.168.x.x would totally be a network address for a /30 subnet but it would be a usable address for a /24 subnet.\n\nSources:\n- community.cisco.com: https://community.cisco.com/t5/routing/longest-prefix-match/td-p/4794030",
+    "confidence": 0.95,
+    "sources": [
+      "user (ui correction)",
+      "https://community.cisco.com/t5/routing/longest-prefix-match/td-p/4794030"
+    ]
+  },
+  "routing vs switching": {
+    "answer": "Routing vs Switching - Research Note\n\nSwitching operates at Layer 2 using MAC addresses. Switches forward traffic within the same local network.\n\nRouting operates at Layer 3 using IP addresses. Routers move traffic between different networks and subnets.\n\nSwitches handle LAN traffic. Routers connect networks together and break broadcast domains.",
+    "confidence": 0.92
+  },
+  "shortest as path": {
+    "answer": "Topic: shortest as path\nCreated: 2026-01-17T13:03:37.456824\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-27"
+  },
+  "shortest as path (fewer as hops)": {
+    "answer": "Topic: shortest as path (fewer as hops)\nCreated: 2026-01-17T12:58:37.421855\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-27"
+  },
+  "snat vs dnat": {
+    "answer": "SNAT VS DNAT\n\nDefinition:\n- These are the Source NAT (SNAT) and Destination NAT (DNAT) which help to seamless communication.\n\nKey points:\n- However, these elements have a set of differences as they are opposite of each other.\n- Let us deep dive into this article to learn more about SNAT and DNAT along with their key differences.\n- What is Source Network Address Translation (SNAT)?\n- SNAT, as the name suggests, is a technique that translates source IP addresses generally when connecting from a private IP address to a public IP address.\n- It maps the source client IP address in a request to a translation defined on a BIG-IP device.\n\nSources:\n- Direct URL: https://www.geeksforgeeks.org/computer-networks/difference-between-snat-and-dnat/",
+    "confidence": 0.8700000000000001,
+    "sources": [
+      "https://www.geeksforgeeks.org/computer-networks/difference-between-snat-and-dnat/",
+      "https://ipwithease.com/snat-vs-dnat/"
+    ]
+  },
+  "sources:": {
+    "answer": "Topic: sources:\nCreated: 2026-01-17T13:03:37.457134\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-26"
+  },
+  "subnet": {
+    "answer": "SUBNET\n\nDefinition:\n- What Is Subnetting and Subnet Mask?\n\nKey points:\n- Subnetting and subnet masks are fundamental concepts in network administration that often seem complex to beginners but become invaluable once mastered.\n- They allow network administrators to divide large IP address spaces into smaller, manageable segments while optimizing bandwidth usage and improving security.\n- Subnetting is the process of dividing a larger IP network into smaller, more manageable subnetworks (subnets).\n- This division allows network administrators to create logical segments within their infrastructure, improving organization, security, and resource allocation.\n- Think of subnetting like dividing a large city into districts.\n- Each district has its own services, governance, and communication patterns, but all districts remain part of the larger city.\n\nExamples:\n- Example: 192.168.x.x/24 has 256 total addresses (0-255), with usable hosts typically .1 to .254 (depends on context).\n- Example: /26 splits a /24 into 4 subnets (each block size 64).\n\nCommon mistakes:\n- Mistake: confusing the subnet mask with the network address.\n- Mistake: forgetting that network + broadcast addresses are usually not usable host addresses in IPv4.\n\nPractice recognition:\n- Quick check: /24 = 255.255.255.0, /16 = 255.255.0.0, /8 = 255.0.0.0.\n- Quick check: block size = 256 - last mask octet (when the split is in the last octet).\n- Quick check: usable hosts in subnet = 2^(host bits) - 2 (typical IPv4).\n\nSources:\n- Direct URL: https://www.networkkings.org/what-is-subnetting",
+    "confidence": 0.92,
+    "sources": [
+      "Wikipedia: https://en.wikipedia.org/wiki/Subnet",
+      "https://www.rfc-editor.org/rfc/rfc950.txt",
+      "https://www.networkkings.org/what-is-subnetting"
+    ],
+    "updated_on": "2026-01-06"
+  },
+  "subnet mask": {
+    "answer": "SUBNET MASK\n\nDefinition:\n- Subnet Mask # of nets Net.\n\nKey points:\n- This memo does not specify an Internet standard of any kind.\n- Abstract This memo clarifies issues surrounding subnetting IP networks by providing a standard subnet table.\n- This table includes subnetting for Class A, B, and C networks, as well as Network IDs, host ranges and IP broadcast addresses with emphasis on Class C subnets.\n- This memo is intended as an informational companion to Subneting RFC [1] and the Hosts Requirements RFC [2].\n- Introduction The growth of networking since the time of STD 5, RFC 950 and STD 3, RFC 1123 has resulted in larger and more complex network subnetting.\n\nExamples:\n- Example: 192.168.x.x/24 has 256 total addresses (0-255), with usable hosts typically .1 to .254 (depends on context).\n- Example: /26 splits a /24 into 4 subnets (each block size 64).\n\nCommon mistakes:\n- Mistake: confusing the subnet mask with the network address.\n- Mistake: forgetting that network + broadcast addresses are usually not usable host addresses in IPv4.\n\nPractice recognition:\n- Quick check: /24 = 255.255.255.0, /16 = 255.255.0.0, /8 = 255.0.0.0.\n- Quick check: block size = 256 - last mask octet (when the split is in the last octet).\n- Quick check: usable hosts in subnet = 2^(host bits) - 2 (typical IPv4).\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc1878.txt",
+    "confidence": 0.92,
+    "sources": [
+      "https://en.wikipedia.org/wiki/Subnet",
+      "Wikipedia: https://en.wikipedia.org/wiki/Subnet",
+      "https://www.calculator.net/ip-subnet-calculator.html",
+      "https://www.rfc-editor.org/rfc/rfc1878",
+      "https://www.rfc-editor.org/rfc/rfc1878.txt"
+    ]
+  },
+  "subnetting": {
+    "answer": "SUBNETTING\n\nDefinition:\n- The practice of dividing a network into two or more networks is called subnetting.\n\nKey points:\n- A subnet, or subnetwork, is a logical subdivision of an IP network.\n\nExamples:\n- Example: 192.168.x.x/24 has 256 total addresses (0-255), with usable hosts typically .1 to .254 (depends on context).\n- Example: /26 splits a /24 into 4 subnets (each block size 64).\n\nCommon mistakes:\n- Mistake: confusing the subnet mask with the network address.\n- Mistake: forgetting that network + broadcast addresses are usually not usable host addresses in IPv4.\n\nPractice recognition:\n- Quick check: /24 = 255.255.255.0, /16 = 255.255.0.0, /8 = 255.0.0.0.\n- Quick check: block size = 256 - last mask octet (when the split is in the last octet).\n- Quick check: usable hosts in subnet = 2^(host bits) - 2 (typical IPv4).\n\nSources:\n- Wikipedia: https://en.wikipedia.org/wiki/Subnet",
+    "confidence": 0.92,
+    "sources": [
+      "https://www.cloudflare.com/learning/network-layer/what-is-a-subnet/",
+      "https://duckduckgo.com/y.js?ad_domain=amazon.com&ad_provider=bingv7aa&ad_type=txad&click_metadata=MCTjtBjqASgYKlFjpsZT1MeRo1lURZCZ5meg1OLCutJmEUhc-yXSFubcDIyEOWi6CytrIDkp6O3u2R4D_yTcm1f3w37zEO19-Ir-l3WWga88lFfiq4aY7Qp4AeJyf-L6AIk3JwSCFsYzcaz0u4ExM6CT0nTGyINaCoo9RWFdyco.oYHVt48chirErRzPifMyBQ&rut=ce6b17f7b4b5db0ed9fabd80f22fa57782961943cade75c9c54e930158eefe85&u3=https://www.bing.com/aclick?ld=e83q-1bdHZaLqIucTbk433GTVUCUwBg9Di293IXixSsPz2whBiu19QEQ71zGpMs7SAoED6CtdCwfBlD5HER4KDQfkzYqVnaljh59YYm29PyMwdEaANmkT0M7EgIhS0Jeg0OyjqOAVFc5U9LGbKYvXd7v2b_TO0X2GfpRCOuUOsVfBSIyv-Qba3kih9HH-lpAczgyink76mYE6UDvLEChC0iJahP0Q&u=aHR0cHMlM2ElMmYlMmZ3d3cuYW1hem9uLmNvbSUyZnMlMmYlM2ZpZSUzZFVURjglMjZrZXl3b3JkcyUzZGlwJTJic3VibmV0dGluZyUyYndvcmtib29rJTI2aW5kZXglM2RhcHMlMjZ0YWclM2R0eHRzdGRiZ2R0LTIwJTI2cmVmJTNkcGRfc2xfN3hhNTY0eHByMl9iJTI2YWRncnBpZCUzZDEyMzkxNTA4OTAyNDg0MTMlMjZodmFkaWQlM2Q3NzQ0NzA3MTUyNjM0MyUyNmh2bmV0dyUzZHMlMjZodnFtdCUzZGIlMjZodmJtdCUzZGJiJTI2aHZkZXYlM2RjJTI2aHZsb2NpbnQlM2QlMjZodmxvY3BoeSUzZDExMTMzNCUyNmh2dGFyZ2lkJTNka3dkLTc3NDQ3MzY3Nzk1NDg5JTNhbG9jLTE5MCUyNmh5ZGFkY3IlM2Q3OTUwXzEzNjA4MjQ2JTI2bWNpZCUzZDBhYTNiYmU0NzVkMjMzZmI4Y2MyN2FlOGUwNzAyZTcxJTI2bGFuZ3VhZ2UlM2Rlbl9VUyUyNm1zY2xraWQlM2Q2MTUwYjM5M2NmMWIxNmYzZDA0N2RhZjdmNWU3MjcxNQ&rlid=6150b393cf1b16f3d047daf7f5e72715&vqd=4-142529999144525234072803710481876402434&iurl={1}IG=9F11DFC752FC47A3A430B43B4921CBD2&CID=3DA7858C7751651B203A935376DD6461&ID=DevEx,5045.1",
+      "https://duckduckgo.com/y.js?ad_domain=amazon.com&ad_provider=bingv7aa&ad_type=txad&click_metadata=2cFlLmTQUBubdAiZd5ROnlk1HjpwyvQYD3obLgkF9LBNrWh1Xlcz6w8Q9l5lz-dXKuukmGFXnQe8u8V6sRv1YCGQevj19SxB86PvF5ANBgsNdR_Y6jMPPFhazFJwOA8wKKWCw6S_Lis09W-kZIYBEgJndsVyFQl7Budk0e7SkJo.BFAF3bdvP1yloWC5z0-kmg&rut=756182d95508a8b03545421c7dc96b4750689c61e5295754adf1d6198a3e3020&u3=https://www.bing.com/aclick?ld=e80YTtbS26__kxTlrZN5NeUTVUCUzGJgGBaldVPZ6q8oXKquDztexd8SffRegxEV_6kXuul8e7-Ah4GUat1Zpf2sL6KQx54VOCSIa4wVaSQhHNLm9fMf3W7cixARghFKOAcPabcgWbfUmgxo1EXHDVRFQjJfqBw7VhbQ5NKsu-HZJF_cS43Avyks4Dyf5ZyW6AQzn_SJANgItQv6LKFjBNNFSSnu4&u=aHR0cHMlM2ElMmYlMmZ3d3cuYW1hem9uLmNvbSUyZnMlMmYlM2ZpZSUzZFVURjglMjZrZXl3b3JkcyUzZGlwJTJic3VibmV0dGluZyUyYmJvb2slMjZpbmRleCUzZGFwcyUyNnRhZyUzZHR4dHN0ZGJnZHQtMjAlMjZyZWYlM2RwZF9zbF80YnJzb2lmM3BrX2IlMjZhZGdycGlkJTNkMTI0MTM0OTY0NTUwNjc1MSUyNmh2YWRpZCUzZDc3NTg0NDg0Mzg1NDk5JTI2aHZuZXR3JTNkcyUyNmh2cW10JTNkYiUyNmh2Ym10JTNkYmIlMjZodmRldiUzZGMlMjZodmxvY2ludCUzZCUyNmh2bG9jcGh5JTNkMTExMDUyJTI2aHZ0YXJnaWQlM2Rrd2QtNzc1ODQ3NjA0MzQyOTklM2Fsb2MtMTkwJTI2aHlkYWRjciUzZDIwOTU1XzEzNDQ5MjAwJTI2bWNpZCUzZDJjMGYzZmEyMzk3NDM4MjA4ZThmZjdkODMyNTc5MTJkJTI2bGFuZ3VhZ2UlM2Rlbl9VUyUyNm1zY2xraWQlM2RjMDdkNDkwNTEyNGMxZmE4NmRkNzIwNjEyOGIxYjUxZA&rlid=c07d4905124c1fa86dd7206128b1b51d&vqd=4-154505639846965170722597731736024292916&iurl={1}IG=96F2FCA532AF4321A80E02B6417C8B33&CID=29F8B1F8740D62CA13BAA72775D86375&ID=DevEx,5045.1"
+    ],
+    "updated_on": "2025-12-19T21:39:08"
+  },
+  "tcp": {
+    "answer": "TCP\n\nDefinition:\n- This document describes the basic functionality expected in modern TCP implementations and replaces the protocol specification in RFC 793.\n\nKey points:\n- ﻿ Internet Engineering Task Force (IETF) W.\n- TCP is an important transport-layer protocol in the Internet protocol stack, and it has continuously evolved over decades of use and growth of the Internet.\n- Over this time, a number of changes have been made to TCP as it was specified in RFC 793, though these have only been documented in a piecemeal fashion.\n- This document collects and brings those changes together with the protocol specification from RFC 793.\n- This document obsoletes RFC 793, as well as RFCs 879, 2873, 6093, 6429, 6528, and 6691 that updated parts of RFC 793.\n- It updates RFCs 1011 and 1122, and it should be considered as a replacement for the portions of those documents dealing with TCP requirements.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc9293.txt",
+    "confidence": 0.8,
+    "sources": [
+      "https://www.rfc-editor.org/rfc/rfc9293.txt"
+    ]
+  },
+  "tcp vs udp": {
+    "answer": "TCP vs UDP - Research Note\n\nTCP and UDP are transport layer protocols used to deliver data between applications.\n\nTCP:\n- Connection oriented\n- Reliable and ordered delivery\n- Uses acknowledgements and retransmissions\n- Used for web, email, file transfer\n\nUDP:\n- Connectionless\n- No delivery guarantees\n- Lower overhead and faster\n- Used for DNS, streaming, VoIP, gaming\n\nTCP prioritizes reliability. UDP prioritizes speed and simplicity.",
+    "confidence": 0.92
+  },
+  "test topic": {
+    "answer": "this is a test answer",
+    "confidence": 0.95,
+    "sources": [
+      "https://www.examtopics.com/",
+      "https://cakap.com/en/simulation-test/topik/"
+    ],
+    "updated_on": "2026-01-06"
+  },
+  "the date": {
+    "answer": "THE DATE\n\nDefinition:\n- Personal World Clock Set the current time of your favorite locations across time zones.\n\nKey points:\n- DST changes worldwide Time Zones Time Zone Map World map of time zones, accounting for all DST changes in real time.\n- Time Zone Converter Calculate the time difference between places and time zones.\n- Meeting Planner Find the best time to have a meeting across time zones.\n- Event Time Announcer Calculate and share global times for your event.\n- Add Your Own Events Create your own events and add them to our calendar.\n\nSources:\n- Direct URL: https://www.timeanddate.com/",
+    "confidence": 0.8700000000000001,
+    "sources": [
+      "https://www.calendardate.com/todays.htm",
+      "https://www.timeanddate.com/"
+    ]
+  },
+  "the fallout series about": {
+    "answer": "The Fallout series is about exploring a retrofuturistic, post-apocalyptic America after a devastating nuclear war in 2077, focusing on survival, rebuilding, and moral choices in a world blending 1950s culture with advanced atomic tech, where players navigate wastelands, fight mutants, raiders, and deal with warring factions while discovering secrets of the pre-war world and Vault-Tec's experiments.",
+    "confidence": 0.9,
+    "sources": []
+  },
+  "the seattle seahawks record": {
+    "answer": "THE SEATTLE SEAHAWKS RECORD\n\nDefinition:\n- All rights reserved.\n\nKey points:\n- &#xAE; SEAHAWKS, SEAHAWKS LOGO, SPIRIT OF 12, WE ARE 12, BRING ON THE 12, LEGION OF BOOM, 12 and 12S are trademarks of the Seattle Seahawks.\n- It is highly recommended that you use the latest versions of a supported browser in order to receive an optimal viewing experience.\n- The following browsers are supported: Chrome, Edge (v80 and later), Firefox and Safari.\n\nSources:\n- Direct URL: https://www.seahawks.com/team/standings/",
+    "confidence": 0.8700000000000001,
+    "sources": [
+      "https://www.pro-football-reference.com/teams/sea/index.htm",
+      "https://www.seahawks.com/team/standings/"
+    ]
+  },
+  "the temperature in bonney lake, washington": {
+    "answer": "THE TEMPERATURE IN BONNEY LAKE, WASHINGTON\n\nDefinition:\n- Please try another search.\n\nKey points:\n- The major winter storm will continue to impact the Northeast U.S.\n- today with heavy snow as it shifts away from the East Coast.\n- Frigid temperatures will impact the eastern two-thirds of the U.S.\n- this week, and numerous record lows are forecast.\n- Sub-zero lows are expected nearly every morning from the Northern Plains through the Ohio Valley and into the Northeast.\n- Read More > Current conditions at Pierce County-Thun Field (KPLU) Lat: 47.104&deg;N Lon: 122.287&deg;W Elev: 538.0ft.\n\nSources:\n- forecast.weather.gov: https://forecast.weather.gov/MapClick.php?site=SEW&textField1=47.1874&textField2=-122.164",
+    "confidence": 0.5,
+    "sources": [
+      "https://forecast.weather.gov/MapClick.php?site=SEW&textField1=47.1874&textField2=-122.164"
+    ]
+  },
+  "the weather today": {
+    "answer": "THE WEATHER TODAY\n\nDefinition:\n- Please try another search.\n\nKey points:\n- Please select one of the following: Your local forecast office is Seattle, WA Prolonged Extreme Cold; Eastern U.S.\n- Winter Storm Another Arctic blast will surge south across the northern Plains Thursday night, crossing the Midwest and reaching the Gulf Coast Friday night.\n- Confidence continues to increase for significant heavy snow across much of the Southern Appalachians, Carolinas, and southern Mid-Atlantic Friday into Sunday.\n- Read More > Current conditions at Tacoma, Tacoma Narrows Airport (KTIW) Lat: 47.2675&deg;N Lon: 122.57611&deg;W Elev: 315.0ft.\n- New precipitation amounts between a quarter and half of an inch possible.\n- New precipitation amounts between a tenth and quarter of an inch possible.\n\nSources:\n- Direct URL: https://forecast.weather.gov/zipcity.php?inputstring=Tacoma,WA",
+    "confidence": 0.5,
+    "sources": [
+      "https://forecast.weather.gov/zipcity.php?inputstring=Tacoma,WA"
+    ]
+  },
+  "tie breakers like oldest route, lowest router id, lowest neighbor ip": {
+    "answer": "Topic: tie breakers like: oldest route, lowest router id, lowest neighbor ip\nCreated: 2026-01-17T12:58:37.422094\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-26"
+  },
+  "tie breakers like: oldest route, lowest router id, lowest neighbor ip": {
+    "answer": "Topic: tie breakers like: oldest route, lowest router id, lowest neighbor ip\nCreated: 2026-01-17T12:58:37.422094\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-27"
+  },
+  "tls basics": {
+    "answer": "TLS BASICS\n\nDefinition:\n- , B.A.S.I.C.\n\nKey points:\n- For other uses, see Basics (disambiguation) .\n- Later that night, they bonded over a mutual love of The Beatles , 1970s and 1980s cartoon theme songs and old Sierra adventure games.\n- &#91; 4 &#93; Though lacking any real experience with the instrument, Schroeder willingly purchased his first bass guitar, and the trio was born.\n- During this time, the group start performing songs with more complicated three-part harmony.\n- During late 2002 and early 2003, The Basics recorded and released an album called Get Back through MGM Distribution .\n- They began what was to become regular tours of the East and West coasts of Australia.\n\nSources:\n- Direct URL: https://en.wikipedia.org/wiki/The_Basics",
+    "confidence": 0.92,
+    "sources": [
+      "https://www.rfc-editor.org/rfc/rfc8446",
+      "https://www.rfc-editor.org/rfc/rfc8446.txt",
+      "https://en.wikipedia.org/wiki/The_Basics"
+    ]
+  },
+  "udp": {
+    "answer": "UDP\n\nDefinition:\n- UDP Header UDP header is 8 bytes long, followed by the data payload.\n\nKey points:\n- It contains all the essential information needed for transmission.\n- Each port number field is 16 bits, giving a range from 0 to 65535, where port 0 is reserved.\n- Port numbers are used to identify and separate different user requests or processes.\n- UDP Header Field Size Description Source Port 16 bits Identifies the sender’s port number.\n- Destination Port 16 bits Identifies the receiver’s port number.\n\nSources:\n- Direct URL: https://www.geeksforgeeks.org/computer-networks/user-datagram-protocol-udp/",
+    "confidence": 0.92,
+    "sources": [
+      "https://www.rfc-editor.org/rfc/rfc768.txt",
+      "https://www.geeksforgeeks.org/computer-networks/user-datagram-protocol-udp/"
+    ]
+  },
+  "vlan": {
+    "answer": "VLAN (Virtual LAN) - Research Note\n\nA VLAN allows a single physical switch to be divided into multiple logical networks. Devices in different VLANs cannot communicate without routing.\n\nPort types:\n- Access ports carry one VLAN\n- Trunk ports carry multiple VLANs using tagging\n\n802.1Q tagging identifies VLAN traffic on trunk links.\n\nEach VLAN typically maps to its own IP subnet. Inter-VLAN communication requires a router or Layer 3 switch.",
+    "confidence": 0.85
+  },
+  "vlsm": {
+    "answer": "VLSM\n\nDefinition:\n- This memo does not specify an Internet standard of any kind.\n\nKey points:\n- Abstract This memo clarifies issues surrounding subnetting IP networks by providing a standard subnet table.\n- This table includes subnetting for Class A, B, and C networks, as well as Network IDs, host ranges and IP broadcast addresses with emphasis on Class C subnets.\n- This memo is intended as an informational companion to Subneting RFC [1] and the Hosts Requirements RFC [2].\n- Introduction The growth of networking since the time of STD 5, RFC 950 and STD 3, RFC 1123 has resulted in larger and more complex network subnetting.\n\nSources:\n- Direct URL: https://www.rfc-editor.org/rfc/rfc1878.txt",
+    "confidence": 0.92,
+    "sources": [
+      "https://en.wikipedia.org/wiki/Classless_Inter-Domain_Routing",
+      "Wikipedia: https://en.wikipedia.org/wiki/Classless_Inter-Domain_Routing",
+      "https://www.rfc-editor.org/rfc/rfc1878",
+      "https://www.rfc-editor.org/rfc/rfc1878.txt"
+    ]
+  },
+  "vxlan": {
+    "answer": "Topic: vxlan\nCreated: 2026-01-27T20:13:16.941260\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-27"
+  },
+  "warhammer": {
+    "answer": "WARHAMMER\n\nDefinition:\n- If an internal link led you here, you may wish to change the link to point directly to the intended article.\n\nKey points:\n- Text is available under the Creative Commons Attribution-ShareAlike 4.0 License ; additional terms may apply.\n- By using this site, you agree to the Terms of Use and Privacy Policy .\n- Wikipedia® is a registered trademark of the Wikimedia Foundation, Inc.\n\nSources:\n- Direct URL: https://en.wikipedia.org/wiki/Warhammer",
+    "confidence": 0.8700000000000001,
+    "sources": [
+      "https://www.warhammer.com/en-US/home",
+      "https://www.warhammer.com/en-GB/home",
+      "Wikipedia: https://en.wikipedia.org/wiki/Warhammer",
+      "https://en.wikipedia.org/wiki/Warhammer"
+    ]
+  },
+  "what are the fallout video games about": {
+    "answer": "The Fallout series is about exploring a retrofuturistic, post-apocalyptic America after a devastating nuclear war in 2077, focusing on survival, rebuilding, and moral choices in a world blending 1950s culture with advanced atomic tech, where players navigate wastelands, fight mutants, raiders, and deal with warring factions while discovering secrets of the pre-war world and Vault-Tec's experiments.",
+    "confidence": 0.9,
+    "sources": [
+      "https://fallout.fandom.com/wiki/Fallout_series"
+    ]
+  },
+  "what day is it": {
+    "answer": "WHAT DAY IS IT\n\nDefinition:\n- Day .\n\nKey points:\n- See more °F Weather 42 °F Scattered clouds.\n- Become a Supporter Browse our site advert free.\n- Exclusive calendar templates for PDF Calendar.\n\nSources:\n- Direct URL: https://www.timeanddate.com/worldclock/usa/tacoma",
+    "confidence": 0.8700000000000001,
+    "sources": [
+      "https://www.calendardate.com/todays.htm",
+      "https://www.timeanddate.com/worldclock/usa/tacoma"
+    ]
+  },
+  "what is nat": {
+    "answer": "Topic: what is nat\nCreated: 2026-01-17T02:13:32.978418\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-26"
+  },
+  "what time is it": {
+    "answer": "Topic: what time is it\nCreated: 2026-01-27T20:13:16.941385\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
+    "confidence": 0.65,
+    "updated_on": "2026-01-27"
+  },
+  "who are you": {
+    "answer": "WHO ARE YOU\n\nDefinition:\n- Who Are You?\n\nKey points:\n- Subscribe Recent Issue Archive Tests Self Tests Self Tests are all about you.\n- Find out the answers to these questions and more with Psychology Today.\n- Which Jobs Attract \"Dark\" Personalities?\n- Do You Still Believe These Myths About The Mind?\n- Can You Spot Red Flags In A Relationship?\n- Sociopath Test Can You Spot Self-Sabotage?\n\nSources:\n- psychologytoday.com: https://www.psychologytoday.com/us/blog/fixing-families/202108/who-are-you-6-questions-to-help-you-find-out",
+    "confidence": 0.9100000000000001,
+    "sources": [
+      "https://www.youtube.com/watch?v=24wWxeywfZo",
+      "https://www.wikihow.com/Personality-Quiz",
+      "https://www.psychologytoday.com/us/blog/fixing-families/202108/who-are-you-6-questions-to-help-you-find-out"
+    ]
+  },
+  "who are you?": {
+    "answer": "WHO ARE YOU?\n\nDefinition:\n- (album) , a 2008 album by Nico Touches the Walls Who Are You?\n\nKey points:\n- Who Are You also may refer to: Music [ edit ] Who Are You?\n- (2008 TV series) , a South Korean television series Who Are You?\n- (1939 film) , an Italian comedy film Who Are You?\n- (2001 film) , a Portuguese historical drama film Yaare Neenu Cheluve ( lit.\n- If an internal link led you here, you may wish to change the link to point directly to the intended article.\n\nSources:\n- Direct URL: https://en.wikipedia.org/wiki/Who_Are_You_(disambiguation)",
+    "confidence": 0.92,
+    "sources": [
+      "https://genius.com/The-who-who-are-you-lyrics",
+      "https://www.youtube.com/watch?v=24wWxeywfZo",
+      "Wikipedia: https://en.wikipedia.org/wiki/Who_Are_You_(disambiguation)",
+      "https://en.wikipedia.org/wiki/Who_Are_You_(disambiguation)"
+    ]
+  },
+  "your name": {
+    "answer": "Machine Spirit",
+    "confidence": 0.9,
+    "sources": [
+      "https://www.imdb.com/title/tt5311514/",
+      "Wikipedia: https://en.wikipedia.org/wiki/Your_Name"
     ]
   }
 }
