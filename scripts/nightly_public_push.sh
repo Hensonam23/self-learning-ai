@@ -50,6 +50,16 @@ if [ -n "$changed" ]; then
 fi
 
 # If no diff in the public pack, stop
+
+# MS_JSON_NORMALIZE_V1: Normalize JSON (prevents tiny formatting diffs from creating commits)
+python3 - <<'JSONNORM'
+import json
+p="knowledge/public_local_knowledge.json"
+obj=json.load(open(p,"r",encoding="utf-8"))
+open(p,"w",encoding="utf-8").write(json.dumps(obj, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
+print("OK: normalized public_local_knowledge.json")
+JSONNORM
+
 if git diff --quiet -- knowledge/public_local_knowledge.json; then
   echo "OK: no changes in knowledge/public_local_knowledge.json"
   exit 0
