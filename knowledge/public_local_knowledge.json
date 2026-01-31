@@ -246,7 +246,7 @@
   "as number": {
     "answer": "Topic: as number\nCreated: 2026-01-17T08:13:35.445205\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
     "confidence": 0.65,
-    "updated_on": "2026-01-29"
+    "updated_on": "2026-01-30"
   },
   "autonomous system number (asn)": {
     "answer": "AUTONOMOUS SYSTEM NUMBER (ASN)\n\nDefinition:\n- An Autonomous System (AS) is a group of one or more IP prefixes (lists of IP addresses accessible on a network) run by one or more network operators that maintain a single, clearly-defined routing policy.\n\nKey points:\n- There are two different formats to represent ASNs: 2-byte and 4-byte .\n- This format provides for 65,536 ASNs (0 to 65535).\n- From these ASNs, the Internet Assigned Numbers Authority (IANA) reserved 1,023 of them (64512 to 65534) for private use.\n- This format provides for 2 32 or 4,294,967,296 ASNs (0 to 4294967295).\n- IANA reserved a block of 94,967,295 ASNs (4200000000 to 4294967294) for private use.\n- Up until the Internet Engineering Task Force (IETF) proposed a gradual transition to 4-byte ASNs in 2007, all ASNs were 2-byte.\n\nSources:\n- arin.net: https://www.arin.net/resources/guide/asn/",
@@ -538,12 +538,12 @@
   "hello": {
     "answer": "Topic: hello\nCreated: 2026-01-16T21:03:30.878862\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
     "confidence": 0.65,
-    "updated_on": "2026-01-29"
+    "updated_on": "2026-01-30"
   },
   "help": {
     "answer": "Topic: help\nCreated: 2026-01-17T02:13:32.978336\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
     "confidence": 0.65,
-    "updated_on": "2026-01-29"
+    "updated_on": "2026-01-30"
   },
   "highest local preference (preferred exit from your as)": {
     "answer": "Topic: highest local preference (preferred exit from your as)\nCreated: 2026-01-17T12:58:37.421765\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
@@ -780,7 +780,7 @@
   "ram": {
     "answer": "Topic: ram\nCreated: 2026-01-17T02:13:32.978378\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
     "confidence": 0.65,
-    "updated_on": "2026-01-29"
+    "updated_on": "2026-01-30"
   },
   "recursive vs authoritative dns": {
     "answer": "RECURSIVE VS AUTHORITATIVE DNS\n\nDefinition:\n- Recursive: The Difference Between DNS Server Types Authoritative DNS November 10, 2023 Vercara > Resources > Blog > Authoritative vs.\n\nKey points:\n- This file mapped hostnames to IP addresses.\n- However, as networks grew, managing the host file across all computers became unmanageable.\n- To address this issue, the Domain Name System (DNS) was created as a scalable solution.\n- Today, DNS is one of the fundamental technologies that powers the Internet.\n- DNS is a distributed database and network protocol that converts human-readable network locations to machine-readable Internet Protocol (IP) addresses.\n\nExamples:\n- Example: A record maps a name to an IPv4 address.\n- Example: CNAME is an alias pointing one name to another name.\n\nCommon mistakes:\n- Mistake: assuming DNS changes apply instantly (caching/TTL can delay).\n- Mistake: mixing up authoritative vs recursive DNS roles.\n\nPractice recognition:\n- Quick check: if a name resolves sometimes but not others, suspect caching/TTL or split-horizon DNS.\n\nSources:\n- Direct URL: https://vercara.digicert.com/resources/authoritative-vs-recursive-the-difference-between-dns-server-types",
@@ -807,7 +807,7 @@
   "route selection": {
     "answer": "Topic: route selection\nCreated: 2026-01-17T02:13:32.978240\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
     "confidence": 0.65,
-    "updated_on": "2026-01-29"
+    "updated_on": "2026-01-30"
   },
   "routing longest prefix match": {
     "answer": "ROUTING LONGEST PREFIX MATCH\n\nDefinition:\n- Solved: Longest prefix match - Cisco Community Heads Up : The post you are writing will appear in a public forum.\n\nKey points:\n- Please ensure all content is appropriate for public consumption.\n- Review the employee guidelines for the community here .\n- To totally explain it simply, the longest prefix match is a matching address within a subnet using the least amount of addresses.\n- the /30 subnet will have be said to be a closer match but this is more-so in terms of binary.\n- An address of 192.168.x.x would totally be a network address for a /30 subnet but it would be a usable address for a /24 subnet.\n\nSources:\n- community.cisco.com: https://community.cisco.com/t5/routing/longest-prefix-match/td-p/4794030",
@@ -924,7 +924,7 @@
     ]
   },
   "the weather today": {
-    "answer": "THE WEATHER TODAY\n\nDefinition:\n- Please try another search.\n\nKey points:\n- Please select one of the following: Your local forecast office is Seattle, WA Prolonged Extreme Cold; Eastern U.S.\n- Winter Storm A powerful Arctic blast will bring dangerously cold, record low temperatures to the Gulf Coast, upper Ohio Valley, Mid-Atlantic, and Southeast U.S.\n- Read More > Current conditions at Tacoma, Tacoma Narrows Airport (KTIW) Lat: 47.2675&deg;N Lon: 122.57611&deg;W Elev: 315.0ft.\n- South wind around 5 mph becoming calm in the evening.\n- New precipitation amounts of less than a tenth of an inch possible.\n- New precipitation amounts between a tenth and quarter of an inch possible.\n\nSources:\n- Direct URL: https://forecast.weather.gov/zipcity.php?inputstring=Tacoma,WA",
+    "answer": "THE WEATHER TODAY\n\nDefinition:\n- Please try another search.\n\nKey points:\n- Please select one of the following: Your local forecast office is Seattle, WA Another Arctic Blast in the East; Eastern U.S.\n- Winter Storm A powerful Arctic blast will bring dangerously cold, record low temperatures to the upper Ohio Valley, Mid-Atlantic, Gulf Coast and Southeast U.S.\n- A rapidly deepening storm will produce widespread heavy snow and wind from the southern Appalachians across the Carolinas and southern Virginia into Sunday.\n- Storm-force winds and coastal flooding will be possible along the East Coast.\n- Read More > Current conditions at Tacoma, Tacoma Narrows Airport (KTIW) Lat: 47.2675&deg;N Lon: 122.57611&deg;W Elev: 315.0ft.\n- South southwest wind around 6 mph becoming calm in the evening.\n\nSources:\n- Direct URL: https://forecast.weather.gov/zipcity.php?inputstring=Tacoma,WA",
     "confidence": 0.5,
     "sources": [
       "https://forecast.weather.gov/zipcity.php?inputstring=Tacoma,WA"
@@ -1014,7 +1014,7 @@
   "what is nat": {
     "answer": "Topic: what is nat\nCreated: 2026-01-17T02:13:32.978418\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
     "confidence": 0.65,
-    "updated_on": "2026-01-29"
+    "updated_on": "2026-01-30"
   },
   "what time is it": {
     "answer": "Topic: what time is it\nCreated: 2026-01-27T20:13:16.941385\n\nGoal:\n- Write a better answer for this topic in your own words.\n\nGood sources / key facts:\n- \n\nMy improved answer (paste below):\n-",
