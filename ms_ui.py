@@ -20,6 +20,9 @@ BASE_DIR = Path(__file__).resolve().parent
 REPO_DIR = Path(os.environ.get("MS_REPO_DIR", str(BASE_DIR))).resolve()
 
 API_BASE = (os.environ.get("MS_API_BASE", "http://127.0.0.1:8010") or "http://127.0.0.1:8010").rstrip("/")
+PUBLIC_API_BASE = (os.environ.get("MS_PUBLIC_API_BASE", "") or "").rstrip("/")
+PUBLIC_API_DISPLAY = (os.environ.get('MS_PUBLIC_API_DISPLAY', '/api') or '/api')
+PUBLIC_API_DISPLAY = (PUBLIC_API_BASE or "/api")
 SECRETS_FILE = Path(os.path.expanduser("~/.config/machinespirit/secrets.env"))
 
 app = FastAPI(title=APP_NAME, version=VERSION)
@@ -444,7 +447,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     <div class="topbar">
       <div class="brand">
         <div class="title">MachineSpirit UI</div>
-        <div class="sub">LAN chat • API: __API_BASE__</div>
+        <div class="sub">LAN chat • API: {PUBLIC_API_DISPLAY}</div>
       </div>
 
       <div class="actions">
